@@ -1567,6 +1567,50 @@ the config is written, setup removes the container and settings folder it
 created in that run, and only those. The container keeps running after setup
 (about 105 MB of memory).
 
+When the container is stopped, the first search that uses SearXNG starts it
+again, after the usual search consent (which mentions the container and its
+memory) and, for unattended research, only with `unattended = true`. Before
+starting it LocalPilot checks that Docker still uses the recorded endpoint and
+that the container has the recorded ID and LocalPilot's label; the start is
+recorded in the setup audit log first, and the search waits up to 60 seconds for
+SearXNG to answer.
+
+#### `localpilot search status|start|stop|update|remove`
+
+- `status` only reads: the container, its image (and whether `update` would
+  move it to a newer pinned image), the address, Docker, whether it runs and
+  answers, its enabled engines, and whether the config uses it.
+- `start` and `stop` start or stop the recorded container (`stop` frees its
+  memory).
+- `update` re-creates SearXNG from the image this version pins, on a free
+  port, in stages: the settings folder is copied for the new container (the
+  running one keeps its own), the new container is created, recorded, started,
+  must answer and pass the search bridge check; only then does
+  `[search.managed.searxng]` switch to it, and only then are the old container
+  and its settings folder removed. If anything fails before the switch, the new
+  container and the copy are removed and SearXNG stays as it was.
+- An update that was interrupted is resolved by the next `update`, as its own
+  step: it shows what it will remove and asks first. It finishes the update when
+  the table in effect is exactly the one written for the new container, and
+  undoes it when the table is exactly the one for the old container. Otherwise
+  (the table was changed, or the config cannot be read) it changes nothing.
+  Until the update is resolved, searches refuse to start SearXNG.
+- `remove` removes the `[search.managed.searxng]` table if it is still exactly
+  the one LocalPilot wrote, then the recorded containers, their settings folders
+  and the record. A container whose ID or label does not match, or a table
+  changed by hand, is reported and left.
+
+LocalPilot keeps the exact `[search.managed.searxng]` table it wrote in its
+record. `update` and `remove` change the table only while it still reads
+exactly so, and they check this again under the config lock right before the
+write. A hand edit made after the preview is therefore kept.
+
+Every command except `status` needs a person at a terminal, shows the exact
+Docker commands, asks first, records each step in
+`~/.localpilot/search/setup-audit.log` before it happens, refuses when Docker
+now uses another endpoint than the recorded one, and waits for no other setup or
+search command (one lock covers them all).
+
 `uvx`
 and `npx` are looked up in the absolute entries of `PATH` only (never the
 working directory) and written with their full path, so a later change of which

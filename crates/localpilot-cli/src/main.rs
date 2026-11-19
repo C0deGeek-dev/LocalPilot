@@ -91,6 +91,7 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod search_backend;
+mod search_lifecycle;
 mod search_setup;
 mod searxng;
 mod self_review_cmd;
@@ -958,6 +959,19 @@ enum SearchAction {
     /// where queries go, shows the exact program and config it will write, and
     /// asks before running anything. Needs a person at a terminal.
     Setup,
+    /// Show the local SearXNG instance setup created: its container, Docker,
+    /// whether it runs and answers, and whether the config uses it. Only reads.
+    Status,
+    /// Start the local SearXNG instance (it also starts at the next search).
+    Start,
+    /// Stop the local SearXNG instance to free its memory.
+    Stop,
+    /// Re-create the local SearXNG instance from the image this version pins,
+    /// on a free port; the old one is removed only after the new one works.
+    Update,
+    /// Remove the local SearXNG instance: its container, its config entry, its
+    /// settings folder and LocalPilot's record of it.
+    Remove,
 }
 
 /// `localpilot remote` actions.
@@ -2234,6 +2248,21 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         },
         Command::Search { action } => match action {
             SearchAction::Setup => search_setup::run_command().await?,
+            SearchAction::Status => {
+                search_lifecycle::run_command(search_lifecycle::Action::Status).await?
+            }
+            SearchAction::Start => {
+                search_lifecycle::run_command(search_lifecycle::Action::Start).await?
+            }
+            SearchAction::Stop => {
+                search_lifecycle::run_command(search_lifecycle::Action::Stop).await?
+            }
+            SearchAction::Update => {
+                search_lifecycle::run_command(search_lifecycle::Action::Update).await?
+            }
+            SearchAction::Remove => {
+                search_lifecycle::run_command(search_lifecycle::Action::Remove).await?
+            }
         },
         Command::Remote { action } => match action {
             RemoteAction::Gateway { action, background } => match action {

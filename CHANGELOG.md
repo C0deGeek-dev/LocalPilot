@@ -32,6 +32,14 @@ is SemVer-stable; the configuration schema stability policy is in
   has enabled and that queries leave from your IP address, and removes what it
   created if anything fails before the config is written. Podman and Docker
   that runs only inside WSL are reported but not used yet.
+- When the local SearXNG container is stopped, the first search that uses it
+  starts it again (checked as LocalPilot's, recorded first, up to 60 seconds to
+  answer). New commands `localpilot search status|start|stop|update|remove`
+  manage it; `update` gives the new container its own copy of the settings and
+  switches to it only after it answers and passes the bridge check. An
+  interrupted update is finished or undone only after you confirm it, and only
+  when the config table is exactly one LocalPilot wrote. Config edits by
+  `update` and `remove` leave a hand-edited table alone.
 - The full-screen session offers that setup when a search finds no backend:
   after a chat turn whose `web_search` found none, and before `/research`. Only
   for a prompt typed at this terminal, never in incognito; keys stay in the

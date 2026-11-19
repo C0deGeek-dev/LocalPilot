@@ -134,6 +134,9 @@ pub(crate) enum ManagedStartError {
     StartFailed,
     /// The designated tool is missing or does not take one `query` string.
     Incompatible(String),
+    /// The engine it searches (a local SearXNG) is not LocalPilot's, did not
+    /// start or does not answer.
+    EngineNotReady(String),
 }
 
 impl ManagedStartError {
@@ -144,6 +147,7 @@ impl ManagedStartError {
             Self::AuditFailed => "search-launch-refused-audit",
             Self::StartFailed => "search-launch-failed",
             Self::Incompatible(_) => "search-launch-refused-schema",
+            Self::EngineNotReady(_) => "search-launch-refused-engine",
         }
     }
 
@@ -162,6 +166,9 @@ impl ManagedStartError {
             Self::Incompatible(reason) => {
                 format!("the search backend {server} cannot be used: {reason}")
             }
+            Self::EngineNotReady(reason) => {
+                format!("the search backend {server} was not started: {reason}")
+            }
         }
     }
 }
@@ -174,6 +181,7 @@ pub(crate) async fn start_managed(
     spec: &SearchSpec,
     managed: &ManagedSearchBackend,
     launcher: &Launcher,
+    ensure_engine: bool,
     audit: impl FnOnce(&str, &str) -> bool,
 ) -> Result<Arc<dyn Transport>, ManagedStartError> {
     if !managed.identity_matches() {
@@ -181,6 +189,11 @@ pub(crate) async fn start_managed(
     }
     if !audit("search-launch", &spec.launch_detail()) {
         return Err(ManagedStartError::AuditFailed);
+    }
+    if ensure_engine && managed.tier == localpilot_config::SearchTier::SelfHosted {
+        ensure_engine_running(managed)
+            .await
+            .map_err(ManagedStartError::EngineNotReady)?;
     }
     let handshake = Duration::from_secs(managed.handshake_timeout_secs);
     let transport = tokio::time::timeout(
@@ -200,6 +213,44 @@ pub(crate) async fn start_managed(
     .map_err(|_| ManagedStartError::Incompatible("it did not list its tools".into()))?;
     check_search_schema(&advertised, &spec.tool).map_err(ManagedStartError::Incompatible)?;
     Ok(transport)
+}
+
+/// Before a self-hosted backend's bridge starts: its SearXNG container is
+/// verified as LocalPilot's and started if it is stopped.
+async fn ensure_engine_running(managed: &ManagedSearchBackend) -> Result<(), String> {
+    let port = managed
+        .env
+        .get("SEARXNG_URL")
+        .and_then(|item| match item {
+            localpilot_config::McpEnvEntry::Plain(url) => {
+                url.rsplit(':').next()?.parse::<u16>().ok()
+            }
+            localpilot_config::McpEnvEntry::Object(_) => None,
+        })
+        .ok_or_else(|| "its SearXNG address is not a local port".to_string())?;
+    let state_dir = crate::search_setup::state_dir()
+        .ok_or_else(|| "there is no home folder for SearXNG's record".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        crate::searxng::ensure_running(
+            &crate::searxng::LocalHost,
+            &state_dir,
+            port,
+            &|event, detail| crate::search_setup::audit_searxng(&state_dir, event, detail),
+        )
+    })
+    .await
+    .map_err(|_| "starting SearXNG was interrupted".to_string())?
+}
+
+/// What a consent question adds for a backend LocalPilot also starts an
+/// engine for.
+pub(crate) const fn start_note(tier: localpilot_config::SearchTier) -> &'static str {
+    match tier {
+        localpilot_config::SearchTier::SelfHosted => {
+            " If its SearXNG container is stopped, LocalPilot starts it first; it uses about 105 MB of memory while it runs (localpilot search stop frees it)."
+        }
+        _ => "",
+    }
 }
 
 /// Whether `tool` is advertised and takes exactly what LocalPilot sends: a
@@ -362,7 +413,7 @@ pub(crate) mod tests {
         tampered_spec.launch = tampered.server();
         let mut audited = Vec::new();
         assert_eq!(
-            start_managed(&tampered_spec, &tampered, &launcher, |d, _| {
+            start_managed(&tampered_spec, &tampered, &launcher, false, |d, _| {
                 audited.push(d.to_string());
                 true
             })
@@ -372,19 +423,21 @@ pub(crate) mod tests {
         );
         assert!(audited.is_empty(), "nothing recorded as a launch");
         assert_eq!(
-            start_managed(&spec, &managed, &launcher, |_, _| false)
+            start_managed(&spec, &managed, &launcher, false, |_, _| false)
                 .await
                 .err(),
             Some(ManagedStartError::AuditFailed)
         );
         assert_eq!(starts.load(Ordering::SeqCst), 0);
         let mut details = Vec::new();
-        assert!(start_managed(&spec, &managed, &launcher, |d, detail| {
-            details.push((d.to_string(), detail.to_string()));
-            true
-        })
-        .await
-        .is_ok());
+        assert!(
+            start_managed(&spec, &managed, &launcher, false, |d, detail| {
+                details.push((d.to_string(), detail.to_string()));
+                true
+            })
+            .await
+            .is_ok()
+        );
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(details[0].0, "search-launch");
         assert!(details[0]
@@ -406,7 +459,7 @@ pub(crate) mod tests {
             launch: managed.server(),
             managed: Some(managed.clone()),
         };
-        let error = start_managed(&spec, &managed, &launcher, |_, _| true)
+        let error = start_managed(&spec, &managed, &launcher, false, |_, _| true)
             .await
             .err()
             .unwrap();

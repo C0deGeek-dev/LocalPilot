@@ -393,10 +393,13 @@ impl ChatWeb {
                  to the same server without asking again. The server is a program on your \
                  computer that makes its own network requests; the web deny list does not \
                  apply to what it contacts. Each search is recorded (server and result \
-                 count, not the words) in {}.",
+                 count, not the words) in {}.{}",
                 backend.server,
                 backend.tool,
-                self.audit_log.display()
+                self.audit_log.display(),
+                backend.managed.as_ref().map_or("", |managed| {
+                    crate::search_backend::start_note(managed.tier)
+                })
             ),
         };
         if self.consent.approve(&question).await {
@@ -432,6 +435,7 @@ impl ChatWeb {
                 backend,
                 managed,
                 &self.launcher,
+                true,
                 |decision, detail| self.search_audit(backend, &format!("chat-{decision}"), detail),
             )
             .await

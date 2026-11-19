@@ -1337,9 +1337,10 @@ fn managed_launch_question(
         "Allow the search backend {} for this research run? It is a program on this \
          computer that starts at the first search; {}. Each research sub-question is sent \
          to it, with secrets removed; nothing from your files is sent. This answer covers \
-         this run only.",
+         this run only.{}",
         spec.label(),
-        tier.destinations()
+        tier.destinations(),
+        crate::search_backend::start_note(tier)
     )
 }
 
@@ -1544,6 +1545,7 @@ impl DesignatedSearchTool {
             &managed.spec,
             &managed.managed,
             &managed.launcher,
+            true,
             |decision, detail| {
                 append_audit(
                     audit_log,

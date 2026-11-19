@@ -201,12 +201,12 @@ impl Backend {
 }
 
 /// Where the bridge finds SearXNG.
-fn searxng_url(port: u16) -> String {
+pub(crate) fn searxng_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
 /// Point a SearXNG entry at `port`, with its launch identity recomputed.
-fn at_port(entry: &mut ManagedSearchBackend, port: u16) {
+pub(crate) fn at_port(entry: &mut ManagedSearchBackend, port: u16) {
     entry.env.insert(
         "SEARXNG_URL".to_string(),
         McpEnvEntry::Plain(searxng_url(port)),
@@ -344,6 +344,11 @@ fn audit_path(state_dir: &Path) -> PathBuf {
     state_dir.join("setup-audit.log")
 }
 
+/// Append a SearXNG record to the setup audit log; whether it was written.
+pub(crate) fn audit_searxng(state_dir: &Path, event: &str, detail: &str) -> bool {
+    audit(state_dir, event, Backend::SearXng, detail)
+}
+
 /// Append one record; no record, no step.
 fn audit(state_dir: &Path, event: &str, backend: Backend, detail: &str) -> bool {
     use std::io::Write as _;
@@ -449,7 +454,7 @@ fn entry_table(entry: &ManagedSearchBackend) -> toml_edit::Table {
 }
 
 /// Put \`entry\` at `[search.managed.<id>]`, replacing what was there.
-fn place(
+pub(crate) fn place(
     document: &mut toml_edit::DocumentMut,
     id: &str,
     entry: &ManagedSearchBackend,
@@ -734,8 +739,9 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         launch: entry.server(),
         managed: Some(entry.clone()),
     };
+    // SearXNG was started just above, under setup's own lock.
     let started =
-        crate::search_backend::start_managed(&spec, &entry, &s.launcher, |_, _| true).await;
+        crate::search_backend::start_managed(&spec, &entry, &s.launcher, false, |_, _| true).await;
     match started {
         Ok(transport) => drop(transport),
         Err(error) => {
@@ -778,6 +784,17 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     // 9. One locked edit, then read back what is in effect.
     if let Some(outcome) = halted(s, backend, alias.as_deref(), made.as_ref(), "write") {
         return outcome;
+    }
+    // The record names the exact table first: later commands change the
+    // config only while it still reads so.
+    if let Some(owned) = made.as_ref().and_then(|made| made.owned.as_ref()) {
+        let mut owned = owned.clone();
+        owned.entry = Some(entry.clone());
+        if let Err(reason) = searxng::save_owned(&s.state_dir, &owned) {
+            audit(&s.state_dir, "setup-failed", backend, "at=record");
+            let left = left_behind(s, backend, alias.as_deref(), made.as_ref());
+            return stop(s, &format!("{reason}; the config was not changed{left}"));
+        }
     }
     let id = backend.id();
     match (s.write)(s.config_path.as_deref(), &|document| {
@@ -1082,13 +1099,15 @@ fn searxng_up(
         if let Some(outcome) = halted(s, backend, None, Some(&made), "container") {
             return Err(outcome);
         }
-        if let Some(seen) = searxng::inspect(s.host, &planned.engine, &searxng::container_name()) {
+        if let Some(seen) =
+            searxng::inspect(s.host, &planned.engine, &searxng::container_name(port))
+        {
             return Err(fail(
                 &made,
                 "container",
                 &format!(
                     "a container named {} ({}) already exists; setup never adopts or replaces a container",
-                    searxng::container_name(),
+                    searxng::container_name(port),
                     searxng::short(&seen.id)
                 ),
             ));
@@ -1114,10 +1133,13 @@ fn searxng_up(
             route: planned.engine.route.clone(),
             endpoint: planned.engine.endpoint.clone(),
             container_id: id.clone(),
-            container_name: searxng::container_name(),
+            container_name: searxng::container_name(port),
             image: searxng::IMAGE.to_string(),
             port,
             settings_dir: planned.dir.clone(),
+            entry: None,
+            pending: None,
+            retired: None,
         };
         made.owned = Some(owned.clone());
         audit(
@@ -1627,7 +1649,7 @@ pub(crate) async fn run_command() -> anyhow::Result<()> {
 }
 
 /// `~/.localpilot/search`.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     crate::server_devices::user_devices_dir()
         .and_then(|devices| devices.parent().map(|home| home.join("search")))
 }
@@ -1639,7 +1661,7 @@ fn random_suffix() -> Option<String> {
     Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-struct Terminal;
+pub(crate) struct Terminal;
 
 fn read_line() -> Option<String> {
     let mut line = String::new();
@@ -2666,6 +2688,8 @@ mod tests {
             entry.env.get("SEARXNG_URL"),
             Some(&McpEnvEntry::Plain("http://127.0.0.1:8888".to_string()))
         );
+        // The record names exactly the table that is in effect.
+        assert_eq!(owned.entry.as_ref(), Some(entry));
         let audit = audit_text(&home);
         for event in [
             "setup-start",

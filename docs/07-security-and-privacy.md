@@ -943,7 +943,18 @@ construction:
   only. The consent says that SearXNG forwards each query to its enabled engines
   from your IP address and that a local instance is not anonymous. Podman, and
   Docker that runs only inside WSL, are reported and not used until their
-  loopback-only publishing has been checked.
+  loopback-only publishing has been checked. A search starts a stopped
+  container only after its consent question (which names the container and its
+  memory), only when Docker still uses the recorded endpoint and the container
+  still has the recorded ID and label, and only once the start is recorded.
+  `localpilot search start|stop|update|remove` follow the same rules, need a
+  person at a terminal and ask first; `status` only reads. They change the
+  `[search.managed.searxng]` table only while it is exactly the one LocalPilot
+  recorded, checked again under the config lock, so a hand edit is never
+  overwritten or removed. A staged update mounts its own copy of the settings
+  folder, so a new image cannot change the running container's settings. An
+  interrupted update is resolved only after confirmation, and only when the
+  table in effect proves which container is live.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
   search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag

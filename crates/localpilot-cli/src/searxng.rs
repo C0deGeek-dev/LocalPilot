@@ -149,13 +149,15 @@ impl Engine {
                     wsl.display().to_string(),
                     "-d".to_string(),
                     distro.clone(),
-                    "--".to_string(),
+                    "--exec".to_string(),
                     "env".to_string(),
                 ];
                 for variable in ENDPOINT_VARIABLES {
                     argv.push("-u".to_string());
                     argv.push(variable.to_string());
                 }
+                // --exec runs the program itself, not through the distribution's
+                // shell, so arguments (Windows paths, templates) arrive as given.
                 argv.push("docker".to_string());
                 argv
             }
@@ -226,10 +228,9 @@ pub(crate) fn detect(host: &dyn Host, find: &dyn Fn(&str) -> Option<PathBuf>) ->
     if host.windows() {
         if let Some(wsl) = find("wsl") {
             if !WSL_ENABLED {
-                return Found::Unavailable(format!(
-                    "No Docker on the Windows PATH. Docker running only inside WSL is not enabled yet in this version (that its port stays on this computer is still being checked). {}",
-                    install_guidance()
-                ));
+                return Found::Unavailable(
+                    "No Docker on the Windows PATH, and Docker running only inside WSL is not enabled yet in this version (that its port stays on this computer is still being checked). To use SearXNG now, install Docker Desktop (https://docs.docker.com/desktop/), then run localpilot search setup again. LocalPilot never installs it.".to_string(),
+                );
             }
             return wsl_engines(host, &wsl);
         }
@@ -258,7 +259,7 @@ fn wsl_engines(host: &dyn Host, wsl: &Path) -> Found {
             wsl.display().to_string(),
             "-d".to_string(),
             distro.to_string(),
-            "--".to_string(),
+            "--exec".to_string(),
             "docker".to_string(),
         ];
         let route = Route::Wsl {
@@ -344,6 +345,126 @@ fn resolve(host: &dyn Host, route: Route, prefix: Vec<String>) -> Result<Engine,
     }
 }
 
+/// The engine on `route` as it resolves now, checked like at setup.
+pub(crate) fn resolve_route(host: &dyn Host, route: &Route) -> Result<Engine, String> {
+    if matches!(route, Route::Wsl { .. }) && !WSL_ENABLED {
+        return Err("Docker inside WSL is not enabled in this version of LocalPilot".to_string());
+    }
+    let prefix = match route {
+        Route::Path { program } => vec![program.display().to_string()],
+        Route::Wsl { wsl, distro } => vec![
+            wsl.display().to_string(),
+            "-d".to_string(),
+            distro.clone(),
+            "--exec".to_string(),
+            "docker".to_string(),
+        ],
+    };
+    resolve(host, route.clone(), prefix)
+}
+
+/// The recorded instance's engine, refused when Docker now points anywhere
+/// but the recorded endpoint.
+pub(crate) fn recorded_engine(host: &dyn Host, owned: &Owned) -> Result<Engine, String> {
+    let engine = resolve_route(host, &owned.route)?;
+    if engine.endpoint != owned.endpoint {
+        return Err(format!(
+            "Docker now uses {}, not {} where SearXNG was set up; LocalPilot does not touch SearXNG there",
+            engine.endpoint, owned.endpoint
+        ));
+    }
+    Ok(engine)
+}
+
+/// The recorded container, checked: the same ID, with LocalPilot's label.
+pub(crate) fn owned_container(
+    host: &dyn Host,
+    engine: &Engine,
+    owned: &Owned,
+) -> Result<Seen, String> {
+    let seen = inspect(host, engine, &owned.container_id).ok_or_else(|| {
+        format!(
+            "the SearXNG container {} is gone; run localpilot search remove, then localpilot search setup",
+            short(&owned.container_id)
+        )
+    })?;
+    if seen.id != owned.container_id || !seen.ours {
+        return Err(format!(
+            "the container {} is not the one LocalPilot created; LocalPilot does not touch it",
+            short(&owned.container_id)
+        ));
+    }
+    Ok(seen)
+}
+
+/// Make sure the recorded SearXNG runs and answers on `port` before a search:
+/// verified ownership, the start recorded first, then a bounded liveness wait.
+/// `audit` appends a setup audit record and says whether it was written.
+pub(crate) fn ensure_running(
+    host: &dyn Host,
+    state_dir: &Path,
+    port: u16,
+    audit: &dyn Fn(&str, &str) -> bool,
+) -> Result<(), String> {
+    let _lock = lock(state_dir)?;
+    let owned = load_owned(state_dir).ok_or_else(|| {
+        "SearXNG's record is missing; run localpilot search setup again".to_string()
+    })??;
+    if owned.unfinished() {
+        return Err(
+            "an update of SearXNG did not finish; run localpilot search update".to_string(),
+        );
+    }
+    if owned.port != port {
+        return Err(format!(
+            "the config points at port {port} but SearXNG was set up on port {}; run localpilot search setup again",
+            owned.port
+        ));
+    }
+    let engine = recorded_engine(host, &owned)?;
+    let seen = owned_container(host, &engine, &owned)?;
+    if !seen.running {
+        if !audit(
+            "searxng-start",
+            &format!("container={} reason=search", owned.container_id),
+        ) {
+            return Err(
+                "the start of SearXNG could not be recorded, so it was not started".to_string(),
+            );
+        }
+        let started = start(host, &engine, &owned.container_id);
+        audit(
+            "searxng-start-result",
+            &format!(
+                "container={} result={}",
+                owned.container_id,
+                if started == Started::Yes {
+                    "started"
+                } else {
+                    "failed"
+                }
+            ),
+        );
+        match started {
+            Started::Yes => {}
+            Started::PortTaken => {
+                return Err(format!(
+                    "SearXNG could not start: port {port} is taken by something else; run localpilot search start to choose another"
+                ))
+            }
+            Started::No(reason) => return Err(format!("SearXNG could not start ({reason})")),
+        }
+    }
+    if wait_live(host, port, LIVE_WAIT, &|| false) {
+        Ok(())
+    } else {
+        Err(format!(
+            "SearXNG did not answer on 127.0.0.1:{port} within {} seconds",
+            LIVE_WAIT.as_secs()
+        ))
+    }
+}
+
 /// A daemon socket on this computer: a Unix socket by absolute path, or a
 /// named pipe on the local machine.
 pub(crate) fn local_endpoint(endpoint: &str) -> bool {
@@ -385,11 +506,14 @@ fn new_enough(version: &str, min: (u32, u32, u32)) -> Option<bool> {
     }
 }
 
-/// The container's name: the image digest's first twelve hex digits make a
-/// staged update's container distinct from the running one.
-pub(crate) fn container_name() -> String {
+/// The container's name: the image digest's first twelve hex digits and the
+/// port, so a staged update's container never shares the running one's name.
+pub(crate) fn container_name(port: u16) -> String {
     let digest = IMAGE.rsplit(':').next().unwrap_or_default();
-    format!("localpilot-searxng-{}", &digest[..digest.len().min(12)])
+    format!(
+        "localpilot-searxng-{}-{port}",
+        &digest[..digest.len().min(12)]
+    )
 }
 
 /// `docker create` for the pinned image, published on loopback only.
@@ -397,7 +521,7 @@ pub(crate) fn create_args(port: u16, mount: &str) -> Vec<String> {
     vec![
         "create".to_string(),
         "--name".to_string(),
-        container_name(),
+        container_name(port),
         "--label".to_string(),
         format!("{LABEL}={LABEL_VALUE}"),
         "--restart".to_string(),
@@ -509,27 +633,76 @@ pub(crate) fn remove_settings(dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("{} could not be removed ({error})", dir.display()))
 }
 
+/// Whether a settings folder carries LocalPilot's marker.
+pub(crate) fn settings_ours(dir: &Path) -> bool {
+    dir.join(MARKER).exists()
+}
+
+/// Copy LocalPilot's settings folder into a new folder, so a staged container
+/// never shares (or changes) the running one's. A partial copy is removed.
+pub(crate) fn copy_settings(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.join(MARKER).exists() {
+        return Err(format!(
+            "{} is not LocalPilot's settings folder",
+            from.display()
+        ));
+    }
+    std::fs::create_dir(to)
+        .map_err(|error| format!("{} could not be created ({error})", to.display()))?;
+    if let Err(error) = copy_tree(from, to) {
+        let _ = std::fs::remove_dir_all(to);
+        return Err(format!(
+            "the settings could not be copied to {} ({error})",
+            to.display()
+        ));
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// The path Docker mounts the settings folder from: as is, or translated into
 /// the WSL distribution.
 pub(crate) fn mount_path(host: &dyn Host, engine: &Engine, dir: &Path) -> Result<String, String> {
     match &engine.route {
         Route::Path { .. } => Ok(dir.display().to_string()),
         Route::Wsl { wsl, distro } => {
+            // A folder not made yet is found through its parent.
+            let (known, name) = match (dir.exists(), dir.parent(), dir.file_name()) {
+                (false, Some(parent), Some(name)) => (parent, Some(name.to_string_lossy())),
+                _ => (dir, None),
+            };
             let ran = host.run(
                 &[
                     wsl.display().to_string(),
                     "-d".to_string(),
                     distro.clone(),
-                    "--".to_string(),
+                    "--exec".to_string(),
                     "wslpath".to_string(),
                     "-a".to_string(),
-                    dir.display().to_string(),
+                    known.display().to_string(),
                 ],
                 false,
             );
             let path = ran.text();
             if ran.ok && path.starts_with('/') {
-                Ok(path)
+                Ok(match name {
+                    Some(name) => format!("{}/{name}", path.trim_end_matches('/')),
+                    None => path,
+                })
             } else {
                 Err(format!(
                     "the settings folder could not be found from WSL ({})",
@@ -550,6 +723,37 @@ pub(crate) struct Owned {
     pub(crate) image: String,
     pub(crate) port: u16,
     pub(crate) settings_dir: PathBuf,
+    /// A newer container an update started and has not yet switched to.
+    /// The `[search.managed.searxng]` table exactly as LocalPilot wrote it;
+    /// the config is changed only while it still reads exactly so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) entry: Option<localpilot_config::ManagedSearchBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending: Option<Staged>,
+    /// An older container an update switched away from and has not yet
+    /// removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) retired: Option<Staged>,
+}
+
+/// A container in the middle of an update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Staged {
+    pub(crate) container_id: String,
+    pub(crate) container_name: String,
+    pub(crate) image: String,
+    pub(crate) port: u16,
+    /// Its own copy of the settings folder.
+    pub(crate) settings_dir: PathBuf,
+    /// The table that points the bridge at it.
+    pub(crate) entry: Option<localpilot_config::ManagedSearchBackend>,
+}
+
+impl Owned {
+    /// The update leftovers, as people see them.
+    pub(crate) fn unfinished(&self) -> bool {
+        self.pending.is_some() || self.retired.is_some()
+    }
 }
 
 /// Held while setup or a lifecycle command changes SearXNG, so two of them
@@ -1181,7 +1385,7 @@ pub(crate) mod tests {
         let argv = engines[0].argv(&["ps"]);
         assert_eq!(
             argv.join(" "),
-            "wsl.exe -d Ubuntu -- env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker --host unix:///var/run/docker.sock ps"
+            "wsl.exe -d Ubuntu --exec env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker --host unix:///var/run/docker.sock ps"
         );
         // The remote context inside a distribution was asked only where it points.
         let remote: Vec<String> = host
@@ -1279,7 +1483,7 @@ pub(crate) mod tests {
         assert!(args.contains("-p 127.0.0.1:8890:8080"), "{args}");
         assert!(args.contains(&format!("--label {LABEL}={LABEL_VALUE}")));
         assert!(args.contains("--restart no"));
-        assert!(args.contains("--name localpilot-searxng-5b72d7ef63a3"));
+        assert!(args.contains("--name localpilot-searxng-5b72d7ef63a3-8890"));
         assert!(args.ends_with(IMAGE));
     }
 
@@ -1325,10 +1529,13 @@ pub(crate) mod tests {
             },
             endpoint: "unix:///var/run/docker.sock".to_string(),
             container_id: ID.to_string(),
-            container_name: container_name(),
+            container_name: container_name(8888),
             image: IMAGE.to_string(),
             port: 8888,
             settings_dir: settings_dir(root.path()),
+            entry: None,
+            pending: None,
+            retired: None,
         };
         assert!(load_owned(root.path()).is_none());
         save_owned(root.path(), &owned).unwrap();
