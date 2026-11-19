@@ -463,7 +463,11 @@ Must not own:
 
 - any filesystem, network, or model dependency — the concrete sources
   (knowledge/memory/web), the model-backed synthesizer, URL parsing, the report
-  writer, and the candidate enqueue live in `localpilot-cli`
+  writer, and the candidate enqueue live in `localpilot-cli`. The network half
+  of web egress — the destination check on every request and redirect hop, the
+  gated redirect chain, and the append-only audit log — is one shared CLI
+  module (`web_egress`) that web research builds on, so another feature that
+  fetches for the user reuses the same boundary rather than a copy of it
 
 Keeping the loop here (not in `localpilot-localmind`) holds the adapter boundary
 (ADR-0036) and lets the security-sensitive gate be unit-tested with fakes.

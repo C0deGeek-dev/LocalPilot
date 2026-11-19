@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::web_egress::{
+    append_audit, audit_entry, bound_body, decide_destination, fetch_chain, is_html, parse_host,
+    ChainOutcome, ChainPage, DestinationVerdict, HopPolicy, RedirectStop, WEB_CONNECT_TIMEOUT_SECS,
+    WEB_FETCH_TIMEOUT_SECS,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use localpilot_config::{CliOverrides, Config, ConfigPaths, CredentialStore};
@@ -21,10 +26,10 @@ use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, iframe_sources, prepare_query,
     render_markdown, render_signal, run_research_controlled, term_overlap_relevance,
-    AdmissionTrail, AuditEntry, Bounds, ClaimStatus, CoverageVerdict, EgressOutcome, EgressRequest,
-    Evidence, Finding, Gathered, HeuristicSynthesizer, Provenance, RenderBounds, RenderGate,
-    RenderRequest, RenderSignal, Renderer, ResearchError, ResearchReport, RunControl, Source,
-    SourceAccount, SourceError, SourceSet, Synthesizer, WebAccess,
+    AdmissionTrail, Bounds, ClaimStatus, CoverageVerdict, EgressOutcome, EgressRequest, Evidence,
+    Finding, Gathered, HeuristicSynthesizer, Provenance, RenderBounds, RenderGate, RenderRequest,
+    RenderSignal, Renderer, ResearchError, ResearchReport, RunControl, Source, SourceAccount,
+    SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -954,20 +959,8 @@ const POLITENESS_MIN_DELAY_MS: u64 = 250;
 /// Politeness ceiling: even a slow host is not padded beyond this.
 const POLITENESS_MAX_DELAY_MS: u64 = 3_000;
 
-/// Total request timeout for a web fetch, mirroring the `fetch` builtin's bound.
-const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
-/// Connect-phase timeout, so a stalled connect fails fast under the total.
-const WEB_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Cap on body bytes kept as evidence from one fetch, bounding context cost.
 const WEB_MAX_BODY_BYTES: usize = 64 * 1024;
-/// Redirect hops one candidate URL may be followed through before the chain is
-/// abandoned (LocalHub#42). Generous for the real shapes this exists to serve —
-/// a search provider's attribution wrapper, an http→https upgrade, a canonical
-/// host move, a relocated documentation page — and small enough that a chain
-/// cannot become an unbounded crawl. Cycles are caught separately, so this
-/// bounds honest chains rather than loops.
-const WEB_MAX_REDIRECT_HOPS: usize = 5;
-
 /// Default egress audit-log path when `[research.web].audit_log` is unset.
 fn default_audit_log(root: &Path) -> PathBuf {
     root.join(".localpilot")
@@ -1663,106 +1656,22 @@ impl WebSource {
         question: &str,
         query: &str,
     ) -> Result<FetchOutcome, SourceError> {
-        let mut current_url = url.to_string();
-        let mut current_host = host.to_string();
-        // Every URL already requested in this chain, so a loop is caught rather
-        // than walked until the hop limit.
-        let mut visited: std::collections::BTreeSet<String> =
-            std::iter::once(current_url.clone()).collect();
-        let mut hops = 0usize;
-
-        let (content_type, body) = loop {
-            // A host that rate-limited or errored earlier in the run stays cooled
-            // down — 429/5xx are host-level signals, not per-URL ones.
-            if self.host_cooled(&current_host) {
-                append_audit(
-                    &self.audit_log,
-                    &audit_entry(&current_url, &current_host, "host-cooldown", query),
-                )?;
-                return Ok(FetchOutcome::Cooled);
-            }
-            // Pace repeat visits: the delay adapts to the host's own last
-            // response time, clamped to a sane window.
-            if let Some(pause) = self.pause_before(&current_host) {
-                tokio::time::sleep(pause).await;
-            }
-            append_audit(
-                &self.audit_log,
-                &audit_entry(&current_url, &current_host, "allowed", query),
-            )?;
-            let fetch_started = std::time::Instant::now();
-            let response = match self.client.get(&current_url).send().await {
-                Ok(response) => response,
-                Err(_) => {
-                    append_audit(
-                        &self.audit_log,
-                        &audit_entry(&current_url, &current_host, "fetch-error", query),
-                    )?;
-                    return Ok(FetchOutcome::Failed);
-                }
-            };
-            let status = response.status();
-            let cool_down = status.as_u16() == 429 || status.is_server_error();
-            self.record_fetch(&current_host, fetch_started.elapsed(), cool_down);
-            if cool_down {
-                return Ok(FetchOutcome::Failed);
-            }
-            if status.is_redirection() {
-                let stop = match self.redirect_destination(&current_url, &response) {
-                    Ok(next) => {
-                        let next_host = next.host_str().unwrap_or_default().to_string();
-                        let next_url = next.to_string();
-                        if hops + 1 > WEB_MAX_REDIRECT_HOPS {
-                            Err(RedirectStop::DepthExceeded)
-                        } else if !visited.insert(next_url.clone()) {
-                            Err(RedirectStop::Cycle)
-                        } else {
-                            append_audit(
-                                &self.audit_log,
-                                &audit_entry(&next_url, &next_host, "redirect-followed", query),
-                            )?;
-                            hops += 1;
-                            current_url = next_url;
-                            current_host = next_host;
-                            Ok(())
-                        }
-                    }
-                    Err(stop) => Err(stop),
-                };
-                match stop {
-                    Ok(()) => continue,
-                    Err(stop) => {
-                        append_audit(
-                            &self.audit_log,
-                            &audit_entry(&current_url, &current_host, stop.reason(), query),
-                        )?;
-                        return Ok(FetchOutcome::Redirected(stop));
-                    }
-                }
-            }
-            // Capture the content type before `text()` consumes the response, so a
-            // fetched HTML page can be reduced to readable prose below.
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let body = match response.text().await {
-                Ok(body) => body,
-                Err(_) => {
-                    append_audit(
-                        &self.audit_log,
-                        &audit_entry(&current_url, &current_host, "fetch-error", query),
-                    )?;
-                    return Ok(FetchOutcome::Failed);
-                }
-            };
-            if !status.is_success() {
-                return Ok(FetchOutcome::Failed);
-            }
-            break (content_type, body);
+        let page = match fetch_chain(&self.client, self, &self.audit_log, url, host, query).await? {
+            ChainOutcome::Page(page) => page,
+            ChainOutcome::Cooled => return Ok(FetchOutcome::Cooled),
+            ChainOutcome::Redirected(stop) => return Ok(FetchOutcome::Redirected(stop)),
+            ChainOutcome::Failed => return Ok(FetchOutcome::Failed),
         };
+        if !page.status.is_success() {
+            return Ok(FetchOutcome::Failed);
+        }
+        let ChainPage {
+            final_url: current_url,
+            hops,
+            content_type,
+            body,
+            ..
+        } = *page;
         // An HTML document becomes evidence as readable Markdown, not raw
         // markup: otherwise script/style bodies and tags leak into the finding
         // and its evidence block as junk, and the length budget is spent on
@@ -1817,38 +1726,6 @@ impl WebSource {
                 hops,
             }),
         })))
-    }
-
-    /// Resolve one redirect hop's destination from `response`, refusing any
-    /// destination the active reach does not permit. Deliberately does not
-    /// audit: the caller records the hop in its own vocabulary, and keeping this
-    /// pure makes the policy decision testable on its own.
-    fn redirect_destination(
-        &self,
-        current_url: &str,
-        response: &reqwest::Response,
-    ) -> Result<reqwest::Url, RedirectStop> {
-        let location = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(RedirectStop::Malformed)?;
-        // A `Location` may be relative ("/article", "../x"); resolve it against
-        // the URL that produced it, exactly as a browser would.
-        let base = reqwest::Url::parse(current_url).map_err(|_| RedirectStop::Malformed)?;
-        let next = base.join(location).map_err(|_| RedirectStop::Malformed)?;
-        let origin_host = base.host_str().unwrap_or_default().to_string();
-        match decide_destination(
-            &self.access,
-            &next,
-            Some(&origin_host),
-            "following a redirect",
-        ) {
-            DestinationVerdict::Allowed => Ok(next),
-            DestinationVerdict::BlockedScheme
-            | DestinationVerdict::BlockedInternal
-            | DestinationVerdict::Blocked => Err(RedirectStop::Blocked),
-        }
     }
 
     /// Whether a fetched HTML page needs rendering, per the operator's render
@@ -2163,6 +2040,37 @@ impl WebSource {
     }
 }
 
+#[async_trait]
+impl HopPolicy for WebSource {
+    fn cooled(&self, host: &str) -> bool {
+        self.host_cooled(host)
+    }
+
+    async fn pace(&self, host: &str) {
+        // Pace repeat visits: the delay adapts to the host's own last
+        // response time, clamped to a sane window.
+        if let Some(pause) = self.pause_before(host) {
+            tokio::time::sleep(pause).await;
+        }
+    }
+
+    fn record(&self, host: &str, took: Duration, cool_down: bool) {
+        self.record_fetch(host, took, cool_down);
+    }
+
+    async fn allow_redirect(&self, next: &reqwest::Url, origin_host: &str) -> bool {
+        matches!(
+            decide_destination(
+                &self.access,
+                next,
+                Some(origin_host),
+                "following a redirect"
+            ),
+            DestinationVerdict::Allowed
+        )
+    }
+}
+
 /// A statically-fetched page plus the render lead (if any) the caller acts on.
 struct FetchedPage {
     /// The reduced, bounded, term-overlap-scored evidence for the page itself.
@@ -2215,66 +2123,6 @@ struct WebAccessGate {
     query: String,
 }
 
-/// Whether one destination URL may be reached at all, decided independently of
-/// how it was arrived at. The browser render gate and the static fetch's
-/// redirect loop both route through [`decide_destination`], so a navigation and
-/// a 3xx hop enforce the *same* boundary rather than two drifting copies of it
-/// (LocalHub#37, LocalHub#42).
-enum DestinationVerdict {
-    /// Reachable: http/https, not internal, and allowed by the active reach.
-    Allowed,
-    /// Not http/https (local file, custom scheme, …).
-    BlockedScheme,
-    /// Loopback, link-local, private-network, or unspecified address — refused
-    /// unconditionally, ahead of the allowlist, so an open-web reach can never
-    /// be turned into an SSRF channel.
-    BlockedInternal,
-    /// A public destination the active reach does not permit. A destination
-    /// needing confirmation counts as blocked: the grant in hand is the only
-    /// authority, and a redirect must never be the thing that widens it.
-    Blocked,
-}
-
-/// Decide whether `parsed` may be reached under `access`. Pure: it audits
-/// nothing and mutates nothing, so each caller can record the outcome in its
-/// own vocabulary.
-///
-/// `origin_host`, when given, is the host that referred us here (the host that
-/// issued a redirect). A destination on that same host inherits its permission
-/// and skips the internal-address guard: continuing a conversation with a host
-/// already being fetched grants no reach that was not already granted, so an
-/// internal host someone deliberately allowlisted can still redirect within
-/// itself. The guard still refuses a *cross-host* hop to an internal address,
-/// which is the case it exists for — an allowlisted public page steering the
-/// fetcher at loopback or a metadata endpoint. A caller with no referring host
-/// (the browser render gate) passes `None` and gets the strict rule.
-fn decide_destination(
-    access: &WebAccess,
-    parsed: &reqwest::Url,
-    origin_host: Option<&str>,
-    purpose: &str,
-) -> DestinationVerdict {
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return DestinationVerdict::BlockedScheme;
-    }
-    let host = parsed.host_str().unwrap_or_default();
-    let same_host_as_origin = origin_host.is_some_and(|origin| origin.eq_ignore_ascii_case(host));
-    if is_internal_host(host) && !same_host_as_origin {
-        return DestinationVerdict::BlockedInternal;
-    }
-    // A redirect is a *new* destination, so it is asked about like any other.
-    // Following a hop the operator never saw, on the strength of an approval they
-    // gave for a different host, is exactly the reach the prompt exists to stop.
-    match access.decide(&EgressRequest {
-        host,
-        url: parsed.as_str(),
-        purpose,
-    }) {
-        EgressOutcome::Fetch => DestinationVerdict::Allowed,
-        EgressOutcome::Skip | EgressOutcome::Off => DestinationVerdict::Blocked,
-    }
-}
-
 impl RenderGate for WebAccessGate {
     fn allow(&self, url: &str) -> bool {
         let Ok(parsed) = reqwest::Url::parse(url) else {
@@ -2296,38 +2144,6 @@ impl RenderGate for WebAccessGate {
     }
 }
 
-/// Whether a host is an internal/private destination the renderer must never
-/// reach, regardless of the allowlist: `localhost`, or an IP literal in a
-/// loopback, link-local, private, or unspecified range (SSRF guard). A public
-/// DNS name returns `false` (its resolved address is the browser's concern; the
-/// allowlist governs which names are reachable at all).
-fn is_internal_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
-        return false;
-    };
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-        }
-        std::net::IpAddr::V6(v6) => {
-            let segments = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // Unique-local fc00::/7 and link-local fe80::/10 (is_unique_local /
-                // is_unicast_link_local are unstable, so test the prefixes here).
-                || (segments[0] & 0xfe00) == 0xfc00
-                || (segments[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
-
 /// The countable outcome of one URL's fetch attempt.
 enum FetchOutcome {
     /// Reduced, bounded evidence with any render lead (pre-admission). Boxed:
@@ -2341,31 +2157,6 @@ enum FetchOutcome {
     Redirected(RedirectStop),
     /// A transport error, unsuccessful status, or unreadable body.
     Failed,
-}
-
-/// Why a redirect chain ended without producing a page.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RedirectStop {
-    /// The destination is not permitted (scheme, internal address, or reach).
-    Blocked,
-    /// No `Location` header, or one that will not parse against the current URL.
-    Malformed,
-    /// The chain revisited a URL it had already fetched.
-    Cycle,
-    /// The chain exceeded [`WEB_MAX_REDIRECT_HOPS`].
-    DepthExceeded,
-}
-
-impl RedirectStop {
-    /// The audit decision and account note wording for this stop.
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Blocked => "redirect-blocked",
-            Self::Malformed => "redirect-malformed",
-            Self::Cycle => "redirect-cycle",
-            Self::DepthExceeded => "redirect-depth-exceeded",
-        }
-    }
 }
 
 /// How a fetched page was reached, when it was not reached directly.
@@ -2500,15 +2291,6 @@ fn propose_urls_prompt(query: &str, limit: usize) -> String {
     )
 }
 
-/// Parse the host from a URL with a real parser. `None` when the URL does not
-/// parse or carries no host.
-fn parse_host(url: &str) -> Option<String> {
-    reqwest::Url::parse(url)
-        .ok()?
-        .host_str()
-        .map(str::to_string)
-}
-
 /// Extract http/https URLs from a model reply, one per non-empty line. Tolerates
 /// leading bullets/numbering and trailing prose by scanning from the scheme.
 fn extract_urls(text: &str) -> Vec<String> {
@@ -2520,76 +2302,6 @@ fn extract_url(line: &str) -> Option<String> {
     let rest = &line[start..];
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(rest[..end].to_string())
-}
-
-/// Whether a fetched body should be reduced from HTML to text before it becomes
-/// evidence. True on an HTML-ish `Content-Type`, or — when the server sent none
-/// — on a body that opens with an HTML marker. A declared non-HTML type (plain
-/// text, Markdown, JSON) is kept verbatim so its exact content survives.
-fn is_html(content_type: &str, body: &str) -> bool {
-    if content_type.contains("text/html") || content_type.contains("application/xhtml") {
-        return true;
-    }
-    if content_type.is_empty() {
-        let head: String = body.trim_start().chars().take(512).collect();
-        let head = head.to_ascii_lowercase();
-        return head.starts_with("<!doctype html") || head.contains("<html");
-    }
-    false
-}
-
-/// Truncate a fetched (already-reduced) body to at most `max_bytes`, never
-/// splitting a UTF-8 char, preferring a line boundary, and — when a cut
-/// happens — saying so explicitly rather than ending mid-sentence with no
-/// explanation (the finding's provenance URL points at the full source).
-fn bound_body(body: &str, max_bytes: usize) -> String {
-    if body.len() <= max_bytes {
-        return body.to_string();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    let head = &body[..end];
-    // A line boundary keeps the cut readable; fall back to the plain cut when
-    // the content is one enormous line and a line cut would discard too much.
-    let cut = match head.rfind('\n') {
-        Some(newline) if newline >= end / 2 => newline,
-        _ => end,
-    };
-    format!(
-        "{}\n… (fetched content truncated at the per-fetch bound; full source at the cited URL)",
-        &body[..cut]
-    )
-}
-
-/// One audit record. `question` carries the **redacted** query, never raw text.
-fn audit_entry(url: &str, host: &str, decision: &str, question: &str) -> AuditEntry {
-    AuditEntry {
-        url: url.to_string(),
-        host: host.to_string(),
-        decision: decision.to_string(),
-        question: question.to_string(),
-    }
-}
-
-/// Append one audit line to the egress log, creating the file and its parent on
-/// first use. Append-only, one line per outbound request or skip.
-fn append_audit(path: &Path, entry: &AuditEntry) -> Result<(), SourceError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| SourceError::new("web", format!("audit dir: {error}")))?;
-        }
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| SourceError::new("web", format!("audit open: {error}")))?;
-    writeln!(file, "{}", entry.to_line())
-        .map_err(|error| SourceError::new("web", format!("audit write: {error}")))?;
-    Ok(())
 }
 
 /// Render the report and write it (redacted) to `dir`, returning the path.
@@ -2700,6 +2412,7 @@ fn slugify(topic: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web_egress::{is_internal_host, WEB_MAX_REDIRECT_HOPS};
     use localpilot_llm::FakeProvider;
     use localpilot_research::ClaimStatus;
     use wiremock::matchers::method;
@@ -3538,6 +3251,10 @@ mod tests {
         ("localpilot-cli/src/research.rs", "consent seam"),
         ("localpilot-cli/src/skill_discovery.rs", "consent seam"),
         (
+            "localpilot-cli/src/web_egress.rs",
+            "consent seam (the shared gated fetch chain)",
+        ),
+        (
             "localpilot-cli/src/remote_push_send.rs",
             "phone notifications the user turned on ([remote.push], user config only)",
         ),
@@ -4185,6 +3902,39 @@ mod tests {
         ] {
             assert!(!is_internal_host(public), "{public} is public");
         }
+    }
+
+    #[tokio::test]
+    async fn a_non_utf8_body_is_decoded_lossily_whatever_charset_it_declares() {
+        // Pins today's behaviour: the HTTP client is built without charset
+        // decoding, so a declared legacy charset is not honoured and invalid
+        // UTF-8 bytes become replacement characters rather than failing the
+        // fetch. A change here is a deliberate decision, not a side effect.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"caf\xe9 documentation".to_vec(),
+                "text/plain; charset=iso-8859-1",
+            ))
+            .mount(&server)
+            .await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit);
+
+        let evidence = source
+            .gather("cafe documentation", 3)
+            .await
+            .unwrap()
+            .evidence;
+        assert_eq!(evidence.len(), 1);
+        assert!(
+            evidence[0].snippet.contains("caf\u{FFFD} documentation"),
+            "lossy UTF-8, charset ignored: {}",
+            evidence[0].snippet
+        );
     }
 
     #[tokio::test]

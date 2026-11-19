@@ -106,6 +106,7 @@ mod swarm_cmd;
 mod trust;
 mod trust_cmd;
 mod update;
+mod web_egress;
 
 #[derive(Debug, Parser)]
 #[command(name = "localpilot")]
