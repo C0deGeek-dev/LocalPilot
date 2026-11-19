@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0291: Managed Search Backends Are Search-Only, User-Owned And Started On First Search
+
+**Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0289 (chat web
+consent; point 7, search stays user-designated MCP, still holds) and ADR-0290
+(real search results only). Refs LocalPilot#11.
+
+**Context.** LocalPilot is going to set up a search backend for the user (a
+keyless search package, a self-hosted search engine, or a hosted search API
+with the user's key). Written as an ordinary `[mcp.servers]` entry, such a
+server would start at every session start (downloading packages each time),
+expose all of its tools to the model on the generic permission path (a second,
+unconsented web path), be spawned by `doctor`, and be overridable by a project
+file, because config layers merge per key.
+
+**Decision.**
+1. **Own namespace.** Managed backends live in a top-level `[search.managed.<id>]`
+   table, never under `[mcp.servers]` or `[research.mcp]`. A binary that
+   predates it sees no server and no designation and stays inert.
+2. **User-owned.** The table is read from the user's own config file only. A
+   project file or environment variable that sets it is ignored, never merged,
+   and `doctor` reports it; a malformed value there cannot stop loading.
+3. **Launch identity.** Each entry records a digest of what it runs (command,
+   arguments, environment entry names and forms; a literal contributes a digest
+   of its value). Before every start the digest is recomputed; on a mismatch
+   nothing starts and no credential is resolved.
+4. **Search-only and on demand.** A managed backend is never part of the
+   session's MCP tools, the server command or `doctor`'s server probe. Only
+   chat `web_search` and `/research` start it, at their first real search, and
+   they call only its one designated tool, which must take a single `query`
+   string with no other required parameter (checked from `tools/list` after the
+   start; an incompatible tool is refused).
+5. **Consent.** In chat, ADR-0289's per-session search consent covers the start
+   and the queries, unchanged. `/research` asks separately, once per run and
+   before anything starts, naming the backend, where its queries go and what is
+   sent: in the fullscreen session on its own prompt only (never a paired
+   device), on the terminal for a command-line run. No permission profile,
+   pre-approval or bypass answers it. When nobody can be asked, a backend starts
+   only if the user allowed unattended use for it (`unattended`, off by
+   default). A run whose backends were not allowed, or could not start, is a
+   local knowledge review under ADR-0290.
+6. **Audit before effect.** A start is recorded (id, tier, launch identity, no
+   query) before anything runs; in research each query is recorded, redacted,
+   before it is sent. If the record cannot be written, nothing starts or is sent.
+   Chat records stay metadata-only, as ADR-0289 requires.
+7. **Bounds per backend.** Each entry carries its call timeout, first-start
+   handshake bound and query limits (characters, optional words), applied at
+   both call sites after redaction, cutting at a word boundary.
+8. A hand-designated server and a managed backend that share a name are kept
+   apart: separate consent, separate connection, distinct labels.
+
+**Consequences.** Hand-configured `[mcp.servers]` search tools keep today's
+behaviour. The setup flow that writes managed entries is a separate change.
+
 ## ADR-0290: Research Takes Candidate URLs Only From Real Search Results
 
 **Status:** accepted · **Date:** 2026-11-19. Amends ADR-0076 (web research on

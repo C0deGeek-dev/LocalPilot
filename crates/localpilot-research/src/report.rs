@@ -344,6 +344,9 @@ pub enum NoWebReason {
     SkippedForRun,
     /// Web research is switched off in configuration.
     Disabled,
+    /// A search backend is set up, but starting it for this run was declined,
+    /// or nobody was there to allow it and it is not allowed to run unattended.
+    SearchNotAllowed,
 }
 
 impl NoWebReason {
@@ -354,6 +357,7 @@ impl NoWebReason {
             Self::NoSearchBackend => "no usable search backend is configured or reachable",
             Self::SkippedForRun => "web research was skipped for this run",
             Self::Disabled => "web research is switched off in configuration",
+            Self::SearchNotAllowed => "the search backend was not allowed to start for this run",
         }
     }
 }

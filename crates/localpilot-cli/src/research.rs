@@ -271,7 +271,7 @@ pub fn research_mode_notice(root: &Path) -> String {
             .map(|config| {
                 (
                     config.research.web.enabled,
-                    !config.research.mcp.tools.is_empty(),
+                    !config.research.mcp.tools.is_empty() || !config.search.managed.is_empty(),
                 )
             })
             .unwrap_or((true, true));
@@ -330,6 +330,7 @@ pub async fn run_prepared_interactive_research(
     topic: &str,
     prepared: PreparedInteractiveResearch,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    consent: &SearchLaunchConsent,
     out: &mut dyn Write,
 ) -> anyhow::Result<ResearchCompletion> {
     run_research_command_with_config(
@@ -339,6 +340,7 @@ pub async fn run_prepared_interactive_research(
         &prepared.options,
         None,
         Some(stop),
+        consent,
         out,
     )
     .await
@@ -377,7 +379,17 @@ pub async fn run_research_command_controlled(
     out: &mut dyn Write,
 ) -> anyhow::Result<ResearchCompletion> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
-    run_research_command_with_config(root, topic, &config, options, web_override, stop, out).await
+    run_research_command_with_config(
+        root,
+        topic,
+        &config,
+        options,
+        web_override,
+        stop,
+        &SearchLaunchConsent::for_command_line(),
+        out,
+    )
+    .await
 }
 
 /// [`run_research_command_controlled`] against an already-loaded config snapshot —
@@ -385,6 +397,7 @@ pub async fn run_research_command_controlled(
 /// path) can guarantee the shown disclosure and the run use the same config with no
 /// time-of-check/time-of-use gap. The existing loading wrappers delegate here, so
 /// their behaviour is byte-equivalent.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_research_command_with_config(
     root: &Path,
     topic: &str,
@@ -392,6 +405,7 @@ pub async fn run_research_command_with_config(
     options: &ResearchOptions,
     web_override: Option<bool>,
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    consent: &SearchLaunchConsent,
     out: &mut dyn Write,
 ) -> anyhow::Result<ResearchCompletion> {
     let model = ModelHandle::from_config(config);
@@ -412,24 +426,32 @@ pub async fn run_research_command_with_config(
     let web = web_override.unwrap_or(true);
     let mut sources = build_local_sources(root, topic, admission.clone());
     let mut no_web = None;
+    let mut search = None;
     if !web {
         writeln!(out, "web research: skipped for this run (--no-web)")?;
         no_web = Some(NoWebReason::SkippedForRun);
     } else if !config.research.web.enabled {
         // The inert source still prints the loud "disabled" disclosure.
-        if let Some(web_source) = build_web_source(root, topic, config, admission, out).await? {
+        if let Ok(web_source) =
+            build_web_source(root, topic, config, admission, consent, out).await?
+        {
             sources.push(Box::new(web_source));
         }
         no_web = Some(NoWebReason::Disabled);
-    } else if let Some(web_source) = build_web_source(root, topic, config, admission, out).await? {
-        sources.push(Box::new(web_source));
     } else {
-        writeln!(out, "{NO_SEARCH_BACKEND_NOTICE}")?;
-        no_web = Some(NoWebReason::NoSearchBackend);
+        match build_web_source(root, topic, config, admission, consent, out).await? {
+            Ok(web_source) => {
+                search = web_source.search.clone();
+                sources.push(Box::new(web_source));
+            }
+            Err(reason) => {
+                if reason == NoWebReason::NoSearchBackend {
+                    writeln!(out, "{NO_SEARCH_BACKEND_NOTICE}")?;
+                }
+                no_web = Some(reason);
+            }
+        }
     }
-    // Every web leg of the run follows the same answer, skill discovery's
-    // repository search included.
-    let web_leg = no_web.is_none();
     let synth = CliSynthesizer { model };
 
     let bounds = Bounds {
@@ -463,6 +485,25 @@ pub async fn run_research_command_with_config(
     while let Ok(summary) = progress_rx.try_recv() {
         write_round_line(out, &summary)?;
     }
+    // A managed backend starts only at its first search, so whether the run
+    // had a search backend is known only now: one that could not start leaves
+    // the run with no web leg, exactly as if none had been set up.
+    if let Some(search) = &search {
+        for failure in search.start_failures().await {
+            writeln!(out, "note: {failure}")?;
+        }
+    }
+    if no_web.is_none() {
+        if let Some(search) = &search {
+            if !search.usable().await {
+                writeln!(out, "{NO_SEARCH_BACKEND_NOTICE}")?;
+                no_web = Some(NoWebReason::NoSearchBackend);
+            }
+        }
+    }
+    // Every web leg of the run follows the same answer, skill discovery's
+    // repository search included.
+    let web_leg = no_web.is_none();
     // Stamp the run's web posture on the report, so the renderer can mark a
     // question web contributed nothing to as an explicit source gap.
     outcome.report.web_enabled = Some(web_leg);
@@ -1040,7 +1081,10 @@ fn write_research_disclosure(
         "  sent off-machine: only the redacted sub-question text \
          — never file contents or gathered evidence"
     )?;
-    if web_config.enabled && config.research.mcp.tools.is_empty() {
+    if web_config.enabled
+        && config.research.mcp.tools.is_empty()
+        && config.search.managed.is_empty()
+    {
         // Candidate URLs come only from real search results, so without a
         // search tool nothing below can happen: say that instead of describing
         // a reach the run will never use.
@@ -1086,6 +1130,19 @@ fn write_research_disclosure(
             )?;
         }
         writeln!(out, "  audit log: {}", audit_log.display())?;
+        for (id, managed) in &config.search.managed {
+            writeln!(
+                out,
+                "  search backend managed.{id}.{}: starts at the first search only if you \
+                 allow it for this run{}",
+                managed.tool,
+                if managed.unattended {
+                    "; allowed when nobody can be asked"
+                } else {
+                    ""
+                }
+            )?;
+        }
     } else {
         writeln!(
             out,
@@ -1108,8 +1165,9 @@ fn research_disclosure(root: &Path, config: &Config) -> String {
 }
 
 /// Print the loud egress disclosure, record the operator's per-session opt-in,
-/// and build the networked source. `Ok(None)` when web research is allowed but
-/// no search backend is designated or none could be reached: candidate URLs
+/// and build the networked source. `Ok(Err(reason))` when web research is
+/// allowed but no search backend is designated, none could be reached, or none
+/// was allowed to start for this run: candidate URLs
 /// come only from real search results, so the run makes no web query or page
 /// fetch. (A designated server that cannot be reached may still have been
 /// started and asked for its handshake before this answer.)
@@ -1125,8 +1183,9 @@ async fn build_web_source(
     topic: &str,
     config: &Config,
     admission: Option<Arc<AdmissionJudge>>,
+    consent: &SearchLaunchConsent,
     out: &mut dyn Write,
-) -> anyhow::Result<Option<WebSource>> {
+) -> anyhow::Result<Result<WebSource, NoWebReason>> {
     let web_config = &config.research.web;
     let audit_log = web_config
         .audit_log
@@ -1163,9 +1222,9 @@ async fn build_web_source(
     write_research_disclosure(out, root, config)?;
 
     let search = if web_config.enabled {
-        match connect_search_tools(config, out).await? {
-            Some(search) => Some(search),
-            None => return Ok(None),
+        match connect_search_tools(config, consent, &audit_log, out).await? {
+            Ok(search) => Some(search),
+            Err(reason) => return Ok(Err(reason)),
         }
     } else {
         None
@@ -1180,17 +1239,15 @@ async fn build_web_source(
              system browser, gated by the same allowlist and audited"
         )?;
     }
-    Ok(Some(
-        WebSource::new(
-            topic,
-            config.research.render.mode,
-            access,
-            audit_log,
-            search,
-            admission,
-        )?
-        .with_renderer(renderer),
-    ))
+    Ok(Ok(WebSource::new(
+        topic,
+        config.research.render.mode,
+        access,
+        audit_log,
+        search,
+        admission,
+    )?
+    .with_renderer(renderer)))
 }
 
 /// Construct the browser-rendering fallback when the `render-browser` feature is
@@ -1213,30 +1270,122 @@ fn build_renderer(_mode: localpilot_config::RenderMode) -> Option<Arc<dyn Render
     None
 }
 
-/// Connect the `[research.mcp]`-designated search tools and disclose them.
-/// Best-effort: a server that fails to spawn or handshake is reported and
-/// skipped; the run continues with whatever connected. `None` when nothing is
-/// designated or nothing connected.
+/// Who may allow a managed search backend to start for a research run.
+///
+/// Only a person answers, and only on a channel that is theirs: never the
+/// permission profile, a pre-approval, bypass or a paired device.
+pub enum SearchLaunchConsent {
+    /// The fullscreen session's own approval prompt.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    Ask(Arc<dyn localpilot_sandbox::Approver>),
+    /// A question on this terminal (a command-line run with a person present).
+    Terminal,
+    /// Nobody can be asked: only backends allowed to run unattended start.
+    Unattended,
+}
+
+impl SearchLaunchConsent {
+    /// The answer for a command-line run: the terminal when a person is on
+    /// both ends, else unattended.
+    #[must_use]
+    pub fn for_command_line() -> Self {
+        if crate::egress_consent::someone_to_ask() {
+            Self::Terminal
+        } else {
+            Self::Unattended
+        }
+    }
+}
+
+/// The question asked before a managed backend may start for a research run.
+fn managed_launch_question(
+    spec: &crate::search_backend::SearchSpec,
+    tier: localpilot_config::SearchTier,
+) -> String {
+    format!(
+        "Allow the search backend {} for this research run? It is a program on this \
+         computer that starts at the first search; {}. Each research sub-question is sent \
+         to it, with secrets removed; nothing from your files is sent. This answer covers \
+         this run only.",
+        spec.label(),
+        tier.destinations()
+    )
+}
+
+/// Connect the hand-designated search tools, decide which managed backends may
+/// start for this run, and disclose both. Hand-designated servers connect now,
+/// best-effort, as before; a managed backend starts only at its first search.
+/// `Err` carries why no search tool is usable.
 async fn connect_search_tools(
     config: &Config,
+    consent: &SearchLaunchConsent,
+    audit_log: &Path,
     out: &mut dyn Write,
-) -> anyhow::Result<Option<McpSearchProposer>> {
-    let designated = &config.research.mcp.tools;
-    if designated.is_empty() {
-        return Ok(None);
+) -> anyhow::Result<Result<McpSearchProposer, NoWebReason>> {
+    let (specs, unresolved) = crate::search_backend::search_specs(config);
+    for label in &unresolved {
+        let server = label.split('.').next().unwrap_or_default();
+        writeln!(
+            out,
+            "  search tool {label}: server '{server}' not found under [mcp.servers] — skipped"
+        )?;
+    }
+    if specs.is_empty() {
+        return Ok(Err(NoWebReason::NoSearchBackend));
     }
     let mut tools = Vec::new();
-    for pair in designated {
-        let label = format!("{}.{}", pair.server, pair.tool);
-        let Some(server) = config.mcp.servers.get(&pair.server) else {
-            writeln!(
-                out,
-                "  search tool {label}: server '{}' not found under [mcp.servers] — skipped",
-                pair.server
-            )?;
+    let mut not_allowed = false;
+    for spec in specs {
+        let label = spec.label();
+        if let Some(managed) = spec.managed.clone() {
+            let allowed = match consent {
+                SearchLaunchConsent::Ask(approver) => {
+                    let request = localpilot_sandbox::PermissionRequest {
+                        tool: "research".to_string(),
+                        effect: localpilot_sandbox::Effect::Network,
+                        interactivity: localpilot_sandbox::Interactivity::Interactive,
+                        trusted: true,
+                        detail: managed_launch_question(&spec, managed.tier),
+                    };
+                    approver.approve(&request).await
+                }
+                SearchLaunchConsent::Terminal => crate::egress_consent::confirm(
+                    std::io::stdin().lock(),
+                    std::io::stderr(),
+                    &managed_launch_question(&spec, managed.tier),
+                ),
+                SearchLaunchConsent::Unattended => managed.unattended,
+            };
+            let decision = match (consent, allowed) {
+                (_, true) => "search-launch-allowed",
+                (SearchLaunchConsent::Unattended, false) => "search-launch-not-allowed-unattended",
+                (_, false) => "search-launch-declined",
+            };
+            let _ = append_audit(
+                audit_log,
+                &audit_entry(&format!("mcp://{label}"), &label, decision, ""),
+            );
+            if !allowed {
+                not_allowed = true;
+                writeln!(
+                    out,
+                    "  search backend {label}: not allowed to start for this run"
+                )?;
+                continue;
+            }
+            tools.push(DesignatedSearchTool {
+                label,
+                tool: spec.tool.clone(),
+                connection: SearchConnection::Managed(Box::new(ManagedConnection {
+                    spec,
+                    managed,
+                    launcher: crate::search_backend::spawn_launcher(),
+                    state: tokio::sync::Mutex::new(ManagedState::NotStarted),
+                })),
+            });
             continue;
-        };
-        let transport = match crate::mcp_env::spawn_server(server, &CredentialStore::user()) {
+        }
+        let transport = match crate::mcp_env::spawn_server(&spec.launch, &CredentialStore::user()) {
             Ok((transport, _environment)) => transport,
             Err(error) => {
                 writeln!(out, "  search tool {label}: failed to start — {error}")?;
@@ -1267,23 +1416,27 @@ async fn connect_search_tools(
         )
         .await
         {
-            if !advertised.iter().any(|t| t.name == pair.tool) {
+            if !advertised.iter().any(|t| t.name == spec.tool) {
                 writeln!(
                     out,
                     "  search tool {label}: server does not advertise '{}' — calling anyway",
-                    pair.tool
+                    spec.tool
                 )?;
             }
         }
-        tools.push(DesignatedSearchTool {
+        tools.push(DesignatedSearchTool::connected(
             label,
-            tool: pair.tool.clone(),
+            spec.tool.clone(),
             transport,
-        });
+        ));
     }
     if tools.is_empty() {
-        writeln!(out, "  no designated search tool connected")?;
-        return Ok(None);
+        writeln!(out, "  no search tool is available for this run")?;
+        return Ok(Err(if not_allowed {
+            NoWebReason::SearchNotAllowed
+        } else {
+            NoWebReason::NoSearchBackend
+        }));
     }
     writeln!(
         out,
@@ -1294,16 +1447,111 @@ async fn connect_search_tools(
             .collect::<Vec<_>>()
             .join(", ")
     )?;
-    Ok(Some(McpSearchProposer { tools }))
+    Ok(Ok(McpSearchProposer { tools }))
 }
 
-/// One designated MCP search tool, connected and ready to propose URLs.
+/// One designated MCP search tool, ready to propose URLs.
 struct DesignatedSearchTool {
-    /// `server.tool`, for disclosure and audit lines.
+    /// `server.tool` (`managed.id.tool` for a managed backend), for
+    /// disclosure and audit lines.
     label: String,
     /// The exact tool name the server advertises.
     tool: String,
-    transport: Arc<dyn localpilot_mcp::Transport>,
+    connection: SearchConnection,
+}
+
+/// How a designated tool reaches its server.
+enum SearchConnection {
+    /// A hand-designated server, connected when the run started.
+    Connected(Arc<dyn localpilot_mcp::Transport>),
+    /// A managed backend, started at its first search.
+    Managed(Box<ManagedConnection>),
+}
+
+struct ManagedConnection {
+    spec: crate::search_backend::SearchSpec,
+    managed: localpilot_config::ManagedSearchBackend,
+    launcher: crate::search_backend::Launcher,
+    state: tokio::sync::Mutex<ManagedState>,
+}
+
+enum ManagedState {
+    NotStarted,
+    Running(Arc<dyn localpilot_mcp::Transport>),
+    /// It did not start or is not usable; it is not tried again this run.
+    Unusable(crate::search_backend::ManagedStartError),
+}
+
+impl DesignatedSearchTool {
+    fn connected(
+        label: String,
+        tool: String,
+        transport: Arc<dyn localpilot_mcp::Transport>,
+    ) -> Self {
+        Self {
+            label,
+            tool,
+            connection: SearchConnection::Connected(transport),
+        }
+    }
+
+    /// The running transport, starting a managed backend on first use.
+    async fn transport(&self, audit_log: &Path) -> Option<Arc<dyn localpilot_mcp::Transport>> {
+        let managed = match &self.connection {
+            SearchConnection::Connected(transport) => return Some(Arc::clone(transport)),
+            SearchConnection::Managed(managed) => managed,
+        };
+        let mut state = managed.state.lock().await;
+        match &*state {
+            ManagedState::Running(transport) => return Some(Arc::clone(transport)),
+            ManagedState::Unusable(_) => return None,
+            ManagedState::NotStarted => {}
+        }
+        let started = crate::search_backend::start_managed(
+            &managed.spec,
+            &managed.managed,
+            &managed.launcher,
+            |decision, detail| {
+                append_audit(
+                    audit_log,
+                    &audit_entry(
+                        &format!("mcp://{}", self.label),
+                        &self.label,
+                        decision,
+                        detail,
+                    ),
+                )
+                .is_ok()
+            },
+        )
+        .await;
+        match started {
+            Ok(transport) => {
+                *state = ManagedState::Running(Arc::clone(&transport));
+                Some(transport)
+            }
+            Err(error) => {
+                let _ = append_audit(
+                    audit_log,
+                    &audit_entry(
+                        &format!("mcp://{}", self.label),
+                        &self.label,
+                        error.decision(),
+                        "",
+                    ),
+                );
+                *state = ManagedState::Unusable(error);
+                None
+            }
+        }
+    }
+
+    fn managed(&self) -> Option<&localpilot_config::ManagedSearchBackend> {
+        match &self.connection {
+            SearchConnection::Connected(_) => None,
+            SearchConnection::Managed(managed) => Some(&managed.managed),
+        }
+    }
 }
 
 /// Designated MCP search tools acting as candidate-URL proposers.
@@ -1318,15 +1566,79 @@ struct McpSearchProposer {
 }
 
 impl McpSearchProposer {
+    /// Why each managed backend that failed to start this run did, for the
+    /// person: value-free sentences.
+    async fn start_failures(&self) -> Vec<String> {
+        let mut failures = Vec::new();
+        for tool in &self.tools {
+            if let SearchConnection::Managed(managed) = &tool.connection {
+                if let ManagedState::Unusable(error) = &*managed.state.lock().await {
+                    failures.push(error.describe(&managed.spec.server));
+                }
+            }
+        }
+        failures
+    }
+
+    /// Whether any tool can still be asked: a connected hand-designated
+    /// server, or a managed backend that has not failed to start. A search
+    /// that returned nothing still counts as usable.
+    async fn usable(&self) -> bool {
+        for tool in &self.tools {
+            match &tool.connection {
+                SearchConnection::Connected(_) => return true,
+                SearchConnection::Managed(managed) => {
+                    if !matches!(*managed.state.lock().await, ManagedState::Unusable(_)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Ask every designated tool for candidate URLs answering the redacted
     /// `query`. Returns the merged, order-preserving deduplicated URLs.
     async fn propose(&self, query: &str, limit: usize, audit_log: &Path) -> Vec<String> {
         let mut urls = Vec::new();
         for tool in &self.tools {
-            let client = McpClient::new(Arc::clone(&tool.transport));
+            let Some(transport) = tool.transport(audit_log).await else {
+                continue;
+            };
+            let (query, timeout) = tool.managed().map_or_else(
+                || {
+                    (
+                        query.to_string(),
+                        Duration::from_secs(MCP_SEARCH_TIMEOUT_SECS),
+                    )
+                },
+                |managed| {
+                    (
+                        managed.bound_query(query),
+                        Duration::from_secs(managed.call_timeout_secs),
+                    )
+                },
+            );
+            let query = query.as_str();
+            // A managed backend's query is recorded before it is sent; no
+            // record, no search.
+            if tool.managed().is_some()
+                && append_audit(
+                    audit_log,
+                    &audit_entry(
+                        &format!("mcp://{}", tool.label),
+                        &tool.label,
+                        "search-query",
+                        query,
+                    ),
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let client = McpClient::new(transport);
             let call = client.call_tool_raw(&tool.tool, serde_json::json!({ "query": query }));
-            let result =
-                tokio::time::timeout(Duration::from_secs(MCP_SEARCH_TIMEOUT_SECS), call).await;
+            let result = tokio::time::timeout(timeout, call).await;
             // The search call itself is egress (the redacted query goes to the
             // server), so it is audited like a fetch — success and failure both.
             let (decision, proposed) = match result {
@@ -1388,7 +1700,7 @@ struct WebSource {
     /// The designated search tools: the only source of candidate URLs. A
     /// model's recollection of URLs is never a candidate, because it cannot
     /// know anything newer than its training data and often invents links.
-    search: Option<McpSearchProposer>,
+    search: Option<Arc<McpSearchProposer>>,
     politeness: std::sync::Mutex<HostPoliteness>,
     /// Model-backed relevance admission for fetched pages, shared with the
     /// local knowledge source so local and web evidence are judged on the
@@ -1602,7 +1914,7 @@ impl WebSource {
             client,
             access,
             audit_log,
-            search,
+            search: search.map(Arc::new),
             politeness: std::sync::Mutex::new(HostPoliteness::default()),
             admission,
             renderer: None,
@@ -2781,9 +3093,16 @@ mod tests {
         // inert config guarantees no egress; a pre-set stop keeps the run fast.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut out: Vec<u8> = Vec::new();
-        run_prepared_interactive_research(dir.path(), "topic", prepared_a, stop, &mut out)
-            .await
-            .expect("prepared run completes");
+        run_prepared_interactive_research(
+            dir.path(),
+            "topic",
+            prepared_a,
+            stop,
+            &SearchLaunchConsent::Unattended,
+            &mut out,
+        )
+        .await
+        .expect("prepared run completes");
         let emitted = String::from_utf8(out).expect("utf8");
         assert!(
             emitted.contains("a.example"),
@@ -2807,6 +3126,270 @@ mod tests {
         config
     }
 
+    /// An approver that records each question and answers from a script.
+    struct RecordingApprover {
+        answers: std::sync::Mutex<std::collections::VecDeque<bool>>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingApprover {
+        fn new(answers: &[bool]) -> Arc<Self> {
+            Arc::new(Self {
+                answers: std::sync::Mutex::new(answers.iter().copied().collect()),
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl localpilot_sandbox::Approver for RecordingApprover {
+        fn approve<'a>(
+            &'a self,
+            request: &'a localpilot_sandbox::PermissionRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            self.asked.lock().unwrap().push(request.detail.clone());
+            let answer = self.answers.lock().unwrap().pop_front().unwrap_or(false);
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn managed_config(unattended: bool) -> localpilot_config::Config {
+        let mut config = inert_research_config();
+        let mut managed = crate::search_backend::tests::managed_backend("search");
+        managed.unattended = unattended;
+        config.search.managed.insert("ddg".to_string(), managed);
+        config
+    }
+
+    #[tokio::test]
+    async fn unattended_research_does_not_start_a_managed_backend_without_the_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = managed_config(false);
+        let mut options = options_from_loaded_config(dir.path(), &config, false, false);
+        options.write_report = false;
+        let mut out: Vec<u8> = Vec::new();
+        let completion = run_research_command_with_config(
+            dir.path(),
+            "topic",
+            &config,
+            &options,
+            None,
+            None,
+            &SearchLaunchConsent::Unattended,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let emitted = String::from_utf8(out).unwrap();
+        assert_eq!(completion.no_web, Some(NoWebReason::SearchNotAllowed));
+        assert!(
+            emitted
+                .contains("search backend managed.ddg.search: not allowed to start for this run"),
+            "{emitted}"
+        );
+        assert!(!emitted.contains("NoSearchBackend"), "{emitted}");
+        let audit = std::fs::read_to_string(default_audit_log(dir.path())).unwrap();
+        assert!(
+            audit.contains("search-launch-not-allowed-unattended"),
+            "{audit}"
+        );
+        assert!(!audit.contains("id=ddg"), "nothing was started: {audit}");
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_that_cannot_start_leaves_a_labelled_local_review() {
+        // Allowed to run unattended, but its program is not there: the run makes
+        // no web query, page fetch or repository search, and says so.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = managed_config(true);
+        let mut managed = config.search.managed["ddg"].clone();
+        managed.command = "localpilot-test-no-such-search-program".to_string();
+        managed.launch_identity = localpilot_config::search::launch_identity(&managed.server());
+        config.search.managed.insert("ddg".to_string(), managed);
+        let mut options = options_from_loaded_config(dir.path(), &config, false, false);
+        options.write_report = false;
+        let mut out: Vec<u8> = Vec::new();
+        let completion = run_research_command_with_config(
+            dir.path(),
+            "topic",
+            &config,
+            &options,
+            None,
+            None,
+            &SearchLaunchConsent::Unattended,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let emitted = String::from_utf8(out).unwrap();
+        assert_eq!(
+            completion.no_web,
+            Some(NoWebReason::NoSearchBackend),
+            "{emitted}"
+        );
+        assert!(emitted.contains("NoSearchBackend"), "{emitted}");
+        assert!(
+            emitted.contains("note: the search backend ddg could not be started"),
+            "{emitted}"
+        );
+        assert!(emitted.contains("local knowledge review"), "{emitted}");
+        assert!(
+            emitted.contains("web discovery skipped for this run"),
+            "no repository search: {emitted}"
+        );
+        let audit = std::fs::read_to_string(default_audit_log(dir.path())).unwrap();
+        assert!(audit.contains("search-launch-failed"), "{audit}");
+        assert!(!audit.contains("search-query"), "{audit}");
+        assert!(
+            !audit.contains("decision=allowed"),
+            "no page fetched: {audit}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_that_finds_nothing_still_counts_as_a_usable_backend() {
+        let proposer = scripted_proposer("no results");
+        let dir = tempfile::tempdir().unwrap();
+        assert!(proposer
+            .propose("q", 5, &dir.path().join("audit.log"))
+            .await
+            .is_empty());
+        assert!(proposer.usable().await);
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_needs_the_persons_answer_and_bypass_does_not_give_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_log = dir.path().join("audit.log");
+        // Declined: no tool, and the reason says it was not allowed.
+        let approver = RecordingApprover::new(&[false]);
+        let consent = SearchLaunchConsent::Ask(approver.clone());
+        let mut out = Vec::new();
+        let declined = connect_search_tools(&managed_config(true), &consent, &audit_log, &mut out)
+            .await
+            .unwrap();
+        assert!(matches!(declined, Err(NoWebReason::SearchNotAllowed)));
+        let asked = approver.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked.len(),
+            1,
+            "asked even though unattended use is allowed"
+        );
+        assert!(asked[0].contains("managed.ddg.search"), "{}", asked[0]);
+        assert!(asked[0].contains("public search engine"), "{}", asked[0]);
+        assert!(asked[0].contains("this run only"), "{}", asked[0]);
+        // Allowed: the tool is ready but nothing has started yet.
+        let approver = RecordingApprover::new(&[true]);
+        let consent = SearchLaunchConsent::Ask(approver);
+        let mut out = Vec::new();
+        let allowed = connect_search_tools(&managed_config(false), &consent, &audit_log, &mut out)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(allowed.tools.len(), 1);
+        assert!(allowed.tools[0].managed().is_some());
+        let audit = std::fs::read_to_string(&audit_log).unwrap();
+        assert!(audit.contains("search-launch-declined"), "{audit}");
+        assert!(audit.contains("search-launch-allowed"), "{audit}");
+        assert!(
+            !audit.contains("id=ddg"),
+            "no launch before the first search: {audit}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_starts_at_the_first_search_and_records_the_query_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_log = dir.path().join("audit.log");
+        let transport = Arc::new(
+            localpilot_mcp::ScriptedTransport::new()
+                .with("tools/list", crate::search_backend::tests::search_tool_list("search"))
+                .with(
+                    "tools/call",
+                    serde_json::json!({ "content": [{ "type": "text", "text": "URL: https://docs.rs/tokio\n" }] }),
+                ),
+        );
+        let (launcher, starts) =
+            crate::search_backend::tests::counting_launcher(Arc::clone(&transport));
+        let mut managed = crate::search_backend::tests::managed_backend("search");
+        managed.max_query_words = Some(3);
+        let spec = crate::search_backend::SearchSpec {
+            server: "ddg".to_string(),
+            tool: "search".to_string(),
+            launch: managed.server(),
+            managed: Some(managed.clone()),
+        };
+        let proposer = McpSearchProposer {
+            tools: vec![DesignatedSearchTool {
+                label: spec.label(),
+                tool: "search".to_string(),
+                connection: SearchConnection::Managed(Box::new(ManagedConnection {
+                    spec,
+                    managed,
+                    launcher,
+                    state: tokio::sync::Mutex::new(ManagedState::NotStarted),
+                })),
+            }],
+        };
+        let urls = proposer
+            .propose("how does tokio schedule tasks", 5, &audit_log)
+            .await;
+        assert_eq!(urls, vec!["https://docs.rs/tokio"]);
+        proposer.propose("again", 5, &audit_log).await;
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let sent: Vec<_> = transport
+            .calls()
+            .into_iter()
+            .filter(|(method, _)| method == "tools/call")
+            .map(|(_, params)| params["arguments"]["query"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(sent, vec!["how does tokio", "again"]);
+        let audit = std::fs::read_to_string(&audit_log).unwrap();
+        let launch = audit.find("search-launch").unwrap();
+        let query = audit.find("search-query").unwrap();
+        let result = audit.find("decision=search ").unwrap();
+        assert!(launch < query && query < result, "{audit}");
+        assert!(audit.contains("identity=sha256:"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_that_cannot_start_is_not_tried_again_in_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_log = dir.path().join("audit.log");
+        let mut managed = crate::search_backend::tests::managed_backend("search");
+        managed.command = "changed-after-setup".to_string();
+        let (launcher, starts) = crate::search_backend::tests::counting_launcher(Arc::new(
+            localpilot_mcp::ScriptedTransport::new(),
+        ));
+        let spec = crate::search_backend::SearchSpec {
+            server: "ddg".to_string(),
+            tool: "search".to_string(),
+            launch: managed.server(),
+            managed: Some(managed.clone()),
+        };
+        let proposer = McpSearchProposer {
+            tools: vec![DesignatedSearchTool {
+                label: spec.label(),
+                tool: "search".to_string(),
+                connection: SearchConnection::Managed(Box::new(ManagedConnection {
+                    spec,
+                    managed,
+                    launcher,
+                    state: tokio::sync::Mutex::new(ManagedState::NotStarted),
+                })),
+            }],
+        };
+        assert!(proposer.propose("q", 5, &audit_log).await.is_empty());
+        assert!(proposer.propose("q", 5, &audit_log).await.is_empty());
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let audit = std::fs::read_to_string(&audit_log).unwrap();
+        assert_eq!(
+            audit.matches("search-launch-refused-identity").count(),
+            1,
+            "{audit}"
+        );
+        assert!(!audit.contains("search-query"), "{audit}");
+    }
+
     #[tokio::test]
     async fn no_search_backend_means_a_labelled_local_review_with_no_web_leg() {
         // Web research is allowed but nothing is designated: candidate URLs come
@@ -2824,6 +3407,7 @@ mod tests {
             &options,
             None,
             None,
+            &SearchLaunchConsent::Unattended,
             &mut out,
         )
         .await
@@ -2868,6 +3452,7 @@ mod tests {
             &options,
             Some(false),
             None,
+            &SearchLaunchConsent::Unattended,
             &mut out,
         )
         .await
@@ -2883,6 +3468,7 @@ mod tests {
             &options,
             None,
             None,
+            &SearchLaunchConsent::Unattended,
             &mut out,
         )
         .await
@@ -3556,11 +4142,11 @@ mod tests {
             serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
         ));
         let proposer = McpSearchProposer {
-            tools: vec![DesignatedSearchTool {
-                label: "fixture.search".to_string(),
-                tool: "search".to_string(),
-                transport: Arc::clone(&transport) as Arc<dyn localpilot_mcp::Transport>,
-            }],
+            tools: vec![DesignatedSearchTool::connected(
+                "fixture.search".to_string(),
+                "search".to_string(),
+                Arc::clone(&transport) as Arc<dyn localpilot_mcp::Transport>,
+            )],
         };
         (proposer, transport)
     }
@@ -4626,9 +5212,16 @@ mod tests {
         let mut config = localpilot_config::Config::default();
         config.research.web.enabled = false;
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), "test topic", &config, None, &mut out)
-            .await
-            .unwrap();
+        let _source = build_web_source(
+            dir.path(),
+            "test topic",
+            &config,
+            None,
+            &SearchLaunchConsent::Unattended,
+            &mut out,
+        )
+        .await
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("web research stays disabled"),
@@ -4643,11 +5236,11 @@ mod tests {
             serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
         ));
         McpSearchProposer {
-            tools: vec![DesignatedSearchTool {
-                label: "fixture.search".to_string(),
-                tool: "search".to_string(),
+            tools: vec![DesignatedSearchTool::connected(
+                "fixture.search".to_string(),
+                "search".to_string(),
                 transport,
-            }],
+            )],
         }
     }
 
@@ -4733,11 +5326,11 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let transport = Arc::new(localpilot_mcp::ScriptedTransport::new());
         let proposer = McpSearchProposer {
-            tools: vec![DesignatedSearchTool {
-                label: "broken.search".to_string(),
-                tool: "search".to_string(),
+            tools: vec![DesignatedSearchTool::connected(
+                "broken.search".to_string(),
+                "search".to_string(),
                 transport,
-            }],
+            )],
         };
         let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
         access.grant_session();
@@ -4894,11 +5487,11 @@ mod tests {
             calls: std::sync::Mutex::new(Vec::new()),
         });
         let proposer = McpSearchProposer {
-            tools: vec![DesignatedSearchTool {
-                label: "capture.search".to_string(),
-                tool: "search".to_string(),
-                transport: Arc::clone(&transport) as Arc<dyn localpilot_mcp::Transport>,
-            }],
+            tools: vec![DesignatedSearchTool::connected(
+                "capture.search".to_string(),
+                "search".to_string(),
+                Arc::clone(&transport) as Arc<dyn localpilot_mcp::Transport>,
+            )],
         };
         let dir = tempfile::tempdir().unwrap();
         let audit = dir.path().join("audit.log");

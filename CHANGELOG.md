@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Managed search backends (LocalPilot#11, ADR-0291). A new `[search.managed.<id>]`
+  table in the user config holds search backends LocalPilot manages itself.
+  They are search-only: never one of the session's MCP tools, never started at
+  session start or by `doctor`, and started by chat `web_search` or `/research`
+  only at the first search, with per-backend timeouts and query limits. A
+  project file or environment variable cannot set them (ignored and reported by
+  `doctor`), a changed launch is refused, and `/research` asks once per run
+  before starting one (unattended runs only with the `unattended` opt-in). A
+  run whose backend was not allowed or could not start is a labelled local
+  knowledge review.
+
 - `/research` takes candidate URLs only from real search results
   (LocalPilot#12, ADR-0290). The model no longer lists URLs from its own
   memory, which often invented or outdated links. With no search tool set up in

@@ -38,6 +38,15 @@ pub struct Config {
     pub mesh: MeshConfig,
     pub lab: LabConfig,
     pub remote: RemoteConfig,
+    /// `[search]`: managed search backends. Read from the user's config file
+    /// alone, after every other key (see `load`), so no other layer can set
+    /// it, and a malformed value in another layer cannot stop loading.
+    #[serde(skip)]
+    pub search: crate::search::SearchConfig,
+    /// The layers that tried to set `[search]` and were ignored:
+    /// `"project"`, `"environment"`. Filled by the loader for reporting.
+    #[serde(skip)]
+    pub search_ignored: Vec<&'static str>,
     /// What the project file asked for that it may not grant itself. Filled by
     /// the loader, never read from a file, and inert until the user authorizes it
     /// for that project.
@@ -70,6 +79,8 @@ impl Default for Config {
             mesh: MeshConfig::default(),
             lab: LabConfig::default(),
             remote: RemoteConfig::default(),
+            search: crate::search::SearchConfig::default(),
+            search_ignored: Vec::new(),
             project_request: None,
         }
     }

@@ -90,6 +90,7 @@ mod remote_tailscale;
 mod repl;
 mod research;
 mod rpc_cmd;
+mod search_backend;
 mod self_review_cmd;
 mod selfdev_cmd;
 mod selfdev_reload;

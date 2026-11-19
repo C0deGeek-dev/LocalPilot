@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use localpilot_config::{ChatWebMode, Config, CredentialStore, McpServerConfig};
+use localpilot_config::{ChatWebMode, Config};
 use localpilot_mcp::{extract_candidate_urls, McpClient, McpError, SearchCallError, Transport};
 use localpilot_research::{host_matches, html_to_markdown};
 use localpilot_sandbox::{Approver, Effect, Interactivity, PermissionRequest};
@@ -45,49 +45,13 @@ const SEARCH_MAX_RESULTS: usize = 20;
 /// Longest query sent, in characters, and longest lead kept.
 const SEARCH_MAX_QUERY_CHARS: usize = 400;
 const SEARCH_MAX_LEAD_CHARS: usize = 2048;
-/// Bound on starting a search server and on one search call.
+/// Bound on starting a hand-designated search server and on one search call;
+/// a managed backend carries its own bounds.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// One search tool the user designated under `[research.mcp]`.
-#[derive(Clone)]
-struct SearchBackend {
-    server: String,
-    tool: String,
-    config: McpServerConfig,
-}
-
-impl SearchBackend {
-    fn label(&self) -> String {
-        format!("{}.{}", self.server, self.tool)
-    }
-}
-
-/// How a search server is started. Production spawns the configured command
-/// and completes the MCP handshake; tests substitute a scripted transport.
-type Launcher = Arc<
-    dyn Fn(
-            McpServerConfig,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Arc<dyn Transport>, String>> + Send>,
-        > + Send
-        + Sync,
->;
-
-fn spawn_launcher() -> Launcher {
-    Arc::new(|config: McpServerConfig| {
-        Box::pin(async move {
-            let (transport, _environment) =
-                crate::mcp_env::spawn_server(&config, &CredentialStore::user())
-                    .map_err(|error| error.to_string())?;
-            let client = McpClient::new(Arc::clone(&transport));
-            match tokio::time::timeout(SEARCH_TIMEOUT, client.initialize()).await {
-                Ok(Ok(_)) => Ok(transport),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("the server did not finish starting in time".to_string()),
-            }
-        })
-    })
-}
+use crate::search_backend::{spawn_launcher, Launcher, SearchSpec as SearchBackend};
+#[cfg(test)]
+use localpilot_config::McpServerConfig;
 
 /// How a host name is turned into addresses. Production asks the system
 /// resolver; tests substitute a fixed table.
@@ -219,15 +183,7 @@ impl ChatWeb {
             client,
             allow_loopback,
             consent,
-            backends: crate::chat_web_status::search_tools(config)
-                .0
-                .into_iter()
-                .map(|(server, tool, config)| SearchBackend {
-                    server,
-                    tool,
-                    config,
-                })
-                .collect(),
+            backends: crate::search_backend::search_specs(config).0,
             launcher,
             started: Mutex::new(HashMap::new()),
         })
@@ -366,7 +322,7 @@ impl ChatWeb {
         query: &str,
         request: &WebSearchRequest,
     ) -> Result<(), WebRefusal> {
-        let key = format!("mcp:{}", backend.server);
+        let key = backend.key();
         if self.granted(&key) {
             return Ok(());
         }
@@ -415,16 +371,35 @@ impl ChatWeb {
             .started
             .lock()
             .ok()
-            .and_then(|started| started.get(&backend.server).cloned())
+            .and_then(|started| started.get(&backend.key()).cloned())
         {
             return Ok(transport);
         }
-        let transport =
-            tokio::time::timeout(SEARCH_TIMEOUT, (self.launcher)(backend.config.clone()))
-                .await
-                .map_err(|_| "the server did not start in time".to_string())??;
+        let transport = if let Some(managed) = &backend.managed {
+            // A managed backend starts only here, at its first real search: its
+            // launch must still match setup, the launch is recorded first (no
+            // query), and its tool must take one query string.
+            crate::search_backend::start_managed(
+                backend,
+                managed,
+                &self.launcher,
+                |decision, detail| self.search_audit(backend, &format!("chat-{decision}"), detail),
+            )
+            .await
+            .map_err(|error| {
+                self.search_audit(backend, &format!("chat-{}", error.decision()), "");
+                error.describe(&backend.server)
+            })?
+        } else {
+            tokio::time::timeout(
+                SEARCH_TIMEOUT,
+                (self.launcher)(backend.launch.clone(), SEARCH_TIMEOUT),
+            )
+            .await
+            .map_err(|_| "the server did not start in time".to_string())??
+        };
         if let Ok(mut started) = self.started.lock() {
-            started.insert(backend.server.clone(), Arc::clone(&transport));
+            started.insert(backend.key(), Arc::clone(&transport));
         }
         Ok(transport)
     }
@@ -451,6 +426,11 @@ impl ChatWeb {
         let transport = match self.transport_for(backend).await {
             Ok(transport) => transport,
             Err(reason) => {
+                if backend.managed.is_some() {
+                    // Already recorded with its own decision; the reason is
+                    // value-free (no command, no server output).
+                    return Err(WebRefusal::Failed(format!("{reason}; nothing was sent.")));
+                }
                 // The reason can carry the configured command or the server's
                 // own output, so neither the model nor the log gets it.
                 let _ = reason;
@@ -463,8 +443,11 @@ impl ChatWeb {
             }
         };
         let client = McpClient::new(Arc::clone(&transport));
+        let call_timeout = backend.managed.as_ref().map_or(SEARCH_TIMEOUT, |managed| {
+            Duration::from_secs(managed.call_timeout_secs)
+        });
         let call = client.call_tool_raw(&backend.tool, serde_json::json!({ "query": query }));
-        let outcome = tokio::time::timeout(SEARCH_TIMEOUT, call).await;
+        let outcome = tokio::time::timeout(call_timeout, call).await;
         let (decision, result) = match outcome {
             Ok(Ok(value)) => {
                 let proposals = extract_candidate_urls(&value);
@@ -483,7 +466,7 @@ impl ChatWeb {
             Ok(Err(error)) => {
                 // A dead or broken server is started afresh next time.
                 if matches!(error, McpError::Transport(_)) {
-                    self.forget_transport(&backend.server);
+                    self.forget_transport(&backend.key());
                 }
                 (
                     "chat-search-error",
@@ -492,7 +475,7 @@ impl ChatWeb {
             }
             Err(_) => {
                 // A call abandoned mid-way can leave the connection out of step.
-                self.forget_transport(&backend.server);
+                self.forget_transport(&backend.key());
                 (
                     "chat-search-timeout",
                     Err(format!("{} did not answer in time", backend.server)),
@@ -698,10 +681,8 @@ impl WebGateway for ChatWeb {
                 localpilot_tools::NO_SEARCH_INDEX.to_string(),
             ));
         }
-        let query: String = localpilot_config::redact::redact(request.query.trim())
-            .chars()
-            .take(SEARCH_MAX_QUERY_CHARS)
-            .collect();
+        let redacted = localpilot_config::redact::redact(request.query.trim());
+        let query: String = redacted.chars().take(SEARCH_MAX_QUERY_CHARS).collect();
         let limit = request
             .max_results
             .unwrap_or(SEARCH_DEFAULT_RESULTS)
@@ -714,11 +695,24 @@ impl WebGateway for ChatWeb {
             if leads.len() >= limit {
                 break;
             }
-            if let Err(refusal) = self.ensure_search_consent(backend, &query, &request).await {
+            // The exact text this backend is sent, shown in the consent
+            // question as is: a managed backend's own limits apply, cut at a
+            // word boundary from the whole redacted query.
+            let sent = backend.managed.as_ref().map_or_else(
+                || query.clone(),
+                |managed| {
+                    localpilot_config::search::bound_query(
+                        &redacted,
+                        managed.max_query_chars.min(SEARCH_MAX_QUERY_CHARS),
+                        managed.max_query_words,
+                    )
+                },
+            );
+            if let Err(refusal) = self.ensure_search_consent(backend, &sent, &request).await {
                 last_refusal = Some(refusal);
                 continue;
             }
-            match self.search_one(backend, &query).await {
+            match self.search_one(backend, &sent).await {
                 Ok(found) => {
                     backends.push(backend.label());
                     for lead in found.into_iter().filter_map(|url| usable_lead(&url)) {
@@ -865,7 +859,7 @@ mod tests {
 
     /// A launcher for tests that never designate a search backend.
     fn no_launch() -> Launcher {
-        Arc::new(|_| Box::pin(async { Err("no search server in this test".to_string()) }))
+        Arc::new(|_, _| Box::pin(async { Err("no search server in this test".to_string()) }))
     }
 
     struct Fixture {
@@ -1310,6 +1304,9 @@ mod tests {
             method: &str,
             params: serde_json::Value,
         ) -> Result<serde_json::Value, McpError> {
+            if method == "tools/list" {
+                return Ok(crate::search_backend::tests::search_tool_list("search"));
+            }
             if method == "tools/call" {
                 let query = params["arguments"]["query"].as_str().unwrap_or_default();
                 self.queries.lock().unwrap().push(query.to_string());
@@ -1359,7 +1356,7 @@ mod tests {
             let starts = Arc::clone(&starts);
             let servers = Arc::clone(&servers);
             let audit_cell = Arc::clone(&audit_cell);
-            Arc::new(move |config: McpServerConfig| {
+            Arc::new(move |config: McpServerConfig, _handshake| {
                 starts.fetch_add(1, Ordering::SeqCst);
                 let name = config.command.clone();
                 let server = Arc::new(FakeSearch {
@@ -1808,6 +1805,179 @@ mod tests {
         assert!(detail.contains("ddg"), "{detail}");
         assert!(detail.contains("tokio runtime"), "{detail}");
         assert!(detail.contains("without asking again"), "{detail}");
+    }
+
+    /// A chat gateway whose only search backend is a managed one, served by
+    /// `transport`.
+    fn managed_fixture(
+        managed: localpilot_config::ManagedSearchBackend,
+        transport: Arc<localpilot_mcp::ScriptedTransport>,
+        script: &[bool],
+    ) -> (Fixture, Arc<AtomicUsize>) {
+        let (launcher, starts) = crate::search_backend::tests::counting_launcher(transport);
+        let fixture = fixture_with(
+            |config| {
+                config.search.managed.insert("ddg".to_string(), managed);
+            },
+            table(&[]),
+            false,
+            script,
+            launcher,
+        );
+        (fixture, starts)
+    }
+
+    fn managed_transport() -> Arc<localpilot_mcp::ScriptedTransport> {
+        Arc::new(
+            localpilot_mcp::ScriptedTransport::new()
+                .with(
+                    "tools/list",
+                    crate::search_backend::tests::search_tool_list("search"),
+                )
+                .with("tools/call", links(&["https://docs.rs/tokio"])),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_starts_at_the_first_consented_search_and_is_bounded() {
+        let mut managed = crate::search_backend::tests::managed_backend("search");
+        managed.max_query_words = Some(2);
+        let transport = managed_transport();
+        let (f, starts) = managed_fixture(managed, Arc::clone(&transport), &[true]);
+        // Configured, so search is ready, but nothing has started yet.
+        assert!(f.web.search_ready(false));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        let found = search(
+            &f.web,
+            false,
+            search_request("tokio runtime scheduler internals"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.leads, vec!["https://docs.rs/tokio"]);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        let sent: Vec<_> = transport
+            .calls()
+            .into_iter()
+            .filter(|(method, _)| method == "tools/call")
+            .map(|(_, params)| params["arguments"]["query"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            sent,
+            vec!["tokio runtime"],
+            "the backend's word limit applies"
+        );
+        let audit = audit_text(&f);
+        let launch = audit.find("chat-search-launch").expect("launch recorded");
+        let ok = audit.find("chat-search-ok").expect("result recorded");
+        assert!(launch < ok, "{audit}");
+        assert!(audit.contains("tier=keyless identity=sha256:"), "{audit}");
+        assert!(!audit.contains("tokio"), "the query is not kept: {audit}");
+        // A second search reuses the running server.
+        search(&f.web, false, search_request("again"))
+            .await
+            .unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_managed_backend_whose_launch_changed_is_never_started() {
+        let mut managed = crate::search_backend::tests::managed_backend("search");
+        managed.args.push("--changed".to_string());
+        let (f, starts) = managed_fixture(managed, managed_transport(), &[true]);
+        let outcome = search(&f.web, false, search_request("tokio")).await;
+        let Err(WebRefusal::Failed(text)) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(text.contains("launch settings changed"), "{text}");
+        assert!(text.contains("nothing was sent"), "{text}");
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        let audit = audit_text(&f);
+        assert!(
+            audit.contains("chat-search-launch-refused-identity"),
+            "{audit}"
+        );
+        assert!(!audit.contains("id=ddg"), "no launch record: {audit}");
+    }
+
+    #[tokio::test]
+    async fn a_hand_server_and_a_managed_backend_with_one_name_stay_apart() {
+        // Hand-designated "ddg" (answered by FakeSearch) and managed "ddg"
+        // (answered by the scripted transport) are different programs.
+        let managed_transport = managed_transport();
+        let (managed_launcher, managed_starts) =
+            crate::search_backend::tests::counting_launcher(Arc::clone(&managed_transport));
+        let hand_starts = Arc::new(AtomicUsize::new(0));
+        let launcher: Launcher = {
+            let hand_starts = Arc::clone(&hand_starts);
+            Arc::new(move |config: McpServerConfig, handshake| {
+                if config.command == "hand-ddg" {
+                    hand_starts.fetch_add(1, Ordering::SeqCst);
+                    let transport: Arc<dyn Transport> = Arc::new(
+                        localpilot_mcp::ScriptedTransport::new()
+                            .with("tools/call", links(&["https://hand.example/"])),
+                    );
+                    Box::pin(async move { Ok(transport) })
+                } else {
+                    managed_launcher(config, handshake)
+                }
+            })
+        };
+        let f = fixture_with(
+            |config| {
+                config.mcp.servers.insert(
+                    "ddg".to_string(),
+                    McpServerConfig {
+                        command: "hand-ddg".to_string(),
+                        ..McpServerConfig::default()
+                    },
+                );
+                config
+                    .research
+                    .mcp
+                    .tools
+                    .push(localpilot_config::ResearchMcpTool {
+                        server: "ddg".to_string(),
+                        tool: "search".to_string(),
+                    });
+                config.search.managed.insert(
+                    "ddg".to_string(),
+                    crate::search_backend::tests::managed_backend("search"),
+                );
+            },
+            table(&[]),
+            false,
+            // One answer per backend: the hand grant does not cover the managed one.
+            &[true, true],
+            launcher,
+        );
+        let mut request = search_request("tokio");
+        request.max_results = Some(2);
+        let found = search(&f.web, false, request).await.unwrap();
+        assert_eq!(found.backends, vec!["ddg.search", "managed.ddg.search"]);
+        assert_eq!(f.answers.asked(), 2);
+        assert_eq!(hand_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(managed_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            found.leads,
+            vec!["https://hand.example/", "https://docs.rs/tokio"]
+        );
+        let audit = audit_text(&f);
+        assert!(audit.contains("mcp://managed.ddg.search"), "{audit}");
+        assert!(audit.contains("chat-search-launch"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn a_declined_managed_search_starts_nothing() {
+        let (f, starts) = managed_fixture(
+            crate::search_backend::tests::managed_backend("search"),
+            managed_transport(),
+            &[false],
+        );
+        assert!(search(&f.web, false, search_request("tokio"))
+            .await
+            .is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

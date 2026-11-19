@@ -973,6 +973,17 @@ fn web_consent_approver(tx: mpsc::UnboundedSender<ApprovalCall>) -> TuiApprover 
     }
 }
 
+/// The approver for starting a managed search backend for one research run:
+/// the local approval prompt only, like web consent, and a yes that covers
+/// that run rather than the session.
+pub(crate) fn research_launch_approver(tx: mpsc::UnboundedSender<ApprovalCall>) -> TuiApprover {
+    TuiApprover {
+        tx,
+        asks: None,
+        lasting: false,
+    }
+}
+
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
     let target_kind = match request.effect {
         Effect::ReadPath { .. } | Effect::WritePath { .. } | Effect::ScratchPath { .. } => "path",

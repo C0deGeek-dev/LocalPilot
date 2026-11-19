@@ -84,13 +84,62 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     if let (Some(project), Some(below)) = (&paths.project, below_project) {
         separate_project_request(&mut config, project, below, cli)?;
     }
+    config.search = user_search(paths.user.as_deref())?;
+    config.search_ignored = ignored_search_layers(paths.project.as_deref());
     synthesize_env_providers(&mut config);
     validate_checks(&config.harness.checks)?;
     validate_granularity(&config.harness.granularity)?;
     // Deliberately after the merge: layers combine per key, so an entry can be
     // invalid only once every layer has been applied (see `validate_mcp_env`).
     validate_mcp_env(&config.mcp)?;
+    validate_mcp_env(&crate::schema::McpConfig {
+        servers: config
+            .search
+            .managed
+            .iter()
+            .map(|(id, backend)| (format!("search.managed.{id}"), backend.server()))
+            .collect(),
+    })?;
     Ok(config)
+}
+
+/// `[search]` as the user's own config file sets it, and only that file.
+///
+/// The table decides which program is started to send queries off the machine,
+/// so no other layer may set it. `Config::search` is skipped by the merged
+/// extraction, so a project file or variable holding a value of the wrong
+/// shape cannot stop loading either; a malformed value in the user's own file
+/// is an error naming the key, like any other.
+fn user_search(user: Option<&Path>) -> Result<crate::search::SearchConfig, ConfigError> {
+    let Some(user) = user.filter(|path| path.is_file()) else {
+        return Ok(crate::search::SearchConfig::default());
+    };
+    let layer = Figment::from(Toml::file(user));
+    if layer.find_value("search").is_err() {
+        return Ok(crate::search::SearchConfig::default());
+    }
+    layer.extract_inner("search").map_err(ConfigError::from)
+}
+
+/// The layers other than the user file that tried to set `[search]`, read
+/// without typed extraction so a wrong shape is still reported.
+fn ignored_search_layers(project: Option<&Path>) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if let Some(project) = project.filter(|path| path.is_file()) {
+        if Figment::from(Toml::file(project))
+            .find_value("search")
+            .is_ok()
+        {
+            ignored.push("project");
+        }
+    }
+    if Figment::from(Env::prefixed("LOCALPILOT_").split("__"))
+        .find_value("search")
+        .is_ok()
+    {
+        ignored.push("environment");
+    }
+    ignored
 }
 
 /// A project file may ask for broad action authority but never grant it to
@@ -546,6 +595,112 @@ mod tests {
             auto_fix: AutoFix::No,
             severity: None,
         }
+    }
+
+    const MANAGED_SEARCH: &str = "[search.managed.ddg]
+tier = \"keyless\"
+command = \"uvx\"
+args = [\"pkg==1.0\"]
+tool = \"search\"
+launch_identity = \"sha256:abc\"
+";
+
+    fn search_paths(dir: &Path) -> (PathBuf, PathBuf, ConfigPaths) {
+        let user = dir.join("user.toml");
+        let project = dir.join(".localpilot.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        (user, project, paths)
+    }
+
+    #[test]
+    fn managed_search_is_read_from_the_user_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, _project, paths) = search_paths(dir.path());
+        std::fs::write(&user, MANAGED_SEARCH).unwrap();
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        let backend = &config.search.managed["ddg"];
+        assert_eq!(backend.tier, crate::SearchTier::Keyless);
+        assert_eq!(backend.tool, "search");
+        assert_eq!(backend.call_timeout_secs, 20);
+        assert_eq!(backend.handshake_timeout_secs, 120);
+        assert_eq!(backend.max_query_chars, 400);
+        assert!(!backend.unattended);
+        // A binary that does not know `[search]` sees no server and no
+        // designation, and neither does this one's MCP pool.
+        assert!(config.mcp.servers.is_empty());
+        assert!(config.research.mcp.tools.is_empty());
+    }
+
+    #[test]
+    fn an_older_root_shape_sees_nothing_in_a_search_only_config() {
+        // The root as it was before `[search]`: the MCP and research tables,
+        // serde defaults, and no `deny_unknown_fields`.
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct LegacyResearch {
+            mcp: crate::ResearchMcpConfig,
+        }
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct LegacyRoot {
+            mcp: crate::McpConfig,
+            research: LegacyResearch,
+        }
+        let legacy: LegacyRoot = toml::from_str(MANAGED_SEARCH).unwrap();
+        assert!(legacy.mcp.servers.is_empty());
+        assert!(legacy.research.mcp.tools.is_empty());
+    }
+
+    #[test]
+    fn a_project_cannot_set_managed_search_and_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, project, paths) = search_paths(dir.path());
+        std::fs::write(&user, "").unwrap();
+        // A well-formed entry, and two of the wrong shape: none applies and
+        // none stops loading.
+        for toml in [
+            MANAGED_SEARCH.to_string(),
+            "search = 3\n".to_string(),
+            "[search.managed.x]\ntool = 5\n".to_string(),
+        ] {
+            std::fs::write(&project, &toml).unwrap();
+            let config = load(&paths, &CliOverrides::default()).unwrap();
+            assert!(config.search.managed.is_empty(), "{toml}");
+            assert!(config.search_ignored.contains(&"project"), "{toml}");
+        }
+        // The user's own entry survives a project that tries to replace it.
+        std::fs::write(&user, MANAGED_SEARCH).unwrap();
+        std::fs::write(&project, "[search.managed.ddg]\ncommand = \"evil\"\n").unwrap();
+        let config = load(&paths, &CliOverrides::default()).unwrap();
+        assert_eq!(config.search.managed["ddg"].command, "uvx");
+        assert_eq!(config.search_ignored, vec!["project"]);
+    }
+
+    #[test]
+    fn the_environment_cannot_set_managed_search_and_is_reported() {
+        const VAR: &str = "LOCALPILOT_SEARCH__MANAGED__ENVTEST__COMMAND";
+        let dir = tempfile::tempdir().unwrap();
+        let (user, _project, paths) = search_paths(dir.path());
+        std::fs::write(&user, MANAGED_SEARCH).unwrap();
+        std::env::set_var(VAR, "evil");
+        let config = load(&paths, &CliOverrides::default());
+        std::env::remove_var(VAR);
+        let config = config.unwrap();
+        assert_eq!(config.search.managed.len(), 1);
+        assert_eq!(config.search.managed["ddg"].command, "uvx");
+        assert!(config.search_ignored.contains(&"environment"));
+    }
+
+    #[test]
+    fn a_malformed_user_search_table_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, _project, paths) = search_paths(dir.path());
+        std::fs::write(&user, "[search.managed.x]\ntool = 5\n").unwrap();
+        let error = load(&paths, &CliOverrides::default()).unwrap_err();
+        assert!(error.to_string().contains("search"), "{error}");
     }
 
     #[test]

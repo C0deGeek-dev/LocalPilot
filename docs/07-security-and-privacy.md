@@ -898,6 +898,14 @@ construction:
   With no search tool designated or reachable the run performs no web search or
   page fetch — skill discovery's repository search included — and its report is
   titled a local knowledge review with the reason stated.
+- **Managed search backends** (ADR-0291). A backend LocalPilot set up is read
+  from the user config only (a project or environment value is ignored and
+  reported), never joins the session's MCP tools, starts only at the first
+  search, and only if its launch still matches the identity recorded at setup.
+  Research asks the person once per run before starting it (never a profile,
+  pre-approval, bypass or paired device); unattended runs start it only with
+  the user's `unattended` opt-in. Each start, and each redacted research query,
+  is recorded before it happens; if the record fails, nothing starts or is sent.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
   search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag

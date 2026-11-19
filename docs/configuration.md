@@ -1503,6 +1503,34 @@ authority; it is not the LocalBench default.
 | `resume_requires_no_pending_approval` | bool | `true` | Refuse to resume through a pending approval |
 | `resume_only_at_step_boundary` | bool | `true` | Resume only between steps |
 
+### `[search.managed.<id>]`
+
+Search backends that LocalPilot manages itself (ADR-0291). LocalPilot writes
+these entries when it sets up a search backend. They are read from your **user**
+config file only: a project `.localpilot.toml` or a `LOCALPILOT_SEARCH__…`
+variable that sets `[search]` is ignored, and `localpilot doctor` says so.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tier` | — | `keyless`, `self_hosted` or `api_key`: what kind of backend this is, used in consent questions and audit records. |
+| `command`, `args`, `env` | — | What is run, in the `[mcp.servers]` forms (see `[mcp.servers.<name>.env]`). |
+| `tool` | — | The one tool called. It must take a `query` string and require nothing else. |
+| `launch_identity` | — | A digest of `command`, `args` and `env` recorded at setup. If they change, LocalPilot refuses to start the backend until it is set up again. |
+| `call_timeout_secs` | `20` | Longest wait for one search. |
+| `handshake_timeout_secs` | `120` | Longest wait for the first start, which can download packages. |
+| `max_query_chars` | `400` | Longest query sent, after redaction, cut at a word boundary. |
+| `max_query_words` | none | Most words sent, for backends that limit words. |
+| `unattended` | `false` | Whether research nobody is watching (piped, scheduled) may start it. |
+
+A managed backend is never one of the session's MCP tools and never starts at
+session start or in `doctor`. Chat `web_search` starts it at the first search
+you allow (the usual per-session search question). `/research` asks once per
+run, before anything starts, on the fullscreen session's own prompt or on the
+terminal; without anyone to ask it starts only when `unattended = true`. Each
+start and, in research, each redacted query is recorded in the egress audit log
+before it happens. Managed backends are tried after any search tools named in
+`[research.mcp] tools`.
+
 ### `[mcp.servers.<name>]`
 
 | Key | Type | Default | Meaning |

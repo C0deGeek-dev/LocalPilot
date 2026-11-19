@@ -274,6 +274,26 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn a_managed_search_backend_is_never_one_of_the_sessions_tools() {
+        // Managed backends live outside [mcp.servers]: loading the session's
+        // MCP tools starts nothing for them and offers the model none of their
+        // tools, so their only path out is the consented, audited search.
+        let mut config = Config::default();
+        config.search.managed.insert(
+            "ddg".to_string(),
+            crate::search_backend::tests::managed_backend("search"),
+        );
+        let tools = McpTools::load(&config).await;
+        assert!(tools.entries.is_empty());
+        assert!(tools.resource_servers.is_empty());
+        let registry = tools.registry();
+        assert!(registry
+            .specs()
+            .iter()
+            .all(|(name, _, _)| !name.contains("ddg") && *name != "search"));
+    }
+
     fn assert_unique_spec_names(registry: &ToolRegistry) {
         let specs = registry.specs();
         let unique = specs

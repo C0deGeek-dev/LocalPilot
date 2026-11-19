@@ -217,6 +217,19 @@ records the server and outcome but never the query (see
 doctor` lists them as configured; its MCP section probes whether each server
 starts, which does not prove a search works.
 
+### Managed search backends
+
+A search backend that LocalPilot sets up for you lives under
+`[search.managed.<id>]` in your user config instead (ADR-0291, see
+[`docs/configuration.md`](configuration.md)). It is search-only: it is never one
+of the session's MCP tools, never starts at session start or in `doctor`, and
+only chat `web_search` and `/research` start it, at their first search, to call
+its one designated tool. Its launch must still match the identity recorded at
+setup, and the tool must take a single `query` string. In research, the start
+needs your answer once per run (the fullscreen session's own prompt, or the
+terminal); a run nobody can be asked in starts it only when `unattended = true`.
+Managed backends are tried after the tools named in `[research.mcp] tools`.
+
 Note on provenance: some community search servers scrape engines that offer
 no official API, while vendor servers (and self-hosted SearXNG) speak
 official interfaces — the choice of server, and its provenance, is yours.

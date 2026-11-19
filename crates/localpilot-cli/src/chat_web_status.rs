@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use localpilot_config::{ChatWebMode, Config, McpServerConfig};
+#[cfg(test)]
+use localpilot_config::McpServerConfig;
+use localpilot_config::{ChatWebMode, Config};
 
 /// The egress audit log when `[research.web] audit_log` is unset.
 pub(crate) fn default_audit_log(root: &Path) -> PathBuf {
@@ -23,24 +25,6 @@ pub(crate) fn audit_log_path(root: &Path, config: &Config) -> PathBuf {
         .map_or_else(|| default_audit_log(root), |path| root.join(path))
 }
 
-/// The search tools named in `[research.mcp] tools` whose server is
-/// configured, in order, as `(server, tool, server config)`, and the
-/// `server.tool` names whose server is not.
-#[cfg_attr(not(feature = "tui"), allow(dead_code))]
-pub(crate) fn search_tools(
-    config: &Config,
-) -> (Vec<(String, String, McpServerConfig)>, Vec<String>) {
-    let mut found = Vec::new();
-    let mut unresolved = Vec::new();
-    for pair in &config.research.mcp.tools {
-        match config.mcp.servers.get(&pair.server) {
-            Some(server) => found.push((pair.server.clone(), pair.tool.clone(), server.clone())),
-            None => unresolved.push(format!("{}.{}", pair.server, pair.tool)),
-        }
-    }
-    (found, unresolved)
-}
-
 /// Chat web access as configured, for `localpilot doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ChatWebStatus {
@@ -55,11 +39,32 @@ pub struct ChatWebStatus {
     pub search_backends: Vec<String>,
     /// Search tools named in `[research.mcp] tools` with no such server.
     pub unresolved: Vec<String>,
+    /// Layers that tried to set `[search]` and were ignored: it is read from
+    /// the user's own config file only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub search_ignored: Vec<&'static str>,
 }
 
 impl ChatWebStatus {
     pub fn from_config(root: &Path, config: &Config) -> Self {
-        let (found, unresolved) = search_tools(config);
+        // Read from configuration alone; kept free of the launch code so the
+        // doctor test build can include this file on its own.
+        let mut search_backends = Vec::new();
+        let mut unresolved = Vec::new();
+        for pair in &config.research.mcp.tools {
+            let label = format!("{}.{}", pair.server, pair.tool);
+            if config.mcp.servers.contains_key(&pair.server) {
+                search_backends.push(label);
+            } else {
+                unresolved.push(label);
+            }
+        }
+        for (id, managed) in &config.search.managed {
+            search_backends.push(format!(
+                "{id}.{} (managed; starts on first search)",
+                managed.tool
+            ));
+        }
         Self {
             mode: match config.tools.web {
                 ChatWebMode::Off => "off",
@@ -67,11 +72,9 @@ impl ChatWebStatus {
             },
             research_web_enabled: config.research.web.enabled,
             audit_log: audit_log_path(root, config).display().to_string(),
-            search_backends: found
-                .iter()
-                .map(|(server, tool, _)| format!("{server}.{tool}"))
-                .collect(),
+            search_backends,
             unresolved,
+            search_ignored: config.search_ignored.clone(),
         }
     }
 

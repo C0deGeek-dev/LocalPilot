@@ -905,6 +905,13 @@ fn render_chat_web(s: &mut String, web: &crate::chat_web_status::ChatWebStatus) 
             web.unresolved.join(", ")
         );
     }
+    if !web.search_ignored.is_empty() {
+        let _ = writeln!(
+            s,
+            "  [search] set in {} was ignored: managed search backends are read from your user config only",
+            web.search_ignored.join(" and ")
+        );
+    }
 }
 
 /// Render a report as a machine-readable JSON object (one trailing newline).
@@ -1835,6 +1842,7 @@ mod tests {
                 audit_log: "/work/.localpilot/research/audit.log".to_string(),
                 search_backends: Vec::new(),
                 unresolved: vec!["finder.search".to_string()],
+                search_ignored: Vec::new(),
             }),
             agents: AgentsStatus::default(),
             capabilities: vec!["doctor-json".to_string(), "models-json".to_string()],
@@ -2160,6 +2168,43 @@ added_at = \"1\"
             m.shadowed[0].starts_with("alpha: ") && m.shadowed[0].ends_with("[global (.agents)]")
         );
         assert!(m.recovery_pending.is_empty());
+    }
+
+    #[test]
+    fn managed_search_and_ignored_overrides_are_reported() {
+        let mut config = localpilot_config::Config::default();
+        config.search.managed.insert(
+            "ddg".to_string(),
+            localpilot_config::ManagedSearchBackend {
+                tier: localpilot_config::SearchTier::Keyless,
+                command: "search-server".to_string(),
+                args: Vec::new(),
+                env: indexmap::IndexMap::new(),
+                tool: "search".to_string(),
+                launch_identity: String::new(),
+                call_timeout_secs: 20,
+                handshake_timeout_secs: 120,
+                max_query_chars: 400,
+                max_query_words: None,
+                unattended: true,
+            },
+        );
+        config.search_ignored = vec!["project", "environment"];
+        let status = crate::chat_web_status::ChatWebStatus::from_config(
+            std::path::Path::new("/work"),
+            &config,
+        );
+        let mut s = String::new();
+        render_chat_web(&mut s, &status);
+        assert!(s.contains("research web: on"), "{s}");
+        assert!(
+            s.contains("ddg.search (managed; starts on first search)"),
+            "{s}"
+        );
+        assert!(
+            s.contains("[search] set in project and environment was ignored"),
+            "{s}"
+        );
     }
 
     #[test]

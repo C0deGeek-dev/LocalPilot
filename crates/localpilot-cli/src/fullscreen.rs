@@ -5317,6 +5317,7 @@ async fn drive_operation_chain(
                             &prompt.text,
                             queue,
                             BeginWork::AlreadyBusy,
+                            authority.approval_tx,
                         )
                         .await?
                     }
@@ -5460,7 +5461,17 @@ async fn drive_slash_command(
             drive_ingest(terminal, app, runtime, ctx, action, queue).await
         }
         PumpedSlash::Research { topic } => {
-            drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
+            drive_research(
+                terminal,
+                app,
+                runtime,
+                ctx,
+                &topic,
+                queue,
+                BeginWork::Own,
+                authority.approval_tx,
+            )
+            .await
         }
         PumpedSlash::HarnessResume => {
             ctx.execution =
@@ -6769,6 +6780,7 @@ enum BeginWork {
 /// Run a research pass on the operation pump: preflight before Busy, show the egress
 /// disclosure and draw before any request, then a signal-then-await-partial run
 /// whose buffered output is presented through the bounded report presenter.
+#[allow(clippy::too_many_arguments)]
 async fn drive_research(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -6777,7 +6789,14 @@ async fn drive_research(
     topic: &str,
     queue: &mut VecDeque<QueuedOperation>,
     begin: BeginWork,
+    approval_tx: &mpsc::UnboundedSender<ApprovalCall>,
 ) -> Result<bool> {
+    // A managed search backend may start only with the person's own answer,
+    // asked on this terminal's approval prompt (never a paired device), which
+    // the operation pump below services while the run waits.
+    let launch_consent = crate::research::SearchLaunchConsent::Ask(Arc::new(
+        crate::interactive_session::research_launch_approver(approval_tx.clone()),
+    ));
     let prepared = match crate::research::prepare_interactive_research(ctx.cwd) {
         Ok(Some(prepared)) => prepared,
         other => {
@@ -6826,6 +6845,7 @@ async fn drive_research(
                     &topic,
                     prepared,
                     stop.clone(),
+                    &launch_consent,
                     &mut out,
                 );
                 tokio::pin!(run);

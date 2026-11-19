@@ -111,9 +111,45 @@ impl<R: BufRead, W: Write> EgressApproval for TerminalApproval<R, W> {
     }
 }
 
+/// Ask one yes-or-no question on `output` and read the answer from `input`.
+/// Only "y" or "yes" is a yes; anything else, an empty line and a closed
+/// input included, is a no.
+pub fn confirm<R: BufRead, W: Write>(mut input: R, mut output: W, question: &str) -> bool {
+    let _ = write!(
+        output,
+        "\n  {question}\n\n  [y] allow for this run   anything else declines\n  > "
+    );
+    let _ = output.flush();
+    let mut answer = String::new();
+    match input.read_line(&mut answer) {
+        Ok(0) | Err(_) => false,
+        Ok(_) => matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn confirm_takes_only_an_explicit_yes() {
+        for (input, expected) in [
+            ("y\n", true),
+            ("YES\n", true),
+            ("n\n", false),
+            ("\n", false),
+            ("", false),
+            ("sure\n", false),
+        ] {
+            let mut shown = Vec::new();
+            assert_eq!(
+                super::confirm(input.as_bytes(), &mut shown, "Start it?"),
+                expected,
+                "{input:?}"
+            );
+            assert!(String::from_utf8(shown).unwrap().contains("Start it?"));
+        }
+    }
+
     use super::*;
     use localpilot_research::{DenyWhenNobodyToAsk, EgressApproval};
 

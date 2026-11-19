@@ -14,6 +14,7 @@ mod error;
 mod load;
 pub mod redact;
 mod schema;
+pub mod search;
 
 pub use context::{
     ContextDiscovery, ContextFile, ContextKind, ContextScope, ProjectContext, DEFAULT_DIR_DEPTH,
@@ -39,3 +40,4 @@ pub use schema::{
     VerificationPolicy, WorkLimitMode, DEFAULT_HEADLESS_TOOL_BUDGET_MAX,
     DEFAULT_HEADLESS_TURN_TIMEOUT_SECS, DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX, MAX_HEADLESS_UNITS,
 };
+pub use search::{ManagedSearchBackend, SearchConfig, SearchTier};
