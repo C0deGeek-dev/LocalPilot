@@ -284,6 +284,13 @@ pub(crate) struct Setup<'a> {
     /// Sixteen random hex digits, for a fresh credential alias.
     pub(crate) random_suffix: &'a dyn Fn() -> Option<String>,
     pub(crate) write: ConfigWriter<'a>,
+    /// Whether a key may be asked for here. Only a terminal reads one
+    /// without showing it; elsewhere a backend that needs a key is pointed at
+    /// `localpilot search setup`.
+    pub(crate) keys: bool,
+    /// Whoever started setup has gone (the session closed): nothing more is
+    /// stored, started or written.
+    pub(crate) stopped: &'a dyn Fn() -> bool,
 }
 
 /// How a setup run ended.
@@ -334,6 +341,19 @@ fn audit(state_dir: &Path, event: &str, backend: Backend, detail: &str) -> bool 
 /// by hand clears it.
 fn decline_marker(state_dir: &Path) -> PathBuf {
     state_dir.join("setup-declined")
+}
+
+/// Remember a "no, and don't offer again" to the in-session offer.
+#[cfg(feature = "tui")]
+pub(crate) fn remember_decline(state_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    std::fs::write(decline_marker(state_dir), "declined\n")
+}
+
+/// Whether the in-session offer was declined for good.
+#[cfg(feature = "tui")]
+pub(crate) fn declined(state_dir: &Path) -> bool {
+    decline_marker(state_dir).exists()
 }
 
 /// Forget an earlier "no" to the in-session offer.
@@ -454,7 +474,13 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     say("");
     let options: Vec<String> = Backend::ALL
         .iter()
-        .map(|backend| backend.title().to_string())
+        .map(|backend| {
+            if !s.keys && backend.key_variable().is_some() {
+                format!("{} (set up in a terminal)", backend.title())
+            } else {
+                backend.title().to_string()
+            }
+        })
         .collect();
     let backend = match s
         .console
@@ -473,6 +499,15 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
             return Outcome::Cancelled;
         }
     };
+
+    if !s.keys && backend.key_variable().is_some() {
+        let reason = format!(
+            "{} needs your own key, and a key is entered only at a terminal: run localpilot search setup there",
+            backend.title()
+        );
+        say(&reason);
+        return Outcome::Stopped(reason);
+    }
 
     // 2. What it needs.
     let program = match (backend.needs(), found.launcher_for(backend)) {
@@ -581,6 +616,9 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
             say("No key was entered. Nothing was set up.");
             return Outcome::Cancelled;
         }
+        if let Some(outcome) = halted(s, backend, None, "key") {
+            return outcome;
+        }
         // The preview promised a fresh name; something may have taken it
         // while the questions were open.
         if s.credentials.generic_get(alias).is_some() {
@@ -604,6 +642,9 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     }
 
     // 7. Start it once: download, handshake, and its search tool's shape.
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), "check") {
+        return outcome;
+    }
     say("Starting it once to download it and check its search tool (the first time can take a minute)...");
     let spec = SearchSpec {
         server: backend.id().to_string(),
@@ -635,6 +676,9 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     say("It started and offers a search tool LocalPilot can use.");
 
     // 8. Unattended research, off unless asked for.
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), "unattended") {
+        return outcome;
+    }
     entry.unattended = match s
         .console
         .ask("Allow scheduled and unattended research to use this backend?")
@@ -650,11 +694,20 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     };
 
     // 9. One locked edit, then read back what is in effect.
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), "write") {
+        return outcome;
+    }
     let id = backend.id();
     match (s.write)(s.config_path.as_deref(), &|document| {
+        if (s.stopped)() {
+            return Err(STOPPED.to_string());
+        }
         place(document, id, &entry)
     }) {
         Ok(ConfigEdit::Written | ConfigEdit::Unchanged) => {}
+        Err(ConfigError::Before(_)) if (s.stopped)() => {
+            return halted(s, backend, alias.as_deref(), "write").unwrap_or(Outcome::Cancelled);
+        }
         Err(ConfigError::Before(reason)) => {
             audit(&s.state_dir, "setup-failed", backend, "at=write");
             let left = forget_alias(s, backend, alias.as_deref());
@@ -737,6 +790,26 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     Outcome::Configured(id.to_string())
 }
 
+/// Why a write was refused when setup was stopped part-way.
+pub(crate) const STOPPED: &str = "setup was stopped";
+
+/// When setup was stopped (its session closed), record where, remove the key
+/// this run stored, and end. `None` while it may go on.
+fn halted(s: &Setup<'_>, backend: Backend, alias: Option<&str>, at: &str) -> Option<Outcome> {
+    if !(s.stopped)() {
+        return None;
+    }
+    audit(
+        &s.state_dir,
+        "setup-cancelled",
+        backend,
+        &format!("at={at} reason=stopped"),
+    );
+    let left = forget_alias(s, backend, alias);
+    s.console.say(&format!("Nothing was set up{left}."));
+    Some(Outcome::Cancelled)
+}
+
 fn stop(s: &Setup<'_>, reason: &str) -> Outcome {
     s.console.say(&format!("Setup stopped: {reason}."));
     Outcome::Stopped(reason.to_string())
@@ -766,6 +839,255 @@ fn forget_alias(s: &Setup<'_>, backend: Backend, alias: Option<&str>) -> String 
     }
 }
 
+// -------------------------------------------------------------- in session
+
+/// Whether to offer setup now. Read fresh each time: research may use the
+/// web, chat web access is not off, this is not an incognito session, no
+/// search tool of any kind is configured, and the offer was not declined for
+/// good.
+#[cfg(feature = "tui")]
+pub(crate) fn offer_wanted(root: &Path, incognito: bool) -> bool {
+    if incognito {
+        return false;
+    }
+    let Some(state) = state_dir() else {
+        return false;
+    };
+    if declined(&state) {
+        return false;
+    }
+    let Ok(config) = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(root),
+        &localpilot_config::CliOverrides::default(),
+    ) else {
+        return false;
+    };
+    offer_fits(&config)
+}
+
+/// Whether `config` leaves web search with nothing to use while it may use
+/// the web.
+#[cfg(feature = "tui")]
+fn offer_fits(config: &Config) -> bool {
+    let (specs, unresolved) = crate::search_backend::search_specs(config);
+    config.research.web.enabled
+        && config.tools.web != localpilot_config::ChatWebMode::Off
+        && specs.is_empty()
+        && unresolved.is_empty()
+        && config.search.managed.is_empty()
+}
+
+/// What setup shows in a session besides its questions.
+#[cfg(feature = "tui")]
+pub(crate) enum SetupNote {
+    /// A few lines for the conversation.
+    Notice(String),
+    /// Lines to read in full before the next question (the backend list, the
+    /// exact command and config): shown on a scrollable page of their own;
+    /// `seen` is sent once that page is closed, and dropped if it never is.
+    Review {
+        lines: Vec<String>,
+        seen: std::sync::mpsc::Sender<()>,
+    },
+}
+
+/// More lines than this before a question are shown as a page to read first:
+/// a question dialog covers part of the conversation on a small terminal.
+#[cfg(feature = "tui")]
+const REVIEW_AFTER_LINES: usize = 3;
+
+/// Setup's questions as session dialogs, answered by the person at this
+/// terminal. What setup says before a question is shown first, in full (a
+/// page of its own when it is long), so the dialog holds only the question;
+/// what it says after the last one is collected for the host to show. Only an
+/// offered answer counts: a dismissal, typed text or a closed dialog cancels.
+/// A key is never asked for here.
+#[cfg(feature = "tui")]
+pub(crate) struct DialogConsole {
+    prompter: std::sync::Arc<dyn localpilot_tools::UserPrompter>,
+    handle: tokio::runtime::Handle,
+    notes: tokio::sync::mpsc::UnboundedSender<SetupNote>,
+    lines: std::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(feature = "tui")]
+impl DialogConsole {
+    pub(crate) fn new(
+        prompter: std::sync::Arc<dyn localpilot_tools::UserPrompter>,
+        handle: tokio::runtime::Handle,
+        notes: tokio::sync::mpsc::UnboundedSender<SetupNote>,
+    ) -> Self {
+        Self {
+            prompter,
+            handle,
+            notes,
+            lines: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// What was said since the last question.
+    pub(crate) fn take_lines(&self) -> Vec<String> {
+        std::mem::take(&mut *self.lines.borrow_mut())
+    }
+
+    /// Ask on a session dialog; the index of the offered answer chosen. Must
+    /// run on a thread of its own, never on a runtime worker.
+    fn choose(&self, prompt: &str, labels: &[String]) -> Option<usize> {
+        let said = self.take_lines();
+        let first = said.iter().position(|line| !line.trim().is_empty());
+        let last = said.iter().rposition(|line| !line.trim().is_empty());
+        if let (Some(first), Some(last)) = (first, last) {
+            let said = said[first..=last].to_vec();
+            if said.len() > REVIEW_AFTER_LINES {
+                // Read it all first; the question waits until the page is
+                // closed, and is never asked if it is not.
+                let (seen, read) = std::sync::mpsc::channel();
+                if self
+                    .notes
+                    .send(SetupNote::Review { lines: said, seen })
+                    .is_err()
+                {
+                    return None;
+                }
+                read.recv().ok()?;
+            } else {
+                let _ = self.notes.send(SetupNote::Notice(said.join("\n")));
+            }
+        }
+        let question = localpilot_tools::UserQuestion {
+            header: Some("Search setup".to_string()),
+            question: prompt.to_string(),
+            options: labels
+                .iter()
+                .map(|label| localpilot_tools::QuestionOption {
+                    label: label.clone(),
+                    description: None,
+                })
+                .collect(),
+            multi_select: false,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let prompter = std::sync::Arc::clone(&self.prompter);
+        self.handle.spawn(async move {
+            let questions = [question];
+            let _ = tx.send(prompter.ask(&questions).await);
+        });
+        let answers = rx.recv().ok()?;
+        match answers.as_slice() {
+            [localpilot_tools::UserAnswer::Selected(chosen)] => match chosen.as_slice() {
+                [label] => labels.iter().position(|offered| offered == label),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+impl SetupConsole for DialogConsole {
+    fn say(&self, line: &str) {
+        self.lines.borrow_mut().push(line.to_string());
+    }
+
+    fn pick(&self, prompt: &str, options: &[String]) -> Pick {
+        let mut labels = options.to_vec();
+        labels.push("None of these".to_string());
+        match self.choose(prompt, &labels) {
+            Some(index) if index < options.len() => Pick::Option(index),
+            Some(_) => Pick::No,
+            None => Pick::Cancel,
+        }
+    }
+
+    fn ask(&self, prompt: &str) -> Answer {
+        // "No" first: the dialog starts on the first choice, so Enter alone
+        // never agrees to anything.
+        match self.choose(prompt, &["No".to_string(), "Yes".to_string()]) {
+            Some(1) => Answer::Yes,
+            Some(_) => Answer::No,
+            None => Answer::Cancel,
+        }
+    }
+
+    fn secret(&self, _prompt: &str) -> Option<Secret> {
+        None
+    }
+}
+
+/// The offer made in a session that found no search backend: one question,
+/// then (on yes) setup itself, with keys left to the terminal command. A
+/// "don't offer again" is remembered until `localpilot search setup` runs.
+/// Runs on a thread of its own; `stop` set means the session has gone.
+#[cfg(feature = "tui")]
+pub(crate) async fn offer_in_session(
+    root: &Path,
+    console: &DialogConsole,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Outcome {
+    let Some(state) = state_dir() else {
+        return Outcome::Cancelled;
+    };
+    let options = [
+        "Set one up".to_string(),
+        "No, and don't offer again".to_string(),
+    ];
+    match console.choose(
+        "No web search backend is set up, so web search and /research cannot search the web. Set one up now?",
+        &options,
+    ) {
+        Some(0) => {}
+        Some(_) => {
+            match remember_decline(&state) {
+                Ok(()) => console.say(
+                    "LocalPilot will not offer this again. Run localpilot search setup to set one up.",
+                ),
+                Err(error) => console.say(&format!(
+                    "Your answer could not be saved ({error}), so this may be offered again."
+                )),
+            }
+            return Outcome::Declined;
+        }
+        None => return Outcome::Cancelled,
+    }
+    let stopped = || stop.load(std::sync::atomic::Ordering::SeqCst);
+    if stopped() {
+        return Outcome::Cancelled;
+    }
+    let credentials = CredentialStore::user();
+    let effective = || {
+        localpilot_config::load(
+            &localpilot_config::ConfigPaths::standard(root),
+            &localpilot_config::CliOverrides::default(),
+        )
+        .map_err(anyhow::Error::from)
+    };
+    let write = |path: Option<&Path>,
+                 edit: &dyn Fn(&mut toml_edit::DocumentMut) -> Result<(), String>| {
+        let fence = || {
+            if stopped() {
+                Err(STOPPED.to_string())
+            } else {
+                Ok(())
+            }
+        };
+        crate::user_config::edit_user_config(path, &fence, &|_| {}, edit)
+    };
+    let setup = Setup {
+        console,
+        probes: &LocalProbes,
+        credentials: &credentials,
+        config_path: localpilot_config::user_config_path(),
+        state_dir: state,
+        launcher: crate::search_backend::spawn_launcher(),
+        effective: &effective,
+        random_suffix: &random_suffix,
+        write: &write,
+        keys: false,
+        stopped: &stopped,
+    };
+    run(&setup).await
+}
+
 // ------------------------------------------------------------- production
 
 /// `localpilot search setup`.
@@ -791,7 +1113,7 @@ pub(crate) async fn run_command() -> anyhow::Result<()> {
     };
     let write = |path: Option<&Path>,
                  edit: &dyn Fn(&mut toml_edit::DocumentMut) -> Result<(), String>| {
-        crate::user_config::edit_user_config(path, &|_| {}, edit)
+        crate::user_config::edit_user_config(path, &|| Ok(()), &|_| {}, edit)
     };
     let setup = Setup {
         console: &Terminal,
@@ -803,6 +1125,8 @@ pub(crate) async fn run_command() -> anyhow::Result<()> {
         effective: &effective,
         random_suffix: &random_suffix,
         write: &write,
+        keys: true,
+        stopped: &|| false,
     };
     match run(&setup).await {
         Outcome::Configured(_) | Outcome::Declined | Outcome::Cancelled => Ok(()),
@@ -971,7 +1295,8 @@ mod tests {
         fn say(&self, line: &str) {
             self.said.borrow_mut().push(line.to_string());
         }
-        fn pick(&self, _prompt: &str, _options: &[String]) -> Pick {
+        fn pick(&self, _prompt: &str, options: &[String]) -> Pick {
+            self.said.borrow_mut().extend(options.iter().cloned());
             self.picks.borrow_mut().pop_front().unwrap_or(Pick::Cancel)
         }
         fn ask(&self, _prompt: &str) -> Answer {
@@ -1061,7 +1386,7 @@ mod tests {
         path: Option<&Path>,
         edit: &dyn Fn(&mut toml_edit::DocumentMut) -> Result<(), String>,
     ) -> Result<ConfigEdit, ConfigError> {
-        crate::user_config::edit_user_config(path, &|_| {}, edit)
+        crate::user_config::edit_user_config(path, &|| Ok(()), &|_| {}, edit)
     }
 
     async fn run_with(
@@ -1070,6 +1395,18 @@ mod tests {
         probes: &Installed,
         launcher: Launcher,
         write: ConfigWriter<'_>,
+    ) -> Outcome {
+        run_as(home, console, probes, launcher, write, true, &|| false).await
+    }
+
+    async fn run_as(
+        home: &Home,
+        console: &Script,
+        probes: &Installed,
+        launcher: Launcher,
+        write: ConfigWriter<'_>,
+        keys: bool,
+        stopped: &dyn Fn() -> bool,
     ) -> Outcome {
         let config = home.config.clone();
         let read = move || effective(&config);
@@ -1084,6 +1421,8 @@ mod tests {
             effective: &read,
             random_suffix: &suffix,
             write,
+            keys,
+            stopped,
         };
         run(&setup).await
     }
@@ -1449,6 +1788,272 @@ mod tests {
             "{audit}"
         );
         assert_eq!(std::fs::read_to_string(&home.config).unwrap(), OLD_BRAVE);
+    }
+
+    #[tokio::test]
+    async fn without_a_terminal_a_key_backend_is_sent_to_the_terminal_command() {
+        let home = brave_home();
+        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], Some("k"));
+        let outcome = run_as(
+            &home,
+            &console,
+            &EVERYTHING,
+            working_launcher("brave_web_search"),
+            &real_write,
+            false,
+            &|| false,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("localpilot search setup")),
+            "{outcome:?}"
+        );
+        let said = console.said.borrow().join("\n");
+        assert!(
+            said.contains("Brave Search API, with your own key (set up in a terminal)"),
+            "{said}"
+        );
+        assert!(!audit_path(&home.state).exists());
+        assert!(home.credentials.generic_get(NEW_ALIAS).is_none());
+        assert_eq!(std::fs::read_to_string(&home.config).unwrap(), OLD_BRAVE);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_goes_away_mid_setup_writes_nothing_and_removes_the_key() {
+        let home = brave_home();
+        let console = Script::new(
+            Pick::Option(1),
+            &[Answer::Yes, Answer::No],
+            Some("candidate-key"),
+        );
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let launcher: Launcher = {
+            let gone = Arc::clone(&gone);
+            let inner = working_launcher("brave_web_search");
+            Arc::new(move |config, handshake| {
+                gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                inner(config, handshake)
+            })
+        };
+        let stopped = || gone.load(std::sync::atomic::Ordering::SeqCst);
+        let outcome = run_as(
+            &home,
+            &console,
+            &EVERYTHING,
+            launcher,
+            &real_write,
+            true,
+            &stopped,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert_untouched(&home, &console);
+        let audit = std::fs::read_to_string(audit_path(&home.state)).unwrap();
+        assert!(
+            audit.contains("event=setup-cancelled") && audit.contains("reason=stopped"),
+            "{audit}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_inside_the_config_lock_writes_nothing() {
+        let home = home("");
+        let console = Script::new(Pick::Option(0), &[Answer::Yes, Answer::No], None);
+        let gone = std::sync::atomic::AtomicBool::new(false);
+        let stopped = || gone.load(std::sync::atomic::Ordering::SeqCst);
+        // The stop lands after setup's own last check, while the edit runs.
+        let write =
+            |path: Option<&Path>,
+             edit: &dyn Fn(&mut toml_edit::DocumentMut) -> Result<(), String>| {
+                gone.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::user_config::edit_user_config(
+                    path,
+                    &|| {
+                        if stopped() {
+                            Err(STOPPED.to_string())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    &|_| {},
+                    edit,
+                )
+            };
+        let outcome = run_as(
+            &home,
+            &console,
+            &EVERYTHING,
+            working_launcher("search"),
+            &write,
+            true,
+            &stopped,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert_eq!(std::fs::read_to_string(&home.config).unwrap(), "");
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn the_offer_fits_only_when_web_search_has_nothing_to_use() {
+        let mut config = Config::default();
+        config.research.web.enabled = true;
+        assert!(offer_fits(&config));
+        let mut off = config.clone();
+        off.tools.web = localpilot_config::ChatWebMode::Off;
+        assert!(!offer_fits(&off));
+        let mut no_web = config.clone();
+        no_web.research.web.enabled = false;
+        assert!(!offer_fits(&no_web));
+        // Configured but not startable is still configured: no offer.
+        let mut unresolved = config.clone();
+        unresolved
+            .research
+            .mcp
+            .tools
+            .push(localpilot_config::ResearchMcpTool {
+                server: "missing".to_string(),
+                tool: "search".to_string(),
+            });
+        assert!(!offer_fits(&unresolved));
+        assert!(!offer_wanted(Path::new("."), true));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn a_no_to_the_offer_is_remembered_until_setup_runs_by_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!declined(dir.path()));
+        remember_decline(dir.path()).unwrap();
+        assert!(declined(dir.path()));
+        clear_decline(dir.path()).unwrap();
+        assert!(!declined(dir.path()));
+    }
+
+    #[cfg(feature = "tui")]
+    struct Answers(
+        std::sync::Mutex<Vec<localpilot_tools::UserAnswer>>,
+        std::sync::Mutex<Vec<String>>,
+    );
+
+    #[cfg(feature = "tui")]
+    impl localpilot_tools::UserPrompter for Answers {
+        fn ask<'a>(
+            &'a self,
+            questions: &'a [localpilot_tools::UserQuestion],
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Vec<localpilot_tools::UserAnswer>> + Send + 'a>,
+        > {
+            self.1.lock().unwrap().push(format!(
+                "{}|{}",
+                questions[0].question, questions[0].options[0].label
+            ));
+            let answer = self.0.lock().unwrap().remove(0);
+            Box::pin(async move { vec![answer] })
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_dialogs_count_only_an_offered_answer() {
+        use localpilot_tools::UserAnswer;
+        let picked = |label: &str| UserAnswer::Selected(vec![label.to_string()]);
+        let prompter = Arc::new(Answers(
+            std::sync::Mutex::new(vec![
+                picked("Brave Search API"),
+                picked("None of these"),
+                UserAnswer::Other("duckduckgo".to_string()),
+                UserAnswer::Dismissed,
+                picked("Yes"),
+                picked("No"),
+                UserAnswer::Other("yes".to_string()),
+            ]),
+            std::sync::Mutex::new(Vec::new()),
+        ));
+        let handle = tokio::runtime::Handle::current();
+        let asked = Arc::clone(&prompter);
+        let (notice_tx, mut notices) = tokio::sync::mpsc::unbounded_channel::<SetupNote>();
+        let answers = tokio::task::spawn_blocking(move || {
+            let console = DialogConsole::new(prompter, handle, notice_tx);
+            let options = vec!["DuckDuckGo".to_string(), "Brave Search API".to_string()];
+            console.say("Tier 1, no key:");
+            let picks: Vec<Pick> = (0..4).map(|_| console.pick("Which?", &options)).collect();
+            let asks: Vec<Answer> = (0..3).map(|_| console.ask("Sure?")).collect();
+            console.say("Done.");
+            (picks, asks, console.secret("key"), console.take_lines())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            answers.0,
+            vec![Pick::Option(1), Pick::No, Pick::Cancel, Pick::Cancel]
+        );
+        assert_eq!(answers.1, vec![Answer::Yes, Answer::No, Answer::Cancel]);
+        assert!(answers.2.is_none());
+        assert_eq!(answers.3, vec!["Done.".to_string()]);
+        let texts = asked.1.lock().unwrap().clone();
+        assert_eq!(texts[0], "Which?|DuckDuckGo");
+        // A yes/no starts on "No", so Enter alone agrees to nothing; what a
+        // question means is shown before it, so the question stays short.
+        assert_eq!(texts[4], "Sure?|No");
+        assert!(texts.iter().all(|text| text.len() < 160), "{texts:?}");
+        assert!(
+            matches!(notices.try_recv().unwrap(), SetupNote::Notice(text) if text == "Tier 1, no key:")
+        );
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_long_preview_is_read_in_full_before_its_question() {
+        use localpilot_tools::UserAnswer;
+        let prompter = Arc::new(Answers(
+            std::sync::Mutex::new(vec![UserAnswer::Selected(vec!["Yes".to_string()])]),
+            std::sync::Mutex::new(Vec::new()),
+        ));
+        let asked = Arc::clone(&prompter);
+        let handle = tokio::runtime::Handle::current();
+        let (notes_tx, mut notes) = tokio::sync::mpsc::unbounded_channel::<SetupNote>();
+        let ask = tokio::task::spawn_blocking(move || {
+            let console = DialogConsole::new(prompter, handle, notes_tx);
+            for line in [
+                "Setup will:",
+                "  run: uvx",
+                "  write to config.toml:",
+                "    [search.managed.duckduckgo]",
+            ] {
+                console.say(line);
+            }
+            console.ask("Set this up now?")
+        });
+        let Some(SetupNote::Review { lines, seen }) = notes.recv().await else {
+            panic!("expected a page to read first");
+        };
+        assert_eq!(lines.len(), 4);
+        // Not asked while the page is open.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(asked.1.lock().unwrap().is_empty());
+        seen.send(()).unwrap();
+        assert_eq!(ask.await.unwrap(), Answer::Yes);
+        assert_eq!(asked.1.lock().unwrap().len(), 1);
+
+        // A page never closed (the session went away) asks nothing.
+        let prompter = Arc::new(Answers(
+            std::sync::Mutex::new(Vec::new()),
+            std::sync::Mutex::new(Vec::new()),
+        ));
+        let handle = tokio::runtime::Handle::current();
+        let (notes_tx, mut notes) = tokio::sync::mpsc::unbounded_channel::<SetupNote>();
+        let ask = tokio::task::spawn_blocking(move || {
+            let console = DialogConsole::new(prompter, handle, notes_tx);
+            for line in ["a", "b", "c", "d"] {
+                console.say(line);
+            }
+            console.ask("Set this up now?")
+        });
+        drop(notes.recv().await);
+        drop(notes);
+        assert_eq!(ask.await.unwrap(), Answer::Cancel);
     }
 
     #[test]

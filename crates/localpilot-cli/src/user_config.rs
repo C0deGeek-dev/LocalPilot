@@ -25,12 +25,14 @@ pub(crate) enum ConfigError {
 }
 
 /// Edit the user config at `path` under the config lock with `edit`, which
-/// changes the parsed document in place. `after_replace` runs right after the
-/// replace (tests use it to stand in for another writer). An editor outside
+/// changes the parsed document in place. `before_replace` is asked last, right
+/// before the file is replaced: an error there replaces nothing. `after_replace`
+/// runs right after the replace (tests use it to stand in for another writer). An editor outside
 /// LocalPilot that writes between the last check and the replace is not
 /// detected.
 pub(crate) fn edit_user_config(
     path: Option<&Path>,
+    before_replace: &dyn Fn() -> Result<(), String>,
     after_replace: &dyn Fn(&Path),
     edit: &dyn Fn(&mut toml_edit::DocumentMut) -> Result<(), String>,
 ) -> Result<ConfigEdit, ConfigError> {
@@ -93,6 +95,7 @@ pub(crate) fn edit_user_config(
             .and_then(|()| staged.as_file().sync_all())
             .map_err(|error| before_(error.to_string()))?;
     }
+    before_replace().map_err(before_)?;
     staged
         .persist(path)
         .map_err(|error| before_(error.error.to_string()))?;
@@ -141,7 +144,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "# mine\n[other]\nkeep = 1 # note\n").unwrap();
-        let outcome = edit_user_config(Some(&path), &|_| {}, &|document| {
+        let outcome = edit_user_config(Some(&path), &|| Ok(()), &|_| {}, &|document| {
             table_at(document, &["search", "managed", "ddg"])?["tool"] = toml_edit::value("search");
             Ok(())
         })
@@ -167,7 +170,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[other]\nkeep = 1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        edit_user_config(Some(&path), &|_| {}, &|document| {
+        edit_user_config(Some(&path), &|| Ok(()), &|_| {}, &|document| {
             table_at(document, &["search"])?["x"] = toml_edit::value(1);
             Ok(())
         })
@@ -190,7 +193,7 @@ mod tests {
         // The config's folder entry is a directory, so nothing can replace it.
         let blocked = dir.path().join("blocked.toml");
         std::fs::create_dir_all(&blocked).unwrap();
-        let error = edit_user_config(Some(&blocked), &|_| {}, &|document| {
+        let error = edit_user_config(Some(&blocked), &|| Ok(()), &|_| {}, &|document| {
             document["b"] = toml_edit::value(2);
             Ok(())
         })
@@ -209,11 +212,40 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_right_before_the_replace_replaces_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "a = 1\n").unwrap();
+        let error = edit_user_config(
+            Some(&path),
+            &|| Err("stopped".to_string()),
+            &|_| {},
+            &|document| {
+                document["b"] = toml_edit::value(2);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ConfigError::Before("stopped".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 1\n");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name == "config.toml" || name == "config.toml.lock"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
     fn a_refused_edit_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "search = 1\n").unwrap();
-        let error = edit_user_config(Some(&path), &|_| {}, &|document| {
+        let error = edit_user_config(Some(&path), &|| Ok(()), &|_| {}, &|document| {
             table_at(document, &["search", "managed"]).map(|_| ())
         })
         .unwrap_err();

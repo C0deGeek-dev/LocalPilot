@@ -124,13 +124,59 @@ pub(crate) struct ChatWeb {
     /// not shared with other devices or automation.
     consent: Arc<dyn Approver>,
     /// The designated search tools whose server is configured, in order.
-    backends: Vec<SearchBackend>,
+    /// Reloaded when a backend is set up during the session.
+    backends: Mutex<Vec<SearchBackend>>,
+    /// The workspace, for reading the config again on reload.
+    root: PathBuf,
+    /// A search found no backend: the host may offer setup once this turn ends.
+    offer_pending: std::sync::atomic::AtomicBool,
+    /// The host showed the offer in this session; it is not signalled again.
+    offer_shown: std::sync::atomic::AtomicBool,
     launcher: Launcher,
     /// Search servers started for this session, by server key.
     started: Mutex<HashMap<String, Arc<dyn Transport>>>,
 }
 
 impl ChatWeb {
+    /// The search backends in force now.
+    fn backend_list(&self) -> Vec<SearchBackend> {
+        self.backends
+            .lock()
+            .map(|backends| backends.clone())
+            .unwrap_or_default()
+    }
+
+    /// Use `fresh` from now on. Page consents stay; a search consent and a
+    /// running server stay only for a backend whose definition is unchanged,
+    /// so a changed or removed backend is asked about and started afresh.
+    fn replace_backends(&self, fresh: Vec<SearchBackend>) {
+        let Ok(mut backends) = self.backends.lock() else {
+            return;
+        };
+        let same = |old: &SearchBackend, new: &SearchBackend| {
+            old.key() == new.key()
+                && old.tool == new.tool
+                && old.launch == new.launch
+                && old.managed == new.managed
+        };
+        let changed: Vec<String> = backends
+            .iter()
+            .filter(|old| !fresh.iter().any(|new| same(old, new)))
+            .map(SearchBackend::key)
+            .collect();
+        if let Ok(mut grants) = self.grants.lock() {
+            for key in &changed {
+                grants.remove(key);
+            }
+        }
+        if let Ok(mut started) = self.started.lock() {
+            for key in &changed {
+                started.remove(key);
+            }
+        }
+        *backends = fresh;
+    }
+
     /// The gateway for the workspace at `root` under `config`.
     pub(crate) fn from_config(
         root: &Path,
@@ -183,7 +229,10 @@ impl ChatWeb {
             client,
             allow_loopback,
             consent,
-            backends: crate::search_backend::search_specs(config).0,
+            backends: Mutex::new(crate::search_backend::search_specs(config).0),
+            root: root.to_path_buf(),
+            offer_pending: std::sync::atomic::AtomicBool::new(false),
+            offer_shown: std::sync::atomic::AtomicBool::new(false),
             launcher,
             started: Mutex::new(HashMap::new()),
         })
@@ -653,7 +702,29 @@ impl WebGateway for ChatWeb {
     }
 
     fn search_ready(&self, incognito: bool) -> bool {
-        self.refusal_for(incognito).is_none() && !self.backends.is_empty()
+        self.refusal_for(incognito).is_none() && !self.backend_list().is_empty()
+    }
+
+    fn take_search_offer(&self) -> bool {
+        self.offer_pending
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn search_offer_shown(&self) {
+        self.offer_shown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.offer_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn reload_search_backends(&self) {
+        let Ok(config) = localpilot_config::load(
+            &localpilot_config::ConfigPaths::standard(&self.root),
+            &localpilot_config::CliOverrides::default(),
+        ) else {
+            return;
+        };
+        self.replace_backends(crate::search_backend::search_specs(&config).0);
     }
 
     fn prompt_note(&self, incognito: bool) -> Option<String> {
@@ -661,7 +732,7 @@ impl WebGateway for ChatWeb {
             match self.refusal_for(incognito) {
                 Some(WebRefusal::Incognito(_)) => WEB_NOTE_INCOGNITO,
                 Some(_) => WEB_NOTE_OFF,
-                None if self.backends.is_empty() => WEB_NOTE_NO_SEARCH,
+                None if self.backend_list().is_empty() => WEB_NOTE_NO_SEARCH,
                 None => WEB_NOTE_READY,
             }
             .to_string(),
@@ -676,7 +747,14 @@ impl WebGateway for ChatWeb {
         if let Some(refusal) = self.refusal_for(context.incognito) {
             return Err(refusal);
         }
-        if self.backends.is_empty() {
+        let list = self.backend_list();
+        if list.is_empty() {
+            // Until the host has shown the offer once in this session; the
+            // host decides whether a turn may see it at all.
+            if !self.offer_shown.load(std::sync::atomic::Ordering::SeqCst) {
+                self.offer_pending
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             return Err(WebRefusal::NoSearchBackend(
                 localpilot_tools::NO_SEARCH_INDEX.to_string(),
             ));
@@ -690,7 +768,7 @@ impl WebGateway for ChatWeb {
         let mut backends = Vec::new();
         let mut leads: Vec<String> = Vec::new();
         let mut last_refusal = None;
-        for backend in &self.backends {
+        for backend in &list {
             // Enough links: later servers are neither started nor sent the query.
             if leads.len() >= limit {
                 break;
@@ -1769,6 +1847,41 @@ mod tests {
         assert!(text.contains("fetch"), "{text}");
         assert!(text.contains("/research"), "{text}");
         assert_eq!(f.answers.asked(), 0);
+        // The host may offer setup; reading the signal clears it.
+        assert!(f.web.take_search_offer());
+        assert!(!f.web.take_search_offer());
+        // A turn the host would not offer to (a paired device's) reads and
+        // drops the signal without using up the offer: a later turn sees it.
+        let _ = search(&f.web, false, search_request("rust async")).await;
+        assert!(f.web.take_search_offer());
+        // Once the host has shown it, it is not signalled again.
+        f.web.search_offer_shown();
+        let _ = search(&f.web, false, search_request("rust async")).await;
+        assert!(!f.web.take_search_offer());
+    }
+
+    #[test]
+    fn reloaded_backends_keep_only_the_consents_that_still_fit() {
+        let s = search_fixture(&[("a", links(&[])), ("b", links(&[]))], &[]);
+        let web = &s.fixture.web;
+        web.grants.lock().unwrap().extend([
+            "example.com".to_string(),
+            "mcp:a".to_string(),
+            "mcp:b".to_string(),
+        ]);
+        let mut fresh = web.backend_list();
+        assert_eq!(fresh.len(), 2);
+        fresh[1].launch.command = "something-else".to_string();
+        web.replace_backends(fresh);
+        let grants = web.grants.lock().unwrap().clone();
+        assert!(grants.contains("example.com"), "{grants:?}");
+        assert!(grants.contains("mcp:a"), "{grants:?}");
+        assert!(!grants.contains("mcp:b"), "{grants:?}");
+        assert_eq!(web.backend_list()[1].launch.command, "something-else");
+        // Removing a backend drops its consent too.
+        web.replace_backends(Vec::new());
+        assert!(!web.grants.lock().unwrap().contains("mcp:a"));
+        assert!(web.backend_list().is_empty());
     }
 
     #[tokio::test]

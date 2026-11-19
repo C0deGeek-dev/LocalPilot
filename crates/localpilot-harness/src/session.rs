@@ -2859,6 +2859,33 @@ impl SessionRuntime {
         self.refresh_web_note();
     }
 
+    /// Whether chat web search found no backend set up since this was last
+    /// asked, so the host may offer setup.
+    pub fn take_search_offer(&self) -> bool {
+        self.web_gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.take_search_offer())
+    }
+
+    /// The host showed the setup offer; it is not signalled again this session.
+    pub fn search_offer_shown(&self) {
+        if let Some(gateway) = &self.web_gateway {
+            gateway.search_offer_shown();
+        }
+    }
+
+    /// Pick up search backends set up during the session, and say so in the
+    /// system prompt's web-access line.
+    pub fn reload_search_backends(&mut self) {
+        if self.refuse_unless_owned("web access change") {
+            return;
+        }
+        if let Some(gateway) = &self.web_gateway {
+            gateway.reload_search_backends();
+        }
+        self.refresh_web_note();
+    }
+
     /// Keep the system prompt's web-access line true to the gateway and the
     /// current privacy state. An answer-only session sends no tools, so it gets
     /// no line.

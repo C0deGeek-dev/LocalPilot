@@ -151,6 +151,19 @@ pub trait WebGateway: Send + Sync {
     /// Forget every consent given in this session. Called when the session
     /// changes (a new session, entering or leaving incognito).
     fn reset_consent(&self);
+
+    /// Whether a search since the last call found no backend set up, so the
+    /// host may offer to set one up. Reading it clears it.
+    fn take_search_offer(&self) -> bool {
+        false
+    }
+
+    /// The host showed the setup offer; do not signal it again this session.
+    fn search_offer_shown(&self) {}
+
+    /// Read the search backends from the config again, after one was set up
+    /// during the session.
+    fn reload_search_backends(&self) {}
 }
 
 /// A URL as it may be written to a log, shown in a question, or sent to

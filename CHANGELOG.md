@@ -24,6 +24,14 @@ is SemVer-stable; the configuration schema stability policy is in
   search tool, then writes the config in one locked edit and reads it back. A
   key is read without being shown and kept in a new credential alias, never in
   the config. Each run is recorded in `~/.localpilot/search/setup-audit.log`.
+- The full-screen session offers that setup when a search finds no backend:
+  after a chat turn whose `web_search` found none, and before `/research`. Only
+  for a prompt typed at this terminal, never in incognito; keys stay in the
+  terminal command. "No, and don't offer again" is remembered until
+  `localpilot search setup` runs. A backend set up there is used right away.
+- Consent dialogs in the full-screen session start on their refusal: "Deny" for
+  a research page request, "Cancel" when confirming every request for a run,
+  and "No" in search setup, so Enter alone never sends or allows anything.
 
 - Fixed: `/research` in the fullscreen session no longer freezes the screen
   when a page or skill-discovery request needs your approval. The question

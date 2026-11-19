@@ -5317,6 +5317,7 @@ async fn drive_operation_chain(
                             &prompt.text,
                             queue,
                             BeginWork::AlreadyBusy,
+                            prompt.origin.is_none(),
                         )
                         .await?
                     }
@@ -5327,7 +5328,7 @@ async fn drive_operation_chain(
                         false
                     }
                     PromptTarget::Agent => {
-                        drive_turn(
+                        let exit = drive_turn(
                             terminal,
                             app,
                             runtime,
@@ -5336,7 +5337,29 @@ async fn drive_operation_chain(
                             &prompt.attachments,
                             queue,
                         )
-                        .await?
+                        .await?;
+                        // A search in this turn found no backend. Read (and so
+                        // cleared) for every turn; offered only for a prompt
+                        // typed at this terminal, never a paired device's.
+                        let wanted = runtime.take_search_offer();
+                        if !exit
+                            && wanted
+                            && prompt.origin.is_none()
+                            && crate::search_setup::offer_wanted(ctx.cwd, runtime.is_incognito())
+                        {
+                            drive_search_offer(
+                                terminal,
+                                app,
+                                runtime,
+                                &mut ctx,
+                                queue,
+                                BeginWork::Own,
+                            )
+                            .await?
+                            .0
+                        } else {
+                            exit
+                        }
                     }
                 };
                 if exit {
@@ -5460,7 +5483,17 @@ async fn drive_slash_command(
             drive_ingest(terminal, app, runtime, ctx, action, queue).await
         }
         PumpedSlash::Research { topic } => {
-            drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
+            drive_research(
+                terminal,
+                app,
+                runtime,
+                ctx,
+                &topic,
+                queue,
+                BeginWork::Own,
+                true,
+            )
+            .await
         }
         PumpedSlash::HarnessResume => {
             ctx.execution =
@@ -6769,6 +6802,7 @@ enum BeginWork {
 /// Run a research pass on the operation pump: preflight before Busy, show the egress
 /// disclosure and draw before any request, then a signal-then-await-partial run
 /// whose buffered output is presented through the bounded report presenter.
+#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
 async fn drive_research(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -6777,6 +6811,7 @@ async fn drive_research(
     topic: &str,
     queue: &mut VecDeque<QueuedOperation>,
     begin: BeginWork,
+    typed_here: bool,
 ) -> Result<bool> {
     // The run's consent questions go to channels that belong to this run
     // alone, which the operation pump below services: whether a managed search
@@ -6800,7 +6835,7 @@ async fn drive_research(
             .when_abandoned(cancel.clone(), Arc::clone(&stop)),
         ),
     };
-    let prepared = match crate::research::prepare_interactive_research(ctx.cwd) {
+    let mut prepared = match crate::research::prepare_interactive_research(ctx.cwd) {
         Ok(Some(prepared)) => prepared,
         other => {
             // Disabled ([research].enabled = false) or a config error: one bounded
@@ -6824,6 +6859,20 @@ async fn drive_research(
     };
     if matches!(begin, BeginWork::Own) {
         app.begin_work();
+    }
+    // No search backend at all: offer to set one up first, to the person at
+    // this terminal only, and run with what was set up.
+    if typed_here && crate::search_setup::offer_wanted(ctx.cwd, runtime.is_incognito()) {
+        let (exit, configured) =
+            drive_search_offer(terminal, app, runtime, ctx, queue, BeginWork::AlreadyBusy).await?;
+        if exit {
+            return Ok(true);
+        }
+        if configured {
+            if let Ok(Some(fresh)) = crate::research::prepare_interactive_research(ctx.cwd) {
+                prepared = fresh;
+            }
+        }
     }
     // Disclosure BEFORE any egress: apply it as one bounded multi-line Notice and
     // draw once, so consent is on screen before the research future is constructed
@@ -6954,6 +7003,157 @@ async fn drive_research(
 }
 
 /// A research run on a blocking thread, owned by the operation that shows it.
+/// Offer to set up a search backend, on the operation pump, after a search
+/// found none. The questions go to a channel that belongs to this offer alone
+/// and only the person at this terminal answers; once the pump stops it is
+/// closed and the run told to stop, so nothing is written after the session
+/// has gone. Returns whether the session is closing and whether a backend was
+/// set up (the chat gateway then uses it).
+async fn drive_search_offer(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    begin: BeginWork,
+) -> Result<(bool, bool)> {
+    let cancel = CancellationToken::new();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (_approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+    let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+    let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<crate::search_setup::SetupNote>();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let own = matches!(begin, BeginWork::Own);
+    if own {
+        app.begin_work();
+    }
+    runtime.search_offer_shown();
+    let root = ctx.cwd.to_path_buf();
+    let runtime_handle = tokio::runtime::Handle::current();
+    let (done_tx, done_rx) = oneshot::channel();
+    // Setup waits on its questions synchronously, so it runs on a thread of
+    // its own while this one draws the question and reads the answer.
+    let worker = ResearchWorker {
+        cancel: cancel.clone(),
+        stop: stop.clone(),
+        handle: {
+            let cancel = cancel.clone();
+            let stop = stop.clone();
+            tokio::task::spawn_blocking(move || {
+                let console = crate::search_setup::DialogConsole::new(
+                    Arc::new(crate::interactive_session::research_page_prompter(
+                        question_tx,
+                    )),
+                    runtime_handle.clone(),
+                    notice_tx,
+                );
+                let outcome = runtime_handle.block_on(async {
+                    let run = crate::search_setup::offer_in_session(&root, &console, &stop);
+                    tokio::pin!(run);
+                    tokio::select! {
+                        outcome = &mut run => outcome,
+                        _ = cancel.cancelled() => {
+                            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                            (&mut run).await
+                        }
+                    }
+                });
+                let _ = done_tx.send((outcome, console.take_lines()));
+            })
+        },
+    };
+    let operation = async move {
+        done_rx
+            .await
+            .unwrap_or((crate::search_setup::Outcome::Cancelled, Vec::new()))
+    };
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
+    };
+    let mut configured = false;
+    // What setup says before each question is shown first: a few lines in
+    // the conversation, a longer text (the list, the exact command and
+    // config) as a scrollable page that has to be closed before the question
+    // comes. Either way it is also kept in the conversation.
+    let mut review: Option<(u64, std::sync::mpsc::Sender<()>)> = None;
+    let mut show_notices = |app: &mut AppModel| {
+        if review
+            .as_ref()
+            .is_some_and(|(generation, _)| app.report_generation() != Some(*generation))
+        {
+            if let Some((_, seen)) = review.take() {
+                let _ = seen.send(());
+            }
+        }
+        while let Ok(note) = notice_rx.try_recv() {
+            match note {
+                crate::search_setup::SetupNote::Notice(text) => {
+                    app.apply_runtime(RuntimeUpdate::Notice(text));
+                }
+                crate::search_setup::SetupNote::Review { lines, seen } => {
+                    app.apply_runtime(RuntimeUpdate::Notice(lines.join("\n")));
+                    app.open_report(
+                        "Search setup: read this, then Esc to answer".to_string(),
+                        lines,
+                    );
+                    review = app.report_generation().map(|generation| (generation, seen));
+                }
+            }
+        }
+    };
+    let exit = drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut approval_rx,
+            question_rx: &mut question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+            stages: &mut *ctx.stages,
+            guidance: ctx.guidance,
+            execution: ctx.execution.clone(),
+            source: ctx.source,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Serviced,
+        ProgressLane::Tick(&mut show_notices),
+        operation,
+        |app: &mut AppModel, (outcome, lines): (crate::search_setup::Outcome, Vec<String>)| {
+            let text = lines.join("\n");
+            if !text.trim().is_empty() {
+                app.apply_runtime(RuntimeUpdate::Notice(text.trim().to_string()));
+            }
+            configured = matches!(outcome, crate::search_setup::Outcome::Configured(_));
+            if own {
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+            }
+        },
+    )
+    .await;
+    worker.stop();
+    drop(approval_rx);
+    drop(question_rx);
+    worker.join().await;
+    let exit = exit?;
+    if configured {
+        runtime.reload_search_backends();
+    }
+    Ok((exit, configured))
+}
+
 struct ResearchWorker {
     handle: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,

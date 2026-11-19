@@ -1558,6 +1558,24 @@ alias is removed again, and if it cannot be removed setup says so and names it. 
 names the credential the old one used, which is left for you to remove. Each run
 is recorded in `~/.localpilot/search/setup-audit.log`.
 
+In the full-screen session the same setup is offered when a search finds nothing
+to use: after a chat turn whose `web_search` found no backend, and before
+`/research` runs. It is offered only to the person at this terminal (never for a
+paired device's prompt), only in a session that is not incognito, while
+`[research.web]` is enabled and chat web access is not `off`, and only when no
+search tool of any kind is configured. Its questions are session dialogs that
+start on "No". What setup explains before a longer question (the list, the exact
+command and the table it will write) opens first as a scrollable page; the
+question comes only after that page is closed with Esc, and the text stays in the
+conversation. A key is never typed into the
+session: Brave and Tavily are listed as set up in a terminal. Answering "No, and
+don't offer again" writes `~/.localpilot/search/setup-declined`, and the offer
+stays away until `localpilot search setup` runs. Dismissing it is not
+remembered. A backend set up this way is used straight away: by the current
+`/research` run, and by `web_search` for the rest of the session. Closing the
+session while setup runs stops it before anything more is stored, started or
+written.
+
 ### `[mcp.servers.<name>]`
 
 | Key | Type | Default | Meaning |

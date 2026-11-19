@@ -920,7 +920,13 @@ construction:
   if setup stops before the config is written. The config is written in one
   locked edit through a private staging file beside it and read back. Each run is recorded in
   `~/.localpilot/search/setup-audit.log` (backend, tier, launch identity and
-  outcome; never a key or a query) before each step.
+  outcome; never a key or a query) before each step. The full-screen session
+  offers the same setup when a search finds no backend, to the person at this
+  terminal only: never for a paired device's prompt, never in incognito, and
+  never when the model asks for it (the offer is a host decision after the turn,
+  not a tool). Keys are not entered in the session. If the session closes while
+  setup runs, nothing more is stored, started or written; a key it stored is
+  removed.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
   search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag

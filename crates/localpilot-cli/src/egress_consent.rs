@@ -225,9 +225,11 @@ impl PromptedApproval {
                        lasts until the run ends and is not saved. Hosts you have explicitly \
                        disallowed stay blocked."
                 .to_string(),
+            // The refusal first: the dialog starts on the first choice, so
+            // Enter alone never widens what is sent.
             options: vec![
-                option(CONFIRM_EVERY, None),
                 option(CANCEL, Some("This request is denied.")),
+                option(CONFIRM_EVERY, None),
             ],
             multi_select: false,
         };
@@ -255,9 +257,11 @@ impl EgressApproval for PromptedApproval {
                 localpilot_config::redact::redact(request.url),
                 localpilot_config::redact::redact(request.purpose)
             ),
+            // The refusal first: the dialog starts on the first choice, so
+            // Enter alone never sends anything.
             options: vec![
-                option(ALLOW_ONCE, Some("Send this request only.")),
                 option(DENY, Some("Do not send it.")),
+                option(ALLOW_ONCE, Some("Send this request only.")),
                 option(
                     ALLOW_EVERY,
                     Some("Asks once more, after saying what that allows."),
@@ -348,6 +352,22 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_consent_dialog_starts_on_its_refusal() {
+        let prompter = Arc::new(Scripted::new(vec![
+            pick("Allow every request this run"),
+            pick("Cancel"),
+        ]));
+        assert_eq!(
+            ask_off_thread(Arc::clone(&prompter)).await,
+            ConsentAnswer::Deny
+        );
+        let asked = prompter.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[0].options[0].label, "Deny");
+        assert_eq!(asked[1].options[0].label, "Cancel");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

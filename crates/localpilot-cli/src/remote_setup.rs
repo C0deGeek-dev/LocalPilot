@@ -1340,7 +1340,7 @@ pub(crate) fn edit_remote_table(
     after_replace: &dyn Fn(&Path),
     edit: &dyn Fn(&mut toml_edit::Table) -> Result<(), String>,
 ) -> Result<ConfigEdit, ConfigError> {
-    crate::user_config::edit_user_config(path, after_replace, &|document| {
+    crate::user_config::edit_user_config(path, &|| Ok(()), after_replace, &|document| {
         let remote = document
             .entry("remote")
             .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
