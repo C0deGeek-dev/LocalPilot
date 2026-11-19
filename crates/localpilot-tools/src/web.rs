@@ -141,6 +141,13 @@ pub trait WebGateway: Send + Sync {
     /// explains instead, with no permission question first.
     fn search_ready(&self, incognito: bool) -> bool;
 
+    /// One short line for the system prompt saying what web access the model
+    /// has right now, so it neither claims to have no internet when it has the
+    /// tools nor claims to have searched when it cannot. `None` adds nothing.
+    fn prompt_note(&self, _incognito: bool) -> Option<String> {
+        None
+    }
+
     /// Forget every consent given in this session. Called when the session
     /// changes (a new session, entering or leaving incognito).
     fn reset_consent(&self);

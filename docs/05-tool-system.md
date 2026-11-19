@@ -576,6 +576,11 @@ Rules:
   https address without credentials, and are capped
 - the configured server is a local program with its own network access; the
   web deny list does not apply to what it contacts
+- where the gateway is wired, the system prompt carries one line saying what
+  web access the model has now (off, incognito, fetch only with no search
+  server, or fetch and search), so the model neither claims it has no internet
+  nor claims it searched when it could not; the line follows a new session and
+  entering or leaving incognito, and an answer-only session gets none
 
 ### `run_shell`
 
@@ -943,7 +948,12 @@ With the broker on:
   that are not advertised yet, so a model that never calls `tool_search` still
   sees the tool its request names (ADR-0216). A tool's name only adds to its
   score when the request names it — exactly, or with every word of a multi-word
-  name — not when one generic word happens to occur in it (ADR-0218).
+  name — not when one generic word happens to occur in it (ADR-0218). A request
+  that is plainly about the web lifts the built-in web tools to the reveal floor
+  on its own: asking to search the web, the internet or online lifts
+  `web_search`, and naming a URL or website (or writing an address) lifts
+  `fetch`. "Online" alone, browsing files and searching the code gain
+  nothing, and MCP tools never receive the lift.
 - **Stable order.** The always-advertised tools (core, the broker's own tools,
   graduates) come first in registry order and revealed tools follow in the order
   they were revealed. While the always-advertised set is unchanged, a new reveal

@@ -963,9 +963,7 @@ const POLITENESS_MAX_DELAY_MS: u64 = 3_000;
 const WEB_MAX_BODY_BYTES: usize = 64 * 1024;
 /// Default egress audit-log path when `[research.web].audit_log` is unset.
 pub(crate) fn default_audit_log(root: &Path) -> PathBuf {
-    root.join(".localpilot")
-        .join("research")
-        .join("egress-audit.log")
+    crate::chat_web_status::default_audit_log(root)
 }
 
 /// Write the loud egress disclosure (docs/07): the default-on posture, both

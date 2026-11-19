@@ -192,10 +192,7 @@ impl ChatWeb {
         launcher: Launcher,
     ) -> anyhow::Result<Self> {
         let web = &config.research.web;
-        let audit_log = web.audit_log.clone().map_or_else(
-            || crate::research::default_audit_log(root),
-            |path| root.join(path),
-        );
+        let audit_log = crate::chat_web_status::audit_log_path(root, config);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(WEB_CONNECT_TIMEOUT_SECS))
             // Every hop is decided by the chain, never by the client.
@@ -222,21 +219,13 @@ impl ChatWeb {
             client,
             allow_loopback,
             consent,
-            backends: config
-                .research
-                .mcp
-                .tools
-                .iter()
-                .filter_map(|pair| {
-                    config
-                        .mcp
-                        .servers
-                        .get(&pair.server)
-                        .map(|server| SearchBackend {
-                            server: pair.server.clone(),
-                            tool: pair.tool.clone(),
-                            config: server.clone(),
-                        })
+            backends: crate::chat_web_status::search_tools(config)
+                .0
+                .into_iter()
+                .map(|(server, tool, config)| SearchBackend {
+                    server,
+                    tool,
+                    config,
                 })
                 .collect(),
             launcher,
@@ -569,6 +558,27 @@ impl HopPolicy for ChatHopPolicy<'_> {
     }
 }
 
+/// What the model is told about web access while chat web is turned off.
+const WEB_NOTE_OFF: &str = "Web access from chat is turned off, so `fetch` and `web_search` \
+     refuse: do not say you looked anything up online. The user can allow it with [tools] web \
+     = \"ask\", or run /research <topic> for a cited investigation.";
+
+/// What the model is told while the session is incognito.
+const WEB_NOTE_INCOGNITO: &str = "This session is incognito, so web access is unavailable: \
+     `fetch` and `web_search` refuse. Do not say you looked anything up online.";
+
+/// What the model is told when it can fetch addresses but has no search index.
+const WEB_NOTE_NO_SEARCH: &str = "Web access: `fetch` reads the page at a known http or https \
+     address; the user is asked before a new site is first contacted. No search server is set \
+     up, so `web_search` cannot look things up: ask for an address, or suggest /research \
+     <topic> or setting up a search server.";
+
+/// What the model is told when it can both fetch and search.
+const WEB_NOTE_READY: &str = "Web access: `fetch` reads the page at a known http or https \
+     address, and `web_search` finds pages through the user's search server; read the \
+     results with `fetch`. The user is asked before a new site or search server is first \
+     contacted. For a broad cited investigation the user can run /research <topic>.";
+
 #[async_trait]
 impl WebGateway for ChatWeb {
     async fn fetch(
@@ -661,6 +671,18 @@ impl WebGateway for ChatWeb {
 
     fn search_ready(&self, incognito: bool) -> bool {
         self.refusal_for(incognito).is_none() && !self.backends.is_empty()
+    }
+
+    fn prompt_note(&self, incognito: bool) -> Option<String> {
+        Some(
+            match self.refusal_for(incognito) {
+                Some(WebRefusal::Incognito(_)) => WEB_NOTE_INCOGNITO,
+                Some(_) => WEB_NOTE_OFF,
+                None if self.backends.is_empty() => WEB_NOTE_NO_SEARCH,
+                None => WEB_NOTE_READY,
+            }
+            .to_string(),
+        )
     }
 
     async fn search(
@@ -1379,6 +1401,121 @@ mod tests {
             fixture,
             servers,
             starts,
+        }
+    }
+
+    /// The reported problem, offline: in a session with no search server, a
+    /// request to search online used to meet a model that saw no web tool and
+    /// answered that it had no internet access. Now the request reveals
+    /// `web_search`, the system prompt says what web access there is, and the
+    /// search explains how to set one up without asking anything first.
+    #[test]
+    fn asking_to_search_online_without_a_search_server_gets_guidance() {
+        let Fixture {
+            _dir: dir,
+            web,
+            answers,
+            ..
+        } = fixture(|_| {}, table(&[]), false, &[]);
+        let provider = Arc::new(
+            localpilot_llm::FakeProvider::new()
+                .tool_call(
+                    "c1",
+                    "web_search",
+                    serde_json::json!({ "query": "latest tokio release" }),
+                )
+                .text("done"),
+        );
+        let mut config = Config::default();
+        config.tools.broker = true;
+        let mut tools = localpilot_tools::ToolRegistry::with_builtins();
+        let broker = crate::mcp::install_broker(&config.tools, &mut tools);
+        let mut runtime = localpilot_harness::SessionRuntime::new(
+            provider.clone(),
+            tools,
+            localpilot_sandbox::PermissionEngine::new(
+                localpilot_sandbox::Profile::Default,
+                Vec::new(),
+            ),
+            Box::new(Answers::new(&[])),
+            localpilot_store::Store::ephemeral(),
+            localpilot_sandbox::Workspace::new(dir.path()).unwrap(),
+            localpilot_recovery::RecoveryEngine::new(localpilot_recovery::RecoveryBudget::default()),
+            localpilot_harness::SessionConfig {
+                interactivity: localpilot_sandbox::Interactivity::Interactive,
+                trusted: true,
+                ..localpilot_harness::SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        runtime.set_broker(broker);
+        runtime.set_web_gateway(Arc::new(web));
+        let (events, _rx) = tokio::sync::broadcast::channel(256);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            runtime
+                .run_turn(
+                    "can you search online for the latest tokio release",
+                    &events,
+                    &cancel,
+                )
+                .await
+        });
+
+        let requests = provider.requests();
+        let advertised = serde_json::to_string(&requests[0].tools).unwrap();
+        assert!(advertised.contains("\"web_search\""), "{advertised}");
+        assert!(runtime.system_prompt_text().contains(WEB_NOTE_NO_SEARCH));
+        let followed = serde_json::to_string(&requests[1].messages).unwrap();
+        assert!(
+            followed.contains("No web search index is set up here, so nothing was searched."),
+            "{followed}"
+        );
+        assert_eq!(
+            answers.asked(),
+            0,
+            "nothing could leave, so nothing was asked"
+        );
+    }
+
+    #[test]
+    fn the_prompt_note_says_what_web_access_the_model_has() {
+        let off = fixture(
+            |config| config.tools.web = ChatWebMode::Off,
+            table(&[]),
+            false,
+            &[],
+        );
+        assert_eq!(off.web.prompt_note(false).as_deref(), Some(WEB_NOTE_OFF));
+        assert_eq!(off.web.prompt_note(true).as_deref(), Some(WEB_NOTE_OFF));
+
+        let no_search = fixture(|_| {}, table(&[]), false, &[]);
+        assert_eq!(
+            no_search.web.prompt_note(false).as_deref(),
+            Some(WEB_NOTE_NO_SEARCH)
+        );
+        assert_eq!(
+            no_search.web.prompt_note(true).as_deref(),
+            Some(WEB_NOTE_INCOGNITO)
+        );
+
+        let ready = search_fixture(&[("finder", links(&[]))], &[]);
+        assert_eq!(
+            ready.fixture.web.prompt_note(false).as_deref(),
+            Some(WEB_NOTE_READY)
+        );
+        assert_eq!(
+            ready.fixture.web.prompt_note(true).as_deref(),
+            Some(WEB_NOTE_INCOGNITO)
+        );
+
+        // Each available state tells fetching a known address apart from
+        // searching, and a state that can search nothing points to /research.
+        for note in [WEB_NOTE_NO_SEARCH, WEB_NOTE_READY] {
+            assert!(note.contains("known http or https"), "{note}");
+        }
+        for note in [WEB_NOTE_OFF, WEB_NOTE_NO_SEARCH, WEB_NOTE_READY] {
+            assert!(note.contains("/research"), "{note}");
         }
     }
 

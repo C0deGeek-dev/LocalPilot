@@ -16,6 +16,19 @@ localpilot doctor
 It reports version, platform, resolved config, configured providers, available
 tools, and trust state — the fastest way to see what LocalPilot thinks is set up.
 
+## The model says it has no internet access
+
+Chat web access is on by default (`[tools] web = "ask"`), but searching needs a
+search tool. `localpilot doctor` shows a `chat web:` line: whether chat web is
+on, where requests are recorded, and the search tools `web_search` would use.
+With none set up, `fetch` still reads a page whose address you give it. To
+search, add a search-capable MCP server under `[mcp.servers]` and name its
+search tool in `[research.mcp] tools`. The `chat web:` line reads the
+configuration only and sends no search; the `mcp servers:` section shows whether
+that server starts.
+Only the fullscreen session can ask for web consent; a piped run has no web
+access.
+
 ## `chat` says the feature isn't available
 
 The interactive REPL needs the `tui` build feature:

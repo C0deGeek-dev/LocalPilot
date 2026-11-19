@@ -85,6 +85,15 @@ expression: render_json(&fixture())
     "doc_chunks": 0,
     "doc_vectors": 0
   },
+  "chat_web": {
+    "mode": "ask",
+    "research_web_enabled": true,
+    "audit_log": "/work/.localpilot/research/audit.log",
+    "search_backends": [],
+    "unresolved": [
+      "finder.search"
+    ]
+  },
   "agents": {
     "resolved": 0,
     "shadowed": 0,

@@ -1900,7 +1900,7 @@ impl Tool for Fetch {
             .unwrap_or_default()
     }
     fn description(&self) -> &'static str {
-        "Fetch the body of an http or https URL over the network."
+        "Fetch the body of an http or https URL (a web page) over the network."
     }
     fn schema(&self) -> Value {
         schema_for::<FetchInput>()

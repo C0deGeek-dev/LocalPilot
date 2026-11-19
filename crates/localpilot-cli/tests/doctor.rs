@@ -27,6 +27,11 @@ mod output;
 #[allow(dead_code)]
 #[path = "../src/remote_status.rs"]
 mod remote_status;
+// `doctor` reports chat web access through `crate::chat_web_status`, whose
+// default audit-log path is the bin crate's research default.
+#[allow(dead_code)]
+#[path = "../src/chat_web_status.rs"]
+mod chat_web_status;
 // `doctor` now reads the trust store through `crate::trust`; include it too.
 #[allow(dead_code)]
 #[path = "../src/trust.rs"]
@@ -303,6 +308,7 @@ fn report() -> DoctorReport {
         mcp_servers: Vec::new(),
         memory_root: Some("<memory-root>".to_string()),
         research_docs: None,
+        chat_web: None,
         agents: AgentsStatus::default(),
         capabilities: vec![
             "doctor-json".to_string(),

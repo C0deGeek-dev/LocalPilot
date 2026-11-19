@@ -205,6 +205,11 @@ const CAPABILITY_GROUPS: &[&[&str]] = &[
         "schema",
         "endpoint",
     ],
+    // Reaching the web: how a person asks to look something up online or open
+    // an address, and the words the web tools describe themselves with.
+    &[
+        "web", "internet", "online", "url", "website", "webpage", "browse", "http",
+    ],
 ];
 
 /// The capability groups whose words carry a current-documentation intent. A
@@ -297,12 +302,32 @@ fn match_reason(haystack: &str, words: &[&str], capability_hits: &[&str]) -> Str
 /// described documentation tool be found by what it does.
 fn score_entry(entry: &CatalogEntry, words: &[&str], explicit: &[String]) -> (u32, String) {
     let primary = entry_primary_text(entry);
-    let word_hits = word_overlap(&primary, words);
+    // A built-in web tool's sentence is full of ordinary words ("the web for
+    // pages"), so for it filler words do not count: otherwise any request with
+    // "the" or "for" in it would rank a web search above a workspace search.
+    let word_hits = if is_builtin_web_tool(entry, &primary) {
+        let content: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|word| !REQUEST_STOP_WORDS.contains(word))
+            .collect();
+        word_overlap(&primary, &content)
+    } else {
+        word_overlap(&primary, words)
+    };
     let name_lower = entry.name.to_ascii_lowercase();
     let name_bonus = u32::from(names_tool(&name_lower, explicit)) * 2;
-    let direct = word_hits + name_bonus;
+    let intent = web_intent_boost(entry, &primary, words);
+    let direct = word_hits + name_bonus + intent;
     if direct > 0 {
-        return (direct, match_reason(&primary, words, &[]));
+        let mut reason = match_reason(&primary, words, &[]);
+        if intent > 0 {
+            if !reason.is_empty() {
+                reason.push_str("; ");
+            }
+            reason.push_str("web request");
+        }
+        return (direct, reason);
     }
 
     // Fallback: the tool's own sentence said nothing the need asked for.
@@ -374,6 +399,44 @@ fn names_tool(name_lower: &str, explicit: &[String]) -> bool {
         && parts
             .iter()
             .all(|part| explicit.iter().any(|token| token == part))
+}
+
+/// Words that place a search on the web rather than in the workspace.
+const WEB_PLACE_WORDS: &[&str] = &["web", "internet", "online"];
+/// Words that ask to look something up.
+const LOOKUP_WORDS: &[&str] = &["search", "look", "lookup", "find", "google"];
+/// Words that name a web address to open.
+const ADDRESS_WORDS: &[&str] = &["url", "urls", "http", "https", "webpage", "website"];
+
+/// The lift a clear web request gives the built-in web tools: the reveal
+/// floor itself, so the request alone reveals the tool. A short request such as
+/// "search online", "look it up on the internet" or "open this url" otherwise
+/// shares too few words with the tool's sentence to be revealed, and the model
+/// then believes it has no web access. Only built-in tools that search the web
+/// or fetch URLs receive it, and only for a request that is unambiguously about
+/// the web: "online" alone, a file browser or a code search gain nothing.
+const WEB_INTENT_BOOST: u32 = PROMPT_REVEAL_MIN_SCORE;
+
+/// Whether `entry` is a built-in tool that searches the web or fetches URLs.
+fn is_builtin_web_tool(entry: &CatalogEntry, primary: &str) -> bool {
+    matches!(entry.source, ToolSource::Builtin)
+        && (primary.contains("search the web") || primary.contains(" url"))
+}
+
+fn web_intent_boost(entry: &CatalogEntry, primary: &str, words: &[&str]) -> u32 {
+    if !is_builtin_web_tool(entry, primary) {
+        return 0;
+    }
+    let has = |set: &[&str]| words.iter().any(|word| set.contains(word));
+    let search_request = has(WEB_PLACE_WORDS) && has(LOOKUP_WORDS);
+    let address_request = has(ADDRESS_WORDS);
+    let searches_the_web = primary.contains("search the web");
+    let fetches_urls = primary.contains(" url");
+    if (search_request && searches_the_web) || (address_request && fetches_urls) {
+        WEB_INTENT_BOOST
+    } else {
+        0
+    }
 }
 
 /// The most a capability-only match can contribute, so it never outweighs an
@@ -1422,6 +1485,85 @@ mod tests {
         let hits = broker.resolve("download a file from a url over the network");
         assert!(!hits.is_empty());
         assert_eq!(hits[0].name, "fetch", "got {hits:?}");
+    }
+
+    /// The catalog a default session has: every built-in tool as it describes
+    /// itself.
+    fn builtin_broker() -> Broker {
+        let broker = Broker::new(BrokerConfig::default());
+        broker.set_catalog(ToolRegistry::with_builtins().catalog());
+        broker
+    }
+
+    #[test]
+    fn web_shaped_needs_find_the_web_tools() {
+        let broker = builtin_broker();
+        for (need, expected) in [
+            ("web search", "web_search"),
+            ("search online for the latest release", "web_search"),
+            ("look this up on the internet", "web_search"),
+            ("open this url", "fetch"),
+            ("read the website at this address", "fetch"),
+        ] {
+            let hits = broker.resolve(need);
+            let names: Vec<&str> = hits.iter().map(|hit| hit.name.as_str()).collect();
+            assert!(
+                names.iter().take(2).any(|name| *name == expected),
+                "{need}: {names:?}"
+            );
+        }
+        // A workspace search stays a workspace search.
+        let hits = broker.resolve("search the codebase for the parser");
+        let names: Vec<&str> = hits.iter().map(|hit| hit.name.as_str()).collect();
+        let local = names.iter().position(|name| *name == "search_text");
+        let web = names.iter().position(|name| *name == "web_search");
+        assert!(
+            web.is_none() || (local.is_some() && local < web),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn brief_web_requests_reveal_the_web_tools() {
+        for (request, expected) in [
+            ("search online", "web_search"),
+            (
+                "can you search online for the latest tokio release",
+                "web_search",
+            ),
+            ("look it up on the internet", "web_search"),
+            ("open this URL", "fetch"),
+            ("what does https://example.com/changelog say", "fetch"),
+        ] {
+            let broker = builtin_broker();
+            assert!(!broker.is_advertised(expected));
+            let revealed = broker.reveal_for_request(request);
+            let names: Vec<_> = revealed.iter().filter_map(|r| r.revealed.clone()).collect();
+            assert!(
+                names.contains(&expected.to_string()),
+                "{request}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn requests_that_are_not_about_the_web_reveal_no_web_tool() {
+        for request in [
+            "search the codebase for the parser",
+            "browse the files in src",
+            "is the build server online",
+            "find the failing test",
+        ] {
+            let broker = builtin_broker();
+            let revealed = broker.reveal_for_request(request);
+            let names: Vec<_> = revealed.iter().filter_map(|r| r.revealed.clone()).collect();
+            assert!(
+                !names
+                    .iter()
+                    .any(|name| name == "web_search" || name == "fetch"),
+                "{request}: {names:?}"
+            );
+        }
     }
 
     #[test]

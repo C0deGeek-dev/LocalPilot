@@ -40,6 +40,10 @@ pub struct DoctorReport {
     /// from "ingestion enabled but nothing indexed" and "indexed without
     /// embeddings" — three states a bare empty doc search cannot explain.
     pub research_docs: Option<ResearchDocsStatus>,
+    /// Web access from chat: mode, the shared research switch, the audit log,
+    /// and the search tools `web_search` would use. Read from the
+    /// configuration only; `None` when the configuration did not load.
+    pub chat_web: Option<crate::chat_web_status::ChatWebStatus>,
     /// Subagent definitions visible from the cwd: how many resolved, and every
     /// file that failed to load. A definition that silently does not load is the
     /// failure this line exists to make visible.
@@ -640,6 +644,13 @@ fn workspace_trust() -> (TrustState, Option<String>) {
 
 pub fn report() -> DoctorReport {
     let (workspace_trust, workspace_trust_store) = workspace_trust();
+    let config = resolved_config();
+    let chat_web = match (std::env::current_dir(), &config) {
+        (Ok(cwd), Some(config)) => Some(crate::chat_web_status::ChatWebStatus::from_config(
+            &cwd, config,
+        )),
+        _ => None,
+    };
     DoctorReport {
         version: env!("LOCALPILOT_VERSION").to_string(),
         binary_path: binary_path(),
@@ -651,6 +662,7 @@ pub fn report() -> DoctorReport {
         mcp_servers: Vec::new(),
         memory_root: memory_root(),
         research_docs: research_docs(),
+        chat_web,
         agents: agents(),
         capabilities: capabilities(),
         skills: skills_doctor(workspace_trust),
@@ -660,7 +672,7 @@ pub fn report() -> DoctorReport {
         workspace_trust_store,
         hygiene: None,
         remote: None,
-        permissions: resolved_config().as_ref().map(permissions_status),
+        permissions: config.as_ref().map(permissions_status),
     }
 }
 
@@ -845,6 +857,44 @@ pub async fn run_with(
         crate::output::OutputFormat::Json => render_json(&report),
     };
     out.write_all(rendered.as_bytes())
+}
+
+/// Chat web access: whether it is on, where it is recorded, and what
+/// `web_search` would use, with how to set a search tool up when there is none.
+fn render_chat_web(s: &mut String, web: &crate::chat_web_status::ChatWebStatus) {
+    use std::fmt::Write as _;
+    if !web.enabled() {
+        let _ = writeln!(
+            s,
+            "chat web: off ([tools] web = \"{}\", [research.web] enabled = {}); set [tools] web = \"ask\" and enable [research.web] to allow it",
+            web.mode, web.research_web_enabled
+        );
+        return;
+    }
+    let _ = writeln!(
+        s,
+        "chat web: ask (the fullscreen session asks before each new site or search server); audit log: {}",
+        web.audit_log
+    );
+    if web.search_backends.is_empty() {
+        let _ = writeln!(
+            s,
+            "  web search: none set up; fetch still reads known addresses. To enable web_search, add an [mcp.servers] entry and name its search tool in [research.mcp] tools"
+        );
+    } else {
+        let _ = writeln!(
+            s,
+            "  web search: {} (configured; no search is sent here, see the mcp servers section for whether it starts)",
+            web.search_backends.join(", ")
+        );
+    }
+    if !web.unresolved.is_empty() {
+        let _ = writeln!(
+            s,
+            "  unresolved search tools (no such [mcp.servers] entry): {}",
+            web.unresolved.join(", ")
+        );
+    }
 }
 
 /// Render a report as a machine-readable JSON object (one trailing newline).
@@ -1034,6 +1084,9 @@ pub fn render(report: &DoctorReport) -> String {
             "research docs: {} report(s) on disk; report ingestion {ingestion}; doc index: {index}",
             research.reports_found
         );
+    }
+    if let Some(web) = &report.chat_web {
+        render_chat_web(&mut s, web);
     }
     let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
     let _ = writeln!(s);
@@ -1766,6 +1819,13 @@ mod tests {
                 doc_chunks: Some(0),
                 doc_vectors: Some(0),
             }),
+            chat_web: Some(crate::chat_web_status::ChatWebStatus {
+                mode: "ask",
+                research_web_enabled: true,
+                audit_log: "/work/.localpilot/research/audit.log".to_string(),
+                search_backends: Vec::new(),
+                unresolved: vec!["finder.search".to_string()],
+            }),
             agents: AgentsStatus::default(),
             capabilities: vec!["doctor-json".to_string(), "models-json".to_string()],
             tools: vec![
@@ -2406,6 +2466,46 @@ added_at = \"1\"
             !render(&trusted).contains("project overlay hidden"),
             "a trusted workspace includes the overlay — no hidden line"
         );
+    }
+
+    #[test]
+    fn chat_web_status_says_how_to_set_up_search_and_names_unresolved_tools() {
+        let mut report = fixture();
+        let human = render(&report);
+        assert!(
+            human.contains("chat web: ask (the fullscreen session asks"),
+            "{human}"
+        );
+        assert!(
+            human.contains("audit log: /work/.localpilot/research/audit.log"),
+            "{human}"
+        );
+        assert!(human.contains("web search: none set up"), "{human}");
+        assert!(human.contains("[research.mcp] tools"), "{human}");
+        assert!(human.contains("unresolved search tools"), "{human}");
+        assert!(human.contains("finder.search"), "{human}");
+
+        let web = report.chat_web.as_mut().unwrap();
+        web.search_backends = vec!["finder.search".to_string()];
+        web.unresolved.clear();
+        let human = render(&report);
+        assert!(
+            human.contains("web search: finder.search (configured; no search is sent here, see the mcp servers section for whether it starts)"),
+            "{human}"
+        );
+        assert!(!human.contains("unresolved search tools"), "{human}");
+
+        report.chat_web.as_mut().unwrap().mode = "off";
+        let human = render(&report);
+        assert!(
+            human.contains("chat web: off ([tools] web = \"off\""),
+            "{human}"
+        );
+        assert!(!human.contains("web search:"), "{human}");
+
+        let json = render_json(&report);
+        assert!(json.contains("\"chat_web\""), "{json}");
+        assert!(json.contains("\"search_backends\""), "{json}");
     }
 
     #[test]

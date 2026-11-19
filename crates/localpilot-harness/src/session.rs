@@ -1525,6 +1525,9 @@ pub struct SessionRuntime {
     /// means this session cannot reach the web — no one to ask, or a host that
     /// wired none — and the tools say so.
     web_gateway: Option<std::sync::Arc<dyn localpilot_tools::WebGateway>>,
+    /// The web-access line currently in the system prompt, so a change of
+    /// privacy state or gateway replaces it instead of adding a second one.
+    web_note: Option<String>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -1786,6 +1789,7 @@ impl SessionRuntime {
             prompter: None,
             peers: None,
             web_gateway: None,
+            web_note: None,
             broker: None,
             unavailable_attempts: std::collections::HashMap::new(),
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
@@ -2424,6 +2428,8 @@ impl SessionRuntime {
         self.claim = claim;
         self.renew_scratch();
         self.last_event = None;
+        // Entering or leaving incognito changes what web access there is.
+        self.refresh_web_note();
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
         });
@@ -2850,6 +2856,32 @@ impl SessionRuntime {
             return;
         }
         self.web_gateway = Some(gateway);
+        self.refresh_web_note();
+    }
+
+    /// Keep the system prompt's web-access line true to the gateway and the
+    /// current privacy state. An answer-only session sends no tools, so it gets
+    /// no line.
+    fn refresh_web_note(&mut self) {
+        let wanted = if self.config.answer_only {
+            None
+        } else {
+            self.web_gateway
+                .as_ref()
+                .and_then(|gateway| gateway.prompt_note(self.config.incognito))
+        };
+        if wanted == self.web_note {
+            return;
+        }
+        let mut prompt = self.system_prompt_text();
+        if let Some(old) = self.web_note.take() {
+            prompt = prompt.replacen(&format!("\n\n{old}"), "", 1);
+        }
+        if let Some(note) = &wanted {
+            prompt = format!("{}\n\n{note}", prompt.trim_end());
+        }
+        self.replace_system_prompt(prompt);
+        self.web_note = wanted;
     }
 
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
@@ -2938,6 +2970,7 @@ impl SessionRuntime {
             return;
         }
         self.config.answer_only = enabled;
+        self.refresh_web_note();
     }
 
     /// Place retrieved context beside the question (`true`, the default) or in
