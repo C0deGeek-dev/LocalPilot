@@ -28,7 +28,7 @@ pub use render::{
 };
 pub use report::{
     flatten_whitespace, AdmissionTrail, ClaimStatus, CoverageVerdict, Evidence, Finding,
-    Provenance, QuestionCoverage, ResearchReport, SourceAccount,
+    NoWebReason, Provenance, QuestionCoverage, ResearchReport, SourceAccount,
 };
 pub use source::{Gathered, Source, SourceSet};
 pub use synth::{expansion_queries, term_overlap_relevance, HeuristicSynthesizer, Synthesizer};

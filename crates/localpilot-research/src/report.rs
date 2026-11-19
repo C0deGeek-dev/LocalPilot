@@ -325,6 +325,37 @@ pub struct ResearchReport {
     /// presenting local-only coverage as cross-validated (LocalHub#33).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_enabled: Option<bool>,
+    /// Why no web search or page fetch took part in the run, when none did.
+    /// Set by the binding layer. A report carrying a reason is a local
+    /// knowledge review and is rendered as one, never as web research.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_web: Option<NoWebReason>,
+}
+
+/// Why a research run performed no web search or page fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoWebReason {
+    /// Web research is allowed, but no search backend is configured or none
+    /// could be reached. Candidate URLs come only from real search results,
+    /// so there is nothing to fetch.
+    NoSearchBackend,
+    /// The operator skipped web research for this run.
+    SkippedForRun,
+    /// Web research is switched off in configuration.
+    Disabled,
+}
+
+impl NoWebReason {
+    /// A short, user-facing description of the reason.
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NoSearchBackend => "no usable search backend is configured or reachable",
+            Self::SkippedForRun => "web research was skipped for this run",
+            Self::Disabled => "web research is switched off in configuration",
+        }
+    }
 }
 
 impl ResearchReport {
@@ -340,6 +371,7 @@ impl ResearchReport {
             rounds_run: 0,
             retrieval_notes: Vec::new(),
             web_enabled: None,
+            no_web: None,
         }
     }
 }

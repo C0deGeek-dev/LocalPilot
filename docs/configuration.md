@@ -1810,7 +1810,9 @@ request and records a per-session consent that is never persisted. See
 #### `[research.mcp]`
 
 Designated MCP search tools that propose candidate URLs during web research
-(ADR-0077). Nothing is auto-discovered: a tool is consulted only when named
+(ADR-0077) — the only candidate source (ADR-0290): with none designated or
+reachable a research run performs no web search or page fetch and is labelled a
+local knowledge review. Nothing is auto-discovered: a tool is consulted only when named
 here, as a `(server, tool)` pair referencing `[mcp.servers]`. Results are
 leads only — extracted URLs pass the `[research.web]` gate and audit like any
 other research fetch, and each search call is itself audited with the
@@ -1818,7 +1820,7 @@ redacted query.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `tools` | array of `{ server, tool }` | `[]` | The designated pairs, e.g. `tools = [{ server = "search", tool = "search" }]`. `server` is a key under `[mcp.servers]`; `tool` is the exact advertised tool name. Empty → no MCP server is consulted during research. |
+| `tools` | array of `{ server, tool }` | `[]` | The designated pairs, e.g. `tools = [{ server = "search", tool = "search" }]`. `server` is a key under `[mcp.servers]`; `tool` is the exact advertised tool name. Empty → no MCP server is consulted and research performs no web search or page fetch. |
 
 See [mcp.md](mcp.md) §Research search tools.
 

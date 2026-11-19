@@ -2,6 +2,46 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0290: Research Takes Candidate URLs Only From Real Search Results
+
+**Status:** accepted · **Date:** 2026-11-19. Amends ADR-0076 (web research on
+by default with model-proposed candidate URLs) and ADR-0077 (designated MCP
+search tools as proposers). Refs LocalPilot#12.
+
+**Context.** `/research` gathered web candidates from two places: the
+designated MCP search tools and, to fill any remaining budget, URLs the model
+listed from its own training memory. With no search tool configured, every web
+lead came from model memory. A local model often invents or misremembers URLs
+and knows nothing newer than its training data, so such a run fetched dead or
+irrelevant pages and then reported weak coverage as if it had searched.
+
+**Decision.**
+1. **Candidates come only from real search results.** The model URL-proposal
+   path and its prompt are removed. The model keeps its other roles:
+   decomposition, reformulation, admission judging and synthesis.
+2. **No search backend means no web leg.** When web research is allowed but no
+   search tool is designated or none can be reached, the run performs no web
+   search query, page fetch or skill-discovery repository search. This is the
+   whole guarantee: the configured model provider is still used for
+   decomposition and synthesis, and a designated search server that cannot be
+   reached may have been started and asked for its handshake before the run
+   fell back.
+3. **Such a run is labelled, never presented as research.** The report is
+   titled "Local knowledge review", states that no web search or page fetch was
+   performed and why (no search backend, skipped for the run, or switched off),
+   and the conversational result, the run notes and the typed completion say
+   the same. Without a search backend the run prints `NoSearchBackend` with
+   setup guidance and still completes with exit status 0, interactive or
+   unattended.
+4. **Status is honest before the run.** The egress disclosure, the research
+   mode notice and `localpilot doctor` (a `research web:` line) say when web
+   research is unavailable for lack of a search backend.
+
+**Consequences.** A user without a search tool gets a truthful local review
+instead of a fake web pass. Offline tests drive candidate URLs through scripted
+MCP search results instead of scripted model replies. Bounded link-following
+from admitted pages as a second candidate source is not part of this decision.
+
 ## ADR-0289: Ordinary Chat Reaches The Web Only Through Per-Session Consent At The Fullscreen Terminal
 
 **Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0076 (the web

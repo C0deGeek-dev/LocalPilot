@@ -893,8 +893,13 @@ documented exception to the default-off rule of the ecosystem remote-egress
 policy (`policies/remote-egress.md`); the policy's other four rules hold by
 construction:
 
+- **Real search only** (ADR-0290). Candidate URLs come only from the search
+  tools designated in `[research.mcp] tools`; the model never proposes URLs.
+  With no search tool designated or reachable the run performs no web search or
+  page fetch — skill discovery's repository search included — and its report is
+  titled a local knowledge review with the reason stated.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
-  fetch, and no URL-proposal model call. `[research.web] enabled = false`
+  search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag
   can override it (the consent grant is a no-op against config-off, enforced
   and tested).

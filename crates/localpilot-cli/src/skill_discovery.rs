@@ -526,7 +526,10 @@ async fn run_discovery(
             "note: web discovery is off ([research.web].enabled = false); local catalog only"
         )?;
     } else {
-        writeln!(out, "note: web discovery skipped for this run (--no-web)")?;
+        writeln!(
+            out,
+            "note: web discovery skipped for this run; local catalog only"
+        )?;
     }
 
     // Persist a review proposal per newly discovered repository (dedup by

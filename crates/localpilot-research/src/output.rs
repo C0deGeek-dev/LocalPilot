@@ -98,7 +98,18 @@ pub fn candidates_from(report: &ResearchReport, confidence_cap: f32) -> Vec<Cand
 #[must_use]
 pub fn render_markdown(report: &ResearchReport) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Research: {}\n\n", report.topic));
+    // A run that searched and fetched nothing from the web is a review of local
+    // knowledge, and its title says so; it is never presented as web research.
+    match report.no_web {
+        Some(reason) => {
+            out.push_str(&format!("# Local knowledge review: {}\n\n", report.topic));
+            out.push_str(&format!(
+                "_No web search or page fetch was performed: {}._\n\n",
+                reason.describe()
+            ));
+        }
+        None => out.push_str(&format!("# Research: {}\n\n", report.topic)),
+    }
 
     out.push_str("## Sub-questions\n\n");
     if report.questions.is_empty() {
@@ -453,6 +464,21 @@ mod tests {
         let md = render_markdown(&report);
         assert!(md.contains("### 1. line one line two _(supported)_"));
         assert!(md.contains("Sources:"));
+    }
+
+    #[test]
+    fn a_run_without_web_is_titled_a_local_knowledge_review() {
+        let mut report = ResearchReport::new("caching");
+        report.no_web = Some(crate::NoWebReason::NoSearchBackend);
+        let md = render_markdown(&report);
+        assert!(
+            md.starts_with("# Local knowledge review: caching"),
+            "never titled as research: {md}"
+        );
+        assert!(md.contains(
+            "No web search or page fetch was performed: no usable search backend is configured or reachable."
+        ));
+        assert!(!md.contains("# Research:"));
     }
 
     #[test]

@@ -316,9 +316,11 @@ against the sub-question; anything dropped, folded, or capped is listed under
 
 **Web research is on by default** (ADR-0076) — research cannot rely on a small
 local model's parametric memory, so both surfaces reach the web unless told
-not to. Candidate URLs come from designated MCP search tools when configured
-(`[research.mcp]`, ADR-0077 — real search results as leads), with the model's
-own proposals as the fallback. Every web-active run prints an egress
+not to — once a search tool is designated, because candidate URLs come only
+from designated MCP search tools (`[research.mcp]`, ADR-0077 — real search
+results as leads; ADR-0290). With no usable search tool the run makes no web
+search query, page fetch or skill-discovery repository search, and its report
+is titled a local knowledge review, never research. Every web-active run prints an egress
 disclosure first, fetches only what the allowlist/disallowlist permits (skips
 are logged), audits every outbound request — search calls included — and
 sends only the redacted sub-question to search servers and web hosts. Fetched

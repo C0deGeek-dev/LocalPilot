@@ -178,8 +178,10 @@ per session as always; only the underlying connections are shared.
 ## Research search tools
 
 Web research (see [`docs/configuration.md`](configuration.md) `[research]`)
-can use designated MCP search tools as **candidate-URL proposers** — real
-search instead of model-guessed URLs. Designation is explicit, per
+uses designated MCP search tools as its **only candidate-URL source**
+(ADR-0290): the model never proposes URLs, so without a designated tool a
+research run performs no web search or page fetch and is labelled a local
+knowledge review. Designation is explicit, per
 `(server, tool)` pair; nothing is auto-discovered (search servers share no
 tool-naming convention, and consulting one sends the redacted sub-question
 text to it):
@@ -192,8 +194,8 @@ tools = [{ server = "search", tool = "search" }]
 The named server must exist under `[mcp.servers]`. During a web-active
 research run each designated tool is called once per sub-question with the
 **redacted** query only; the URLs extracted from its results feed the same
-allowlist/disallowlist-gated, audited fetch path as model-proposed URLs — a
-search result is a lead, never evidence. A provider that returns an attribution
+allowlist/disallowlist-gated, audited fetch path — a search result is a lead,
+never evidence. A provider that returns an attribution
 or grounding wrapper URL rather than a direct source URL still works: the
 wrapper's redirect is followed, but only through LocalPilot's own policy, with
 every hop independently re-gated and audited and the final URL recorded as the

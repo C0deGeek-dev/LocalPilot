@@ -71,12 +71,15 @@ Security-sensitive areas:
   §Paired Devices and ADR-0269.
 - Phone notifications are off by default (`[remote.push] enabled`) and
   content-free; the push service still sees delivery metadata.
-- Web research is off by default. The research loop is local-only unless the
-  operator opts in for that run with the headless `localpilot research --web`
-  flag, which discloses what egresses, fetches only allowlisted domains (others
-  are skipped and logged), sends only the redacted sub-question, and audits every
-  request. `[research.web] enabled = false` is the kill switch a runtime opt-in
-  cannot override. See
+- Web research is on by default (ADR-0076) but reaches the web only through a
+  search tool the user designated (`[research.mcp] tools`): candidate URLs come
+  only from real search results (ADR-0290). Without a search tool a run makes no
+  web search or page fetch and is labelled a local knowledge review. A web-active
+  run discloses what egresses before any request, asks before each host not
+  already allowed (with nobody to ask, only allowlisted hosts are fetched), sends
+  only the redacted sub-question, and audits every request. `--no-web` skips the
+  web for one run, and `[research.web] enabled = false` is the kill switch no
+  flag can override. See
   [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) §Web Research
   Egress.
 - Chat web access starts every session with none. In the fullscreen session

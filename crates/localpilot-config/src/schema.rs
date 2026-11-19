@@ -300,8 +300,9 @@ pub struct ResearchConfig {
     /// `enabled = false` removes the outbound path entirely.
     pub web: ResearchWebConfig,
     /// Designated MCP search tools that propose candidate URLs during web
-    /// research. Empty by default — no MCP server is consulted unless the user
-    /// explicitly designates a tool.
+    /// research — the only source of candidate URLs. Empty by default: no MCP
+    /// server is consulted and research performs no web search or page fetch
+    /// unless the user explicitly designates a tool.
     pub mcp: ResearchMcpConfig,
     /// Browser-rendering fallback controls for pages whose content only appears
     /// after JavaScript execution (SPA shells, iframe-embedded docs). Static

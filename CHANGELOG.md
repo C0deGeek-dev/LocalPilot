@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/research` takes candidate URLs only from real search results
+  (LocalPilot#12, ADR-0290). The model no longer lists URLs from its own
+  memory, which often invented or outdated links. With no search tool set up in
+  `[research.mcp] tools`, a run makes no web search or page fetch (skill
+  discovery's repository search included), prints `NoSearchBackend` with setup
+  guidance, and its report is titled "Local knowledge review" with the reason,
+  never presented as web research. The research disclosure, the research mode
+  notice and a new `research web:` line in `localpilot doctor` say when web
+  research is unavailable.
+
 - Ordinary chat can reach the web (LocalPilot#9). In the fullscreen session
   `fetch` reads a page from the internet and the new `web_search` tool searches
   through the MCP search tools named in `[research.mcp] tools`, returning links

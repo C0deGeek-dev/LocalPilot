@@ -863,6 +863,16 @@ pub async fn run_with(
 /// `web_search` would use, with how to set a search tool up when there is none.
 fn render_chat_web(s: &mut String, web: &crate::chat_web_status::ChatWebStatus) {
     use std::fmt::Write as _;
+    // /research takes candidate URLs only from real search results, so without
+    // a search tool it performs no web search or page fetch at all.
+    let research = if !web.research_web_enabled {
+        "off ([research.web] enabled = false)"
+    } else if web.search_backends.is_empty() {
+        "unavailable — no search backend, so /research reviews local knowledge only (no web search or page fetch)"
+    } else {
+        "on — candidate URLs come only from the configured search tools"
+    };
+    let _ = writeln!(s, "research web: {research}");
     if !web.enabled() {
         let _ = writeln!(
             s,
