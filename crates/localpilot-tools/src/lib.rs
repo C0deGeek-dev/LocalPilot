@@ -26,6 +26,7 @@ mod schema_intent;
 mod tool;
 pub mod touch;
 mod validate;
+mod web;
 
 pub use advertise::advertised_schema;
 pub use broker::{
@@ -73,3 +74,4 @@ pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,
     MalformedClass, SchemaIssue,
 };
+pub use web::{redact_url, WebContext, WebFetchRequest, WebGateway, WebPage, WebRefusal};

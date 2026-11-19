@@ -194,6 +194,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         self.tools
             .check_headless_permissions(&call, &ctx, &self.engine.snapshot())
@@ -318,6 +319,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         if self
             .tools

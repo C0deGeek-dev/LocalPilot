@@ -241,6 +241,20 @@ pub(crate) trait HopPolicy: Send + Sync {
     /// Whether the redirect destination `next`, issued by `origin_host`, may be
     /// requested.
     async fn allow_redirect(&self, next: &reqwest::Url, origin_host: &str) -> bool;
+    /// How a URL is written into the audit log. The default keeps it whole.
+    fn audit_locator(&self, url: &str) -> String {
+        url.to_string()
+    }
+    /// The most body bytes to read; `None` reads the whole body.
+    fn body_cap(&self) -> Option<usize> {
+        None
+    }
+    /// Whether a rate-limit or server-error response ends the chain as a
+    /// failure without its body. When `false` the body is read and returned
+    /// like any other unsuccessful response.
+    fn fail_on_cooldown_status(&self) -> bool {
+        true
+    }
 }
 
 /// A response that ended the chain with a body, whatever its status.
@@ -253,6 +267,9 @@ pub(crate) struct ChainPage {
     /// The response `Content-Type`, lower-cased; empty when absent.
     pub(crate) content_type: String,
     pub(crate) body: String,
+    /// Whether the body was cut at the caller's byte cap.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) truncated: bool,
 }
 
 /// How one gated fetch chain ended.
@@ -297,14 +314,24 @@ pub(crate) async fn fetch_chain(
         if policy.cooled(&current_host) {
             append_audit(
                 audit_log,
-                &audit_entry(&current_url, &current_host, "host-cooldown", query),
+                &audit_entry(
+                    &policy.audit_locator(&current_url),
+                    &current_host,
+                    "host-cooldown",
+                    query,
+                ),
             )?;
             return Ok(ChainOutcome::Cooled);
         }
         policy.pace(&current_host).await;
         append_audit(
             audit_log,
-            &audit_entry(&current_url, &current_host, "allowed", query),
+            &audit_entry(
+                &policy.audit_locator(&current_url),
+                &current_host,
+                "allowed",
+                query,
+            ),
         )?;
         let fetch_started = Instant::now();
         let response = match client.get(&current_url).send().await {
@@ -312,7 +339,12 @@ pub(crate) async fn fetch_chain(
             Err(_) => {
                 append_audit(
                     audit_log,
-                    &audit_entry(&current_url, &current_host, "fetch-error", query),
+                    &audit_entry(
+                        &policy.audit_locator(&current_url),
+                        &current_host,
+                        "fetch-error",
+                        query,
+                    ),
                 )?;
                 return Ok(ChainOutcome::Failed);
             }
@@ -320,7 +352,7 @@ pub(crate) async fn fetch_chain(
         let status = response.status();
         let cool_down = status.as_u16() == 429 || status.is_server_error();
         policy.record(&current_host, fetch_started.elapsed(), cool_down);
-        if cool_down {
+        if cool_down && policy.fail_on_cooldown_status() {
             return Ok(ChainOutcome::Failed);
         }
         if status.is_redirection() {
@@ -335,7 +367,12 @@ pub(crate) async fn fetch_chain(
                     } else {
                         append_audit(
                             audit_log,
-                            &audit_entry(&next_url, &next_host, "redirect-followed", query),
+                            &audit_entry(
+                                &policy.audit_locator(&next_url),
+                                &next_host,
+                                "redirect-followed",
+                                query,
+                            ),
                         )?;
                         hops += 1;
                         current_url = next_url;
@@ -350,7 +387,12 @@ pub(crate) async fn fetch_chain(
                 Err(stop) => {
                     append_audit(
                         audit_log,
-                        &audit_entry(&current_url, &current_host, stop.reason(), query),
+                        &audit_entry(
+                            &policy.audit_locator(&current_url),
+                            &current_host,
+                            stop.reason(),
+                            query,
+                        ),
                     )?;
                     return Ok(ChainOutcome::Redirected(stop));
                 }
@@ -363,12 +405,21 @@ pub(crate) async fn fetch_chain(
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let body = match response.text().await {
-            Ok(body) => body,
+        let read = match policy.body_cap() {
+            None => response.text().await.map(|body| (body, false)),
+            Some(cap) => read_capped(response, cap).await,
+        };
+        let (body, truncated) = match read {
+            Ok(read) => read,
             Err(_) => {
                 append_audit(
                     audit_log,
-                    &audit_entry(&current_url, &current_host, "fetch-error", query),
+                    &audit_entry(
+                        &policy.audit_locator(&current_url),
+                        &current_host,
+                        "fetch-error",
+                        query,
+                    ),
                 )?;
                 return Ok(ChainOutcome::Failed);
             }
@@ -379,6 +430,7 @@ pub(crate) async fn fetch_chain(
             status,
             content_type,
             body,
+            truncated,
         })));
     }
 }
@@ -406,6 +458,37 @@ async fn redirect_destination(
     } else {
         Err(RedirectStop::Blocked)
     }
+}
+
+/// Read at most `cap` body bytes, stopping the download there rather than
+/// reading everything and cutting afterwards. Decoded as UTF-8, with invalid
+/// bytes replaced and a character split by the cap dropped.
+async fn read_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<(String, bool), reqwest::Error> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await? {
+        let room = cap.saturating_sub(bytes.len());
+        if chunk.len() >= room {
+            bytes.extend_from_slice(&chunk[..room]);
+            // Stop at the bound without waiting for more: a slow or open
+            // stream must not turn a full result into a timeout. Whether more
+            // would have followed is unknown, so the body counts as cut.
+            truncated = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if truncated {
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_none() {
+                bytes.truncate(error.valid_up_to());
+            }
+        }
+    }
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }
 
 #[cfg(test)]

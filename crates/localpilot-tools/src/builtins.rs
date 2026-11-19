@@ -20,6 +20,7 @@ use crate::tool::{
     detail_preview, parse_input, schema_for, FileReadLimits, Tool, ToolContext, ToolOutput,
 };
 use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
+use crate::web::WebFetchRequest;
 use localpilot_core::{ToolImage, ToolOutcome};
 
 /// Approval detail from a single string field of the input. Tools know their
@@ -1728,13 +1729,6 @@ struct FetchInput {
     timeout_secs: Option<u64>,
 }
 
-const FETCH_DEFAULT_TIMEOUT_SECS: u64 = 30;
-
-/// Cap on the TCP/TLS connect phase, so a stalled connect fails fast instead of
-/// waiting out the full request timeout. A hung network tool otherwise blocks the
-/// agent loop with no output; bounded well under the total timeout.
-const FETCH_CONNECT_TIMEOUT_SECS: u64 = 10;
-
 /// Validate that a URL uses an http/https scheme before any network effect is
 /// resolved. Rejecting other schemes (`file:`, `ftp:`, …) keeps `fetch` from
 /// reading local resources and sidestepping the workspace boundary.
@@ -1743,9 +1737,7 @@ fn validate_fetch_url(url: &str) -> Result<(), ToolError> {
         .split_once("://")
         .map(|(scheme, _)| scheme)
         .filter(|rest| !rest.is_empty())
-        .ok_or_else(|| {
-            ToolError::InvalidInput(format!("url must be an http or https URL: {url}"))
-        })?;
+        .ok_or_else(|| ToolError::InvalidInput("url must be an http or https URL".to_string()))?;
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
         Ok(())
     } else {
@@ -1753,6 +1745,132 @@ fn validate_fetch_url(url: &str) -> Result<(), ToolError> {
             "url scheme must be http or https, got `{scheme}`"
         )))
     }
+}
+
+/// Bounds for a request to a server on this machine.
+const LOCAL_FETCH_DEFAULT_TIMEOUT_SECS: u64 = 30;
+const LOCAL_FETCH_CONNECT_TIMEOUT_SECS: u64 = 10;
+const LOCAL_FETCH_MAX_REDIRECTS: usize = 5;
+
+/// Whether `url` names this machine: `localhost` (or a `.localhost` name) or
+/// a loopback address. Such a request never leaves the computer — it is how a
+/// task checks a dev server it was asked about — so it stays under the ordinary
+/// network permission and needs no web consent.
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Answers `localhost` and `.localhost` names with the loopback addresses
+/// itself and refuses every other name, so a local fetch never sends a DNS
+/// query — the name never leaves the machine either.
+struct LoopbackOnly;
+
+impl reqwest::dns::Resolve for LoopbackOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
+        Box::pin(async move {
+            if host != "localhost" && !host.ends_with(".localhost") {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "only this machine is reachable here",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            let addresses = vec![
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+                std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)),
+            ];
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Fetch from a server on this machine.
+async fn fetch_local(input: &FetchInput) -> Result<ToolOutput, ToolError> {
+    let timeout = Duration::from_secs(
+        input
+            .timeout_secs
+            .unwrap_or(LOCAL_FETCH_DEFAULT_TIMEOUT_SECS),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(LOCAL_FETCH_CONNECT_TIMEOUT_SECS)))
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(LoopbackOnly))
+        // A redirect may move within this machine, never off it.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() < LOCAL_FETCH_MAX_REDIRECTS
+                && is_loopback_url(attempt.url())
+            {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|e| ToolError::Failed(format!("failed to build HTTP client: {e}")))?;
+    let response = client
+        .get(&input.url)
+        .send()
+        .await
+        .map_err(|e| ToolError::Failed(format!("request failed: {}", e.without_url())))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = response.text().await.map_err(|e| {
+        ToolError::Failed(format!("failed to read response body: {}", e.without_url()))
+    })?;
+    let body = match input.max_bytes {
+        Some(limit) if limit < body.len() => {
+            let mut end = limit;
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            body[..end].to_string()
+        }
+        _ => body,
+    };
+    let header = if content_type.is_empty() {
+        format!("HTTP {status}\n")
+    } else {
+        format!("HTTP {status} {content_type}\n")
+    };
+    let mut result = cap(format!("{header}{body}"));
+    // A delivered non-2xx response is the server saying no; transport
+    // failures return `Err` and stay malfunctions.
+    result.outcome = if status.is_success() {
+        ToolOutcome::Ok
+    } else {
+        ToolOutcome::ReportedFailure
+    };
+    Ok(result)
+}
+
+/// What `fetch` says when the session has no web access at all.
+const NO_WEB_IN_SESSION: &str = "Web access is not available in this session: there is \
+nobody here who can be asked to allow it (a piped or scheduled run, or a subagent). \
+Run the request from an interactive session, where you will be asked before the \
+first request to each site, or use `/research <topic>` for a researched answer.";
+
+/// A tool result the model reads as a failure it can act on, not a malfunction.
+fn reported_failure(text: &str) -> ToolOutput {
+    let mut result = cap(text.to_string());
+    result.outcome = ToolOutcome::ReportedFailure;
+    result
 }
 
 pub struct Fetch;
@@ -1773,7 +1891,13 @@ impl Tool for Fetch {
         }
     }
     fn approval_detail(&self, input: &Value) -> String {
-        string_field_detail(input, "url")
+        // The question can be relayed to another device or kept in a log, so
+        // secrets in the link stay out of it.
+        input
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|url| detail_preview(&crate::web::redact_url(url)))
+            .unwrap_or_default()
     }
     fn description(&self) -> &'static str {
         "Fetch the body of an http or https URL over the network."
@@ -1786,56 +1910,41 @@ impl Tool for Fetch {
         validate_fetch_url(&input.url)?;
         Ok(vec![Effect::Network])
     }
-    async fn invoke(&self, input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: FetchInput = parse_input(&input)?;
         validate_fetch_url(&input.url)?;
-        let timeout = Duration::from_secs(input.timeout_secs.unwrap_or(FETCH_DEFAULT_TIMEOUT_SECS));
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            // Fail fast on a stalled connect instead of hanging out the full
-            // request timeout (a never-completing network call blocks the loop).
-            .connect_timeout(timeout.min(Duration::from_secs(FETCH_CONNECT_TIMEOUT_SECS)))
-            .build()
-            .map_err(|e| ToolError::Failed(format!("failed to build HTTP client: {e}")))?;
-
-        let response = client
-            .get(&input.url)
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("request failed: {e}")))?;
-
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ToolError::Failed(format!("failed to read response body: {e}")))?;
-
-        let body = match input.max_bytes {
-            Some(limit) if limit < body.len() => {
-                let mut end = limit;
-                while end > 0 && !body.is_char_boundary(end) {
-                    end -= 1;
-                }
-                body[..end].to_string()
-            }
-            _ => body,
+        if reqwest::Url::parse(&input.url).is_ok_and(|url| is_loopback_url(&url)) {
+            return fetch_local(&input).await;
+        }
+        let Some(web) = ctx.web else {
+            return Ok(reported_failure(NO_WEB_IN_SESSION));
         };
-
-        let header = if content_type.is_empty() {
-            format!("HTTP {status}\n")
+        let request = WebFetchRequest {
+            url: input.url,
+            max_bytes: input.max_bytes,
+            timeout: input.timeout_secs.map(Duration::from_secs),
+            tool: self.name().to_string(),
+            interactivity: ctx.interactivity,
+            trusted: ctx.trusted,
+        };
+        let page = match web.gateway.fetch(request, web).await {
+            Ok(page) => page,
+            Err(refusal) => return Ok(reported_failure(refusal.message())),
+        };
+        let mut text = if page.content_type.is_empty() {
+            format!("HTTP {}\n", page.status)
         } else {
-            format!("HTTP {status} {content_type}\n")
+            format!("HTTP {} {}\n", page.status, page.content_type)
         };
-        let mut result = cap(format!("{header}{body}"));
-        // A delivered non-2xx response is the server saying no; transport
-        // failures return `Err` and stay malfunctions.
-        result.outcome = if status.is_success() {
+        text.push_str(&format!("URL: {}\n\n", page.final_url));
+        text.push_str(&page.body);
+        if page.truncated {
+            text.push_str("\n… (body truncated at the size bound)");
+        }
+        let mut result = cap(text);
+        // A delivered non-2xx response is the server saying no; it stays a
+        // reported failure with its body, as before.
+        result.outcome = if (200..300).contains(&page.status) {
             ToolOutcome::Ok
         } else {
             ToolOutcome::ReportedFailure

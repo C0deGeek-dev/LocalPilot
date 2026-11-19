@@ -556,6 +556,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let output = tool.invoke(json!({}), &ctx).await.unwrap();
         assert_eq!(output.text, "[image attached: image/png]");
@@ -603,6 +604,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let input = json!({ "url": "https://example.test" });
         let output = tool.invoke(input.clone(), &context).await.unwrap();
@@ -627,6 +629,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         }
     }
 

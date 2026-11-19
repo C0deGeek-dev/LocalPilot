@@ -351,6 +351,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers,
+            web: None,
         }
     }
 

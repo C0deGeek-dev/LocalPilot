@@ -11,6 +11,8 @@ use localpilot_store::Store;
 
 mod agents_cmd;
 mod bypass;
+#[cfg(feature = "tui")]
+mod chat_web;
 mod context_inject;
 mod context_window;
 mod credential_cmd;

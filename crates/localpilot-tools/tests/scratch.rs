@@ -33,6 +33,7 @@ async fn call_with_engine(
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     };
     let result = ToolRegistry::with_builtins()
         .dispatch(
@@ -251,6 +252,7 @@ async fn an_external_shell_write_is_grantable_only_after_interactive_approval() 
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     };
     let call = ToolCall::new(
         ToolUseId::from("approval"),
@@ -291,6 +293,7 @@ async fn a_scratch_shell_write_needs_only_one_command_confirmation_in_default() 
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     };
     let call = ToolCall::new(
         ToolUseId::from("confirmation"),

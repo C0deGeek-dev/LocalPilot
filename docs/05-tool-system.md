@@ -517,7 +517,7 @@ the output was captured under the permission decision that produced it.
 
 ### `fetch`
 
-Retrieves the body of an http/https URL over the network.
+Retrieves the body of an http/https URL.
 
 Rules:
 
@@ -526,8 +526,22 @@ Rules:
 - declare a network effect, so the call is gated by the permission engine (ask
   interactive, deny non-interactive unless allowlisted) like any other network
   action
+- a URL on this machine (`localhost`, a `.localhost` name, or a loopback
+  address) is fetched directly — how a task checks a dev server — with no proxy,
+  `localhost` names answered with loopback addresses without any DNS query,
+  and redirects followed only while they stay on the machine
+- any other URL goes through the host's web gateway (`ToolContext::web`). A
+  session without one has no web access and the tool says so. The fullscreen
+  session provides one: it asks the user before the first request to each host,
+  on the local approval prompt only (never relayed to paired devices, and no
+  permission profile can answer),
+  refuses incognito sessions and non-public addresses (also after DNS and on
+  every redirect), writes an audit line before each request, bounds the
+  download, and turns HTML into Markdown (`[tools] web`, see
+  [configuration.md](configuration.md))
 - set a timeout
 - cap output size and honor an optional smaller byte limit
+- a non-2xx response is returned with its body as a reported failure
 - output is redacted like every other tool result
 
 ### `run_shell`

@@ -736,6 +736,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let target = outside.path().join("output").display().to_string();
         for (program, args) in [
@@ -805,6 +806,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let shell = |command: &str| RunShellExecution::Shell {
             command: command.to_string(),
@@ -938,6 +940,7 @@ mod chain_tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let listing = if cfg!(windows) {
             r#"Get-ChildItem -Path "C:\Games\Some Game (x86)" -Directory | Select-Object Name"#
@@ -992,6 +995,7 @@ mod chain_tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let unscoped = |command: &str| {
             effects(&shell(command), &ctx)

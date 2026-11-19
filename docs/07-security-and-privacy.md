@@ -1043,18 +1043,30 @@ on by default since ADR-0076, disclosed on every run, and disableable per run
 agent can touch the network, and the others are deliberately looser — know the
 difference:
 
-- **The builtin `fetch` tool** carries `Effect::Network` and no host allowlist:
-  under the `relaxed` permission profile an allowlisted `fetch` reaches **any**
-  host without the research path's per-host audit. It is a general fetch, gated
-  by the permission engine, not by the research allowlist.
+- **The builtin `fetch` tool** carries `Effect::Network`, and beyond the
+  permission engine it reaches the internet only through chat web access
+  (`[tools] web`, default `ask`). That is a separate, per-session consent:
+  before the first request to each host the user is asked on the fullscreen
+  session's own approval prompt — not relayed to paired devices, and no
+  permission profile, allowlist or bypass can answer — and the answer lasts for
+  that host until the session changes. Only
+  the fullscreen session, where a person answers, has it; piped runs, subagents,
+  remote and MCP-driven sessions have none. Incognito refuses it. Each request
+  is checked against `[research.web] disallowlist`, refused when the host is or
+  resolves to an address that is not on the public internet (checked again on
+  every redirect, and a redirect to a new host asks again), sent without a
+  proxy, bounded in time and size, and recorded first in the research egress
+  audit log with secrets stripped from the URL. A `fetch` of this machine
+  (`localhost`, loopback) stays local and needs no consent.
 - **MCP tool servers** are gated as `Effect::Network` when invoked, but a stdio
   MCP server is a local process that can do anything its own code does — the gate
   covers *invoking the tool*, not what the server then reaches. Trust an MCP
   server as you would any dependency you run.
 
-So "may the agent touch the network?" has two honest answers: the research path
-is a true audited allowlist boundary; `fetch`/MCP are permission-gated but
-host-agnostic. Choose the profile and allowlist accordingly.
+So "may the agent touch the network?" has honest answers per surface: the
+research path is an audited allowlist boundary; chat `fetch` is an audited
+per-host consent boundary; MCP is permission-gated but host-agnostic. Choose
+the profile and servers accordingly.
 
 ## Lesson Lab Execution
 

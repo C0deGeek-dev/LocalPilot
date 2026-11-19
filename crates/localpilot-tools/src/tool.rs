@@ -33,6 +33,10 @@ pub struct ToolContext<'a> {
     /// session is not collaborating — the overwhelmingly common case — and the
     /// swarm tool reports itself unavailable instead of failing obscurely.
     pub peers: Option<&'a dyn SwarmPeers>,
+    /// The host's gated web access, with the session's approver and live
+    /// privacy state. `None` means this session cannot reach the web — a piped
+    /// run, a subagent, a host with no one to ask — and the web tools say so.
+    pub web: Option<crate::WebContext<'a>>,
 }
 
 /// Who this session is inside its swarm.

@@ -970,6 +970,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
     }
@@ -987,6 +988,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         // A command that sleeps well past the 1s timeout: the timeout path must
         // return a "timed out" error and exercise the tree-reap (kill_process_tree
@@ -1020,6 +1022,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let input = json!({ "program": "sort", "timeout_secs": 10 });
         let output = RunShell
@@ -1063,6 +1066,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let started = dir.path().join("started.txt");
         let leaked = dir.path().join("leaked.txt");

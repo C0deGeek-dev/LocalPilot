@@ -611,6 +611,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let target = outside.path().join("external.txt");
         let call = ToolCall::new(

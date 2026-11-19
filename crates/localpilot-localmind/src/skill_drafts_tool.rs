@@ -170,6 +170,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         }
     }
 

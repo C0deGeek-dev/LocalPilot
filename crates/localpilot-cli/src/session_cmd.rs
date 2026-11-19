@@ -1059,6 +1059,7 @@ mod tests {
                 agents: None,
                 prompter: None,
                 peers: None,
+                web: None,
             };
             let target = outside.path().join("external.txt");
             let calls = [
@@ -1135,6 +1136,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let inside = dir.path().join("inside.txt");
         let external = outside.path().join("external.txt");

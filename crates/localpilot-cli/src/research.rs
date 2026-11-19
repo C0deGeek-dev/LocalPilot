@@ -962,7 +962,7 @@ const POLITENESS_MAX_DELAY_MS: u64 = 3_000;
 /// Cap on body bytes kept as evidence from one fetch, bounding context cost.
 const WEB_MAX_BODY_BYTES: usize = 64 * 1024;
 /// Default egress audit-log path when `[research.web].audit_log` is unset.
-fn default_audit_log(root: &Path) -> PathBuf {
+pub(crate) fn default_audit_log(root: &Path) -> PathBuf {
     root.join(".localpilot")
         .join("research")
         .join("egress-audit.log")
@@ -3260,7 +3260,11 @@ mod tests {
         ),
         (
             "localpilot-tools/src/builtins.rs",
-            "tool permission (Effect::Network)",
+            "tool permission (Effect::Network), this machine only",
+        ),
+        (
+            "localpilot-cli/src/chat_web.rs",
+            "chat web consent (asked per host, per session, through the session's approver)",
         ),
         (
             "localpilot-llm-openai/src/lib.rs",

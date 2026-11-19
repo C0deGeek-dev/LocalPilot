@@ -933,6 +933,7 @@ mod retention_tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
 
         let mut registry = ToolRegistry::new();

@@ -37,6 +37,7 @@ fn ctx(ws: &Workspace, interactivity: Interactivity, trusted: bool) -> ToolConte
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     }
 }
 
@@ -2019,6 +2020,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     };
 
     let result = dispatch(
@@ -2056,28 +2058,175 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
     assert!(fetched.output.contains("line of output"));
 }
 
-#[tokio::test]
-async fn fetch_returns_body_when_network_is_approved() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/page"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("hello from the web"))
-        .mount(&server)
-        .await;
+/// A host gateway that answers from a fixed page and remembers what it was asked.
+struct CannedWeb {
+    page: Result<localpilot_tools::WebPage, localpilot_tools::WebRefusal>,
+    seen: std::sync::Mutex<Vec<localpilot_tools::WebFetchRequest>>,
+}
 
+impl CannedWeb {
+    fn page(status: u16, body: &str) -> Self {
+        Self {
+            page: Ok(localpilot_tools::WebPage {
+                final_url: "https://example.test/page".to_string(),
+                status,
+                content_type: "text/plain".to_string(),
+                body: body.to_string(),
+                truncated: false,
+            }),
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl localpilot_tools::WebGateway for CannedWeb {
+    async fn fetch(
+        &self,
+        request: localpilot_tools::WebFetchRequest,
+        _context: localpilot_tools::WebContext<'_>,
+    ) -> Result<localpilot_tools::WebPage, localpilot_tools::WebRefusal> {
+        self.seen.lock().unwrap().push(request);
+        self.page.clone()
+    }
+    fn reset_consent(&self) {}
+}
+
+async fn fetch_through(web: &CannedWeb, input: serde_json::Value) -> ToolResult {
     let (_dir, ws) = workspace_with(&[]);
-    let registry = ToolRegistry::with_builtins();
-    let result = dispatch(
-        &registry,
+    let approver = ScriptedApprover::always();
+    let mut c = ctx(&ws, Interactivity::Interactive, true);
+    c.web = Some(localpilot_tools::WebContext {
+        gateway: web,
+        incognito: false,
+    });
+    dispatch(
+        &ToolRegistry::with_builtins(),
         "fetch",
-        json!({ "url": format!("{}/page", server.uri()) }),
-        &ctx(&ws, Interactivity::Interactive, true),
+        input,
+        &c,
         &default_engine(),
-        &ScriptedApprover::new(vec![true]),
+        &approver,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn fetch_returns_the_page_the_host_retrieved() {
+    let web = CannedWeb::page(200, "hello from the web");
+    let result = fetch_through(
+        &web,
+        json!({ "url": "https://example.test/page", "max_bytes": 100, "timeout_secs": 5 }),
     )
     .await;
     assert!(!result.is_error(), "{}", result.output);
     assert!(result.output.contains("hello from the web"));
+    assert!(result.output.contains("HTTP 200"));
+    let seen = web.seen.lock().unwrap();
+    assert_eq!(seen[0].url, "https://example.test/page");
+    assert_eq!(seen[0].max_bytes, Some(100));
+    assert_eq!(seen[0].timeout, Some(std::time::Duration::from_secs(5)));
+    assert_eq!(seen[0].tool, "fetch");
+}
+
+#[tokio::test]
+async fn fetch_reports_an_unsuccessful_status_with_its_body() {
+    let web = CannedWeb::page(404, "no such page");
+    let result = fetch_through(&web, json!({ "url": "https://example.test/missing" })).await;
+    assert!(result.is_error());
+    assert!(result.output.contains("HTTP 404"));
+    assert!(result.output.contains("no such page"));
+}
+
+#[tokio::test]
+async fn fetch_passes_on_the_hosts_refusal() {
+    let mut web = CannedWeb::page(200, "");
+    web.page = Err(localpilot_tools::WebRefusal::Declined(
+        "The user did not allow it.".to_string(),
+    ));
+    let result = fetch_through(&web, json!({ "url": "https://example.test/" })).await;
+    assert!(result.is_error());
+    assert!(result.output.contains("did not allow"), "{}", result.output);
+}
+
+#[tokio::test]
+async fn fetch_without_web_access_explains_instead_of_reaching_out() {
+    let (_dir, ws) = workspace_with(&[]);
+    let result = dispatch(
+        &ToolRegistry::with_builtins(),
+        "fetch",
+        // Unresolvable on purpose: a request that went out would fail differently.
+        json!({ "url": "https://unreachable.invalid/page" }),
+        &ctx(&ws, Interactivity::Interactive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(
+        result.output.contains("not available in this session"),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn fetch_from_this_machine_needs_no_web_access() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/page"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hello from a dev server"))
+        .mount(&server)
+        .await;
+    let web = CannedWeb::page(200, "from the web");
+    let result = fetch_through(&web, json!({ "url": format!("{}/page", server.uri()) })).await;
+    assert!(!result.is_error(), "{}", result.output);
+    assert!(result.output.contains("hello from a dev server"));
+    assert!(
+        web.seen.lock().unwrap().is_empty(),
+        "this machine is not the web"
+    );
+}
+
+#[tokio::test]
+async fn fetch_reaches_localhost_by_name_without_a_dns_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/page"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("named local server"))
+        .mount(&server)
+        .await;
+    let port = server.address().port();
+    let web = CannedWeb::page(200, "from the web");
+    let result = fetch_through(
+        &web,
+        json!({ "url": format!("http://localhost:{port}/page") }),
+    )
+    .await;
+    assert!(!result.is_error(), "{}", result.output);
+    assert!(result.output.contains("named local server"));
+}
+
+#[tokio::test]
+async fn a_local_redirect_off_the_machine_is_not_followed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("Location", "https://example.invalid/"),
+        )
+        .mount(&server)
+        .await;
+    let (_dir, ws) = workspace_with(&[]);
+    let result = dispatch(
+        &ToolRegistry::with_builtins(),
+        "fetch",
+        json!({ "url": format!("{}/", server.uri()) }),
+        &ctx(&ws, Interactivity::Interactive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.output.contains("HTTP 302"), "{}", result.output);
 }
 
 #[tokio::test]
@@ -2120,6 +2269,23 @@ async fn fetch_approval_prompt_shows_the_url() {
     let seen = approver.seen();
     assert!(!seen.is_empty(), "a network fetch must prompt");
     assert_eq!(seen[0].detail, url);
+}
+
+#[tokio::test]
+async fn fetch_approval_prompt_leaves_secrets_out_of_the_url() {
+    let (_dir, ws) = workspace_with(&[]);
+    let c = ctx(&ws, Interactivity::Interactive, true);
+    let approver = RecordingApprover::new();
+    let call = ToolCall::new(
+        ToolUseId::from("c1"),
+        "fetch",
+        json!({ "url": "https://user:pw@example.invalid/doc?token=s3cr3t" }),
+    );
+    let _ = ToolRegistry::with_builtins()
+        .dispatch(&call, &c, &default_engine(), &approver)
+        .await;
+    let seen = approver.seen();
+    assert_eq!(seen[0].detail, "https://example.invalid/doc?token=redacted");
 }
 
 #[tokio::test]

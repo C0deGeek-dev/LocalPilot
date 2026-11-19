@@ -1807,6 +1807,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let read = vec![Effect::ReadPath {
             inside_workspace: true,
@@ -1855,6 +1856,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let call = ToolCall::new(
             ToolUseId::from("c1"),

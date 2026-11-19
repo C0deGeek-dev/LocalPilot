@@ -483,6 +483,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
 
         let list = registry.get("files_resources_list").unwrap();

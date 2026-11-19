@@ -85,6 +85,7 @@ async fn call(
         agents: None,
         prompter: None,
         peers: None,
+        web: None,
     };
     let call = ToolCall::new(ToolUseId::from("probe"), tool, input);
     // An approver that approves everything: the lease, not a refusal, must

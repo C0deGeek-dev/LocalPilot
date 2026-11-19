@@ -1521,6 +1521,10 @@ pub struct SessionRuntime {
     /// is the overwhelmingly common case; the tool then reports itself
     /// unavailable rather than failing obscurely.
     peers: Option<std::sync::Arc<dyn localpilot_tools::SwarmPeers>>,
+    /// The host's gated web access for the web tools. `None` (the default)
+    /// means this session cannot reach the web — no one to ask, or a host that
+    /// wired none — and the tools say so.
+    web_gateway: Option<std::sync::Arc<dyn localpilot_tools::WebGateway>>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -1781,6 +1785,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web_gateway: None,
             broker: None,
             unavailable_attempts: std::collections::HashMap::new(),
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
@@ -1954,6 +1959,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let Ok(effects) = tool.effects(input, &ctx) else {
             return Ok(false);
@@ -2406,6 +2412,10 @@ impl SessionRuntime {
         self.admission.set(Admission::Owned);
         // A fresh session must not inherit the previous one's running servers.
         self.background.kill_all();
+        // Nor web consent given for the previous session.
+        if let Some(gateway) = &self.web_gateway {
+            gateway.reset_consent();
+        }
         self.clear_conversation();
         self.capability_evidence = crate::granularity::CapabilityEvidence::default();
         self.active_work_profile = None;
@@ -2525,6 +2535,9 @@ impl SessionRuntime {
         self.session_id = session;
         self.reset_work_unit_ownership();
         self.background.kill_all();
+        if let Some(gateway) = &self.web_gateway {
+            gateway.reset_consent();
+        }
         crate::session_scratch::initialize(&mut self.workspace, &session.to_string());
         self.last_event = events.last().map(|event| event.id);
         self.messages = setup.into_iter().chain(transcript).collect();
@@ -2566,6 +2579,9 @@ impl SessionRuntime {
         self.session_id = next;
         self.claim = claim;
         self.background.kill_all();
+        if let Some(gateway) = &self.web_gateway {
+            gateway.reset_consent();
+        }
         self.renew_scratch();
         self.last_event = None;
         self.record_event(SessionEventKind::SessionOpened {
@@ -2649,6 +2665,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         let engine = self.engine.snapshot();
         let (dispatch, cancelled) = if let Some(cancel) = cancel {
@@ -2823,6 +2840,16 @@ impl SessionRuntime {
             return;
         }
         self.prompter = Some(prompter);
+    }
+
+    /// Install the host's gated web access, enabling the web tools. Only a
+    /// front-end where a person answers this session's questions wires it;
+    /// consent the user gives lasts until the session changes.
+    pub fn set_web_gateway(&mut self, gateway: std::sync::Arc<dyn localpilot_tools::WebGateway>) {
+        if self.refuse_unless_owned("web access change") {
+            return;
+        }
+        self.web_gateway = Some(gateway);
     }
 
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
@@ -3073,6 +3100,7 @@ impl SessionRuntime {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         };
         self.tools
             .check_headless_permissions(&call, &ctx, &self.engine.snapshot())
@@ -6085,6 +6113,14 @@ impl SessionRuntime {
                                     .map(|h| h as &dyn localpilot_tools::AgentHost),
                                 prompter: self.prompter.as_deref(),
                                 peers: self.peers.as_deref(),
+                                // Read per call: privacy state can change
+                                // between calls of one session.
+                                web: self.web_gateway.as_deref().map(|gateway| {
+                                    localpilot_tools::WebContext {
+                                        gateway,
+                                        incognito: self.config.incognito,
+                                    }
+                                }),
                             };
                             // Generic MCP adapters request network permission;
                             // they cannot attest that a server did no external

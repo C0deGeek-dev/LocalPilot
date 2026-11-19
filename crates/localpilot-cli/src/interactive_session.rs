@@ -622,6 +622,18 @@ impl InteractiveSessionSetup {
         );
         runtime.set_broker(broker);
         runtime.set_prompter(Arc::new(TuiPrompter { tx: question_tx }));
+        // Chat web access needs a person to ask, which this host has. Its
+        // consent questions use the local approval channel only: the shared
+        // approver above also publishes asks to paired devices, and web
+        // consent must come from the person at this terminal.
+        match crate::chat_web::ChatWeb::from_config(
+            &self.cwd,
+            &self.config,
+            Arc::new(web_consent_approver(approval_tx.clone())),
+        ) {
+            Ok(web) => runtime.set_web_gateway(Arc::new(web)),
+            Err(error) => tracing::warn!(%error, "chat web access is unavailable"),
+        }
         if let Some(agents) = &self.agents {
             runtime.set_agents(Arc::clone(agents));
         }
@@ -935,6 +947,14 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
             localpilot_harness::CompactionMode::SmartWithFallback
         }
     }
+}
+
+/// The approver for web consent: the local approval prompt and nothing else.
+/// Unlike the session's approver it never opens the question in the ask
+/// registry other devices answer from, and a closed or abandoned prompt is a
+/// refusal.
+fn web_consent_approver(tx: mpsc::UnboundedSender<ApprovalCall>) -> TuiApprover {
+    TuiApprover::new(tx)
 }
 
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
@@ -1353,6 +1373,7 @@ mod tests {
             agents: None,
             prompter: None,
             peers: None,
+            web: None,
         }
     }
 
@@ -2186,6 +2207,32 @@ mod tests {
             std::fs::read_to_string(directory.path().join("answer.txt")).expect("written file"),
             "Postgres"
         );
+    }
+
+    #[tokio::test]
+    async fn web_consent_is_asked_locally_only_and_fails_closed() {
+        let (approval_tx, mut approvals) = mpsc::unbounded_channel();
+        let approver = web_consent_approver(approval_tx);
+        assert!(
+            approver.asks.is_none(),
+            "web consent must not be published to paired devices"
+        );
+        let request = PermissionRequest {
+            tool: "fetch".to_string(),
+            effect: Effect::Network,
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            detail: "Allow web access to example.com?".to_string(),
+        };
+        let consent = approver.approve(&request);
+        tokio::pin!(consent);
+        let call = tokio::select! {
+            call = approvals.recv() => call.expect("asked on the local prompt"),
+            answer = &mut consent => panic!("answered before the person did: {answer}"),
+        };
+        // The prompt goes away unanswered (cancelled, or the screen closed).
+        drop(call);
+        assert!(!consent.await);
     }
 
     #[tokio::test]

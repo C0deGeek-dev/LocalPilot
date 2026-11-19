@@ -571,6 +571,25 @@ pub struct DocsConfig {
     pub lookup_policy: LookupPolicy,
 }
 
+/// Web access for ordinary chat: the `fetch` tool, and the web search tool.
+///
+/// Separate from `[research.web]`, whose on-by-default posture covers web
+/// research only. In `ask` (the default) every session starts with no web
+/// access, and nothing leaves the machine until the user answers a consent
+/// question that names the host, what is sent, and where it is recorded; the
+/// answer lasts for that session only. `off` removes chat web access entirely.
+/// `[research.web].enabled = false` also turns chat web access off, and its
+/// deny list and audit log apply to chat requests too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatWebMode {
+    /// No web access from chat; the web tools explain how to turn it on.
+    Off,
+    /// Ask the user before the first request to each host, per session.
+    #[default]
+    Ask,
+}
+
 /// How the harness handles a tool call whose arguments are well-formed JSON but
 /// do not match the tool's schema. `off` (the default) never rewrites arguments
 /// — a shape-invalid call gets a readable error and the model retries. `warn` and
@@ -664,6 +683,10 @@ pub struct ToolsConfig {
     /// (or any doubt) always returns full content, never a stale stub. The model
     /// can still re-page any range with `read_file` start_line/end_line.
     pub elide_seen_reads: bool,
+    /// Web access for ordinary chat (`off|ask`, default `ask`). See
+    /// [`ChatWebMode`]: in `ask` nothing is fetched until the user agrees, per
+    /// host, for the current session.
+    pub web: ChatWebMode,
 }
 
 impl Default for ToolsConfig {
@@ -681,6 +704,7 @@ impl Default for ToolsConfig {
             repair: RepairMode::Off,
             repair_learning: false,
             elide_seen_reads: false,
+            web: ChatWebMode::Ask,
         }
     }
 }
