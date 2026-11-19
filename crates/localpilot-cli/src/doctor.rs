@@ -889,7 +889,7 @@ fn render_chat_web(s: &mut String, web: &crate::chat_web_status::ChatWebStatus) 
     if web.search_backends.is_empty() {
         let _ = writeln!(
             s,
-            "  web search: none set up; fetch still reads known addresses. To enable web_search, add an [mcp.servers] entry and name its search tool in [research.mcp] tools"
+            "  web search: none set up; fetch still reads known addresses. To enable web_search, run `localpilot search setup`, or name the search tool of an [mcp.servers] entry in [research.mcp] tools"
         );
     } else {
         let _ = writeln!(

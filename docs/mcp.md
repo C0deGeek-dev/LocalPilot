@@ -219,7 +219,7 @@ starts, which does not prove a search works.
 
 ### Managed search backends
 
-A search backend that LocalPilot sets up for you lives under
+A search backend that LocalPilot sets up for you (`localpilot search setup`) lives under
 `[search.managed.<id>]` in your user config instead (ADR-0291, see
 [`docs/configuration.md`](configuration.md)). It is search-only: it is never one
 of the session's MCP tools, never starts at session start or in `doctor`, and

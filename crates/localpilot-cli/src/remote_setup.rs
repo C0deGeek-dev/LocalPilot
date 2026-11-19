@@ -1308,24 +1308,7 @@ async fn serve(run: &mut Run<'_, '_>, node: &Node, planned: &Value, tag: &str) -
 
 // ------------------------------------------------------------- config
 
-/// What happened to the user config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfigEdit {
-    /// It already said this; nothing was written.
-    Unchanged,
-    /// It was replaced and reads back exactly as written.
-    Written,
-}
-
-/// Why the config edit did not complete.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfigError {
-    /// Nothing was replaced.
-    Before(String),
-    /// The file was replaced, but reading it back failed or showed something
-    /// else; its current content is not confirmed.
-    After(String),
-}
+pub(crate) use crate::user_config::{ConfigEdit, ConfigError};
 
 /// Set `[remote] enabled = true` and `advertised_url` in the user config,
 /// keeping everything else byte for byte. Every LocalPilot writer of this
@@ -1357,70 +1340,15 @@ pub(crate) fn edit_remote_table(
     after_replace: &dyn Fn(&Path),
     edit: &dyn Fn(&mut toml_edit::Table) -> Result<(), String>,
 ) -> Result<ConfigEdit, ConfigError> {
-    let before_ = |message: String| ConfigError::Before(message);
-    let path =
-        path.ok_or_else(|| before_("there is no user config location on this system".into()))?;
-    let directory = path
-        .parent()
-        .ok_or_else(|| before_("the config path has no folder".into()))?;
-    std::fs::create_dir_all(directory).map_err(|error| before_(error.to_string()))?;
-    let lock_path = path.with_extension("toml.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| before_(format!("could not open {}: {error}", lock_path.display())))?;
-    let mut lock = fd_lock::RwLock::new(lock_file);
-    let _guard = lock
-        .try_write()
-        .map_err(|_| before_("another LocalPilot command is writing the config".into()))?;
-
-    let before = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => {
-            return Err(before_(format!(
-                "could not read {}: {error}",
-                path.display()
-            )))
-        }
-    };
-    let text =
-        String::from_utf8(before.clone()).map_err(|_| before_("the config is not UTF-8".into()))?;
-    let mut document: toml_edit::DocumentMut = text
-        .parse()
-        .map_err(|error| before_(format!("the config is not valid TOML ({error})")))?;
-    let remote = document
-        .entry("remote")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let table = remote
-        .as_table_mut()
-        .ok_or_else(|| before_("[remote] in the config is not a table".into()))?;
-    edit(table).map_err(before_)?;
-    let after = document.to_string();
-    if after.as_bytes() == before.as_slice() {
-        return Ok(ConfigEdit::Unchanged);
-    }
-    // Replace only what was read.
-    let now = std::fs::read(path).unwrap_or_default();
-    if now != before {
-        return Err(before_(
-            "the config changed while it was being edited".into(),
-        ));
-    }
-    let temporary = path.with_extension("toml.tmp");
-    std::fs::write(&temporary, after.as_bytes()).map_err(|error| before_(error.to_string()))?;
-    std::fs::rename(&temporary, path).map_err(|error| before_(error.to_string()))?;
-    after_replace(path);
-    let written = std::fs::read(path)
-        .map_err(|error| ConfigError::After(format!("reading it back failed ({error})")))?;
-    if written != after.as_bytes() {
-        return Err(ConfigError::After(
-            "it reads back differently, so something else changed it right after".into(),
-        ));
-    }
-    Ok(ConfigEdit::Written)
+    crate::user_config::edit_user_config(path, after_replace, &|document| {
+        let remote = document
+            .entry("remote")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let table = remote
+            .as_table_mut()
+            .ok_or_else(|| "[remote] in the config is not a table".to_string())?;
+        edit(table)
+    })
 }
 
 // ------------------------------------------------------------- undo

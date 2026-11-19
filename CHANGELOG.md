@@ -17,6 +17,14 @@ is SemVer-stable; the configuration schema stability policy is in
   run whose backend was not allowed or could not start is a labelled local
   knowledge review.
 
+- `localpilot search setup` sets up a managed search backend: DuckDuckGo with
+  no key (needs `uv`), or Brave or Tavily with your own key (needs Node.js 22
+  or later), each pinned to an exact package version. It shows what it will run
+  and write, asks twice, starts the backend once to download it and check its
+  search tool, then writes the config in one locked edit and reads it back. A
+  key is read without being shown and kept in a new credential alias, never in
+  the config. Each run is recorded in `~/.localpilot/search/setup-audit.log`.
+
 - Fixed: `/research` in the fullscreen session no longer freezes the screen
   when a page or skill-discovery request needs your approval. The question
   used to be read from the raw terminal behind the session; it is now asked in

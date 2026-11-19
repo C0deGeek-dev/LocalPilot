@@ -33,7 +33,7 @@ memory store: /work/.localmind
 research docs: 2 report(s) on disk; report ingestion disabled ([research] ingest_report = false); doc index: 0 chunk(s), 0 with embeddings
 research web: unavailable — no search backend, so /research reviews local knowledge only (no web search or page fetch)
 chat web: ask (the fullscreen session asks before each new site or search server); audit log: /work/.localpilot/research/audit.log
-  web search: none set up; fetch still reads known addresses. To enable web_search, add an [mcp.servers] entry and name its search tool in [research.mcp] tools
+  web search: none set up; fetch still reads known addresses. To enable web_search, run `localpilot search setup`, or name the search tool of an [mcp.servers] entry in [research.mcp] tools
   unresolved search tools (no such [mcp.servers] entry): finder.search
 capabilities: doctor-json, models-json
 

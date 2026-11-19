@@ -91,6 +91,7 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod search_backend;
+mod search_setup;
 mod self_review_cmd;
 mod selfdev_cmd;
 mod selfdev_reload;
@@ -110,6 +111,7 @@ mod swarm_cmd;
 mod trust;
 mod trust_cmd;
 mod update;
+mod user_config;
 mod web_egress;
 
 #[derive(Debug, Parser)]
@@ -479,6 +481,12 @@ enum Command {
     Remote {
         #[command(subcommand)]
         action: RemoteAction,
+    },
+    /// Search backends LocalPilot sets up and manages for web search and
+    /// `/research`.
+    Search {
+        #[command(subcommand)]
+        action: SearchAction,
     },
     /// Internal: run the detached server the auto-spawn (`connect --server`)
     /// path starts. Not for direct use — `localpilot serve` is the entry point.
@@ -940,6 +948,15 @@ enum DevicesAction {
         /// The device id (from `localpilot devices list`).
         id: String,
     },
+}
+
+/// `localpilot search` actions.
+#[derive(Subcommand, Debug)]
+enum SearchAction {
+    /// Set up a search backend: lists the backends with what each needs and
+    /// where queries go, shows the exact program and config it will write, and
+    /// asks before running anything. Needs a person at a terminal.
+    Setup,
 }
 
 /// `localpilot remote` actions.
@@ -2213,6 +2230,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
             DevicesAction::List => server_cmd::devices_list()?,
             DevicesAction::Revoke { id } => server_cmd::devices_revoke(&id)?,
+        },
+        Command::Search { action } => match action {
+            SearchAction::Setup => search_setup::run_command().await?,
         },
         Command::Remote { action } => match action {
             RemoteAction::Gateway { action, background } => match action {

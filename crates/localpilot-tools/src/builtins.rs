@@ -1967,8 +1967,8 @@ struct WebSearchInput {
 
 /// What `web_search` says when there is no search index to use.
 pub const NO_SEARCH_INDEX: &str = "No web search index is set up here, so nothing \
-was searched. To search from chat, add a search-capable MCP server under [mcp.servers] \
-and name its search tool in [research.mcp] tools = [{ server = \"...\", tool = \"...\" }]. \
+was searched. The user can set one up by running `localpilot search setup` in a terminal, \
+or by naming the search tool of an [mcp.servers] entry in [research.mcp] tools. \
 Meanwhile, fetch can retrieve a page whose address you already know, and \
 `/research <topic>` runs a researched answer.";
 

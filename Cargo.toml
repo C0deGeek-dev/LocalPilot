@@ -64,6 +64,9 @@ async-trait = "=0.1.83"
 base64 = "=0.22.1"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 crossterm = "=0.28.1"
+# Reads a key without echoing it (`localpilot search setup`); already in the
+# lockfile through insta, so it adds no crate.
+console = { version = "=0.16.3", default-features = false, features = ["std"] }
 # De-verbatim a Windows `\\?\` extended-length path back to its ordinary form for
 # a child process's working directory: the launched shell cannot `cd` into a
 # verbatim path, so the workspace cwd must be simplified before spawn. Zero

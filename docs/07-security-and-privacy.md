@@ -906,6 +906,21 @@ construction:
   pre-approval, bypass or paired device); unattended runs start it only with
   the user's `unattended` opt-in. Each start, and each redacted research query,
   is recorded before it happens; if the record fails, nothing starts or is sent.
+- **Setting up a search backend** (`localpilot search setup`). Only a person at
+  a terminal can run it (stdin and stdout must both be terminals). It lists the
+  backends with what each needs and where queries go, shows the exact program,
+  arguments and config table it will write, and asks a second time before
+  anything runs. It runs third-party code with your rights: the packages are
+  pinned to exact versions in LocalPilot's source and started once during setup
+  to download them and check their search tool. `uvx`, `npx` and the version
+  probes are found in absolute `PATH` entries only, never in the working
+  directory, and the launch is recorded with the full program path. A key for a hosted search API is
+  read without being shown, stored in a credential alias this run creates (never
+  in the config file and never over an existing credential), and removed again
+  if setup stops before the config is written. The config is written in one
+  locked edit through a private staging file beside it and read back. Each run is recorded in
+  `~/.localpilot/search/setup-audit.log` (backend, tier, launch identity and
+  outcome; never a key or a query) before each step.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
   search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag

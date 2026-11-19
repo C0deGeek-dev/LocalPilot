@@ -1505,8 +1505,8 @@ authority; it is not the LocalBench default.
 
 ### `[search.managed.<id>]`
 
-Search backends that LocalPilot manages itself (ADR-0291). LocalPilot writes
-these entries when it sets up a search backend. They are read from your **user**
+Search backends that LocalPilot manages itself (ADR-0291). `localpilot search
+setup` writes these entries (see below). They are read from your **user**
 config file only: a project `.localpilot.toml` or a `LOCALPILOT_SEARCH__…`
 variable that sets `[search]` is ignored, and `localpilot doctor` says so.
 
@@ -1530,6 +1530,33 @@ terminal; without anyone to ask it starts only when `unattended = true`. Each
 start and, in research, each redacted query is recorded in the egress audit log
 before it happens. Managed backends are tried after any search tools named in
 `[research.mcp] tools`.
+
+#### `localpilot search setup`
+
+Run it in a terminal to set up a backend. It lists what it can set up, with what
+each needs and where queries go:
+
+| Choice | Needs | Written as | Queries go to |
+|---|---|---|---|
+| DuckDuckGo, no key | `uv` | `[search.managed.duckduckgo]` running `uvx --with "duckduckgo-mcp-server[browser]==0.7.0" duckduckgo-mcp-server==0.7.0` | DuckDuckGo, from your IP address; the package reads its HTML results page, which is not an official API and may be slowed or blocked |
+| Brave Search API, your key | Node.js 22+ | `[search.managed.brave]` running `npx -y @brave/brave-search-mcp-server@2.1.5 --transport stdio` | Brave, under your account and quota |
+| Tavily, your key | Node.js 22+ | `[search.managed.tavily]` running `npx -y tavily-mcp@0.2.22` | Tavily, under your account and quota |
+
+A local SearXNG engine in a container is listed but not yet available. `uvx`
+and `npx` are looked up in the absolute entries of `PATH` only (never the
+working directory) and written with their full path, so a later change of which
+program that name finds is refused at launch until setup runs again. Setup
+shows the exact program, arguments and table before it does anything, asks
+again, then starts the backend once to download it and check its search tool,
+and asks whether unattended research may use it (default no). Only then does it
+write the table, in one locked edit that keeps the rest of the file as it was,
+and read the effective config back; it reports search tools that are tried
+before the new backend. For Brave and Tavily it reads your key without showing
+it (an empty line cancels) and keeps it in a new credential alias named in the
+preview (`search-brave-…`); if setup stops before the config is written, that
+alias is removed again, and if it cannot be removed setup says so and names it. Re-running setup for the same backend replaces its table and
+names the credential the old one used, which is left for you to remove. Each run
+is recorded in `~/.localpilot/search/setup-audit.log`.
 
 ### `[mcp.servers.<name>]`
 

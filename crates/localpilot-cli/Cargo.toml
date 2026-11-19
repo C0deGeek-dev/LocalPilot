@@ -84,6 +84,7 @@ serde_json.workspace = true
 # (`selfdev publish`). Also a dev-dependency for tests; declared here because it
 # is used on a non-test code path.
 tempfile.workspace = true
+console.workspace = true
 thiserror.workspace = true
 # Device credentials: OS randomness and their stored SHA-256.
 ring = { workspace = true }

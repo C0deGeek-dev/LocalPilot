@@ -208,8 +208,8 @@ pub struct ResearchCompletion {
 /// backend exists. Candidate URLs come only from real search results.
 const NO_SEARCH_BACKEND_NOTICE: &str = "NoSearchBackend: web research needs a search \
     backend, and none is configured or reachable — this run reviews local knowledge only. \
-    Designate a search tool with [research.mcp] tools (see \"Research search tools\" in \
-    docs/mcp.md).";
+    Run `localpilot search setup` in a terminal to set one up, or designate a search tool \
+    with [research.mcp] tools (see docs/mcp.md).";
 
 /// Build run options from the `[research]` config. Returns `None` when the
 /// research surface is disabled (`[research].enabled = false`).
