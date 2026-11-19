@@ -24,6 +24,14 @@ is SemVer-stable; the configuration schema stability policy is in
   search tool, then writes the config in one locked edit and reads it back. A
   key is read without being shown and kept in a new credential alias, never in
   the config. Each run is recorded in `~/.localpilot/search/setup-audit.log`.
+- `localpilot search setup` can also run SearXNG on this computer in Docker
+  (Docker Engine 28 or later, the local daemon only; every Docker command is
+  bound to the endpoint it checked). The image is pinned by digest, published
+  on `127.0.0.1` only, labelled and recorded as LocalPilot's, with settings in
+  a folder LocalPilot owns. Setup waits for it to answer, shows the engines it
+  has enabled and that queries leave from your IP address, and removes what it
+  created if anything fails before the config is written. Podman and Docker
+  that runs only inside WSL are reported but not used yet.
 - The full-screen session offers that setup when a search finds no backend:
   after a chat turn whose `web_search` found none, and before `/research`. Only
   for a prompt typed at this terminal, never in incognito; keys stay in the

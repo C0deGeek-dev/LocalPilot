@@ -19,6 +19,7 @@ use localpilot_config::{
 use localpilot_core::Secret;
 
 use crate::search_backend::{Launcher, SearchSpec};
+use crate::searxng;
 use crate::user_config::{table_at, ConfigEdit, ConfigError};
 
 /// The DuckDuckGo search package and the extra it needs to get past
@@ -35,6 +36,7 @@ const NODE_MIN_MAJOR: u32 = 22;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Backend {
     DuckDuckGo,
+    SearXng,
     Brave,
     Tavily,
 }
@@ -47,12 +49,13 @@ enum Needs {
 }
 
 impl Backend {
-    const ALL: [Self; 3] = [Self::DuckDuckGo, Self::Brave, Self::Tavily];
+    const ALL: [Self; 4] = [Self::DuckDuckGo, Self::SearXng, Self::Brave, Self::Tavily];
 
     /// The `[search.managed]` id.
     const fn id(self) -> &'static str {
         match self {
             Self::DuckDuckGo => "duckduckgo",
+            Self::SearXng => "searxng",
             Self::Brave => "brave",
             Self::Tavily => "tavily",
         }
@@ -61,6 +64,7 @@ impl Backend {
     const fn title(self) -> &'static str {
         match self {
             Self::DuckDuckGo => "DuckDuckGo, no key needed",
+            Self::SearXng => "SearXNG on this computer, in Docker",
             Self::Brave => "Brave Search API, with your own key",
             Self::Tavily => "Tavily, with your own key",
         }
@@ -69,6 +73,7 @@ impl Backend {
     const fn tier(self) -> SearchTier {
         match self {
             Self::DuckDuckGo => SearchTier::Keyless,
+            Self::SearXng => SearchTier::SelfHosted,
             Self::Brave | Self::Tavily => SearchTier::ApiKey,
         }
     }
@@ -76,7 +81,7 @@ impl Backend {
     const fn needs(self) -> Needs {
         match self {
             Self::DuckDuckGo => Needs::Uv,
-            Self::Brave | Self::Tavily => Needs::Node,
+            Self::SearXng | Self::Brave | Self::Tavily => Needs::Node,
         }
     }
 
@@ -87,6 +92,10 @@ impl Backend {
                 "Queries go to DuckDuckGo from your own IP address. The package reads \
                  DuckDuckGo's HTML results page, which is not an official API, so \
                  DuckDuckGo may slow it down or block it."
+            }
+            Self::SearXng => {
+                "SearXNG sends each query to the search engines it has enabled, from your \
+                 own IP address: a local instance is not anonymous."
             }
             Self::Brave => {
                 "Queries go to Brave under your account, subject to Brave's terms and \
@@ -102,7 +111,7 @@ impl Backend {
     /// The environment variable the key goes into, for a backend that needs one.
     const fn key_variable(self) -> Option<&'static str> {
         match self {
-            Self::DuckDuckGo => None,
+            Self::DuckDuckGo | Self::SearXng => None,
             Self::Brave => Some("BRAVE_API_KEY"),
             Self::Tavily => Some("TAVILY_API_KEY"),
         }
@@ -129,6 +138,18 @@ impl Backend {
                     "search",
                     // It waits out a rate limit for up to 30 seconds itself.
                     45,
+                    None,
+                )
+            }
+            Self::SearXng => {
+                env.insert(
+                    "SEARXNG_URL".to_string(),
+                    McpEnvEntry::Plain(searxng_url(searxng::FIRST_PORT)),
+                );
+                (
+                    vec!["-y".to_string(), searxng::BRIDGE_PACKAGE.to_string()],
+                    searxng::BRIDGE_TOOL,
+                    30,
                     None,
                 )
             }
@@ -179,6 +200,20 @@ impl Backend {
     }
 }
 
+/// Where the bridge finds SearXNG.
+fn searxng_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Point a SearXNG entry at `port`, with its launch identity recomputed.
+fn at_port(entry: &mut ManagedSearchBackend, port: u16) {
+    entry.env.insert(
+        "SEARXNG_URL".to_string(),
+        McpEnvEntry::Plain(searxng_url(port)),
+    );
+    entry.launch_identity = localpilot_config::search::launch_identity(&entry.server());
+}
+
 /// What is installed on this machine.
 pub(crate) trait Probes {
     /// The absolute path of `program` on PATH, from absolute PATH entries only:
@@ -194,7 +229,6 @@ struct Found {
     uvx: Option<PathBuf>,
     node_major: Option<u32>,
     npx: Option<PathBuf>,
-    container: Option<&'static str>,
 }
 
 impl Found {
@@ -218,9 +252,6 @@ impl Found {
             uvx: answering("uvx"),
             node_major,
             npx: probes.find("npx"),
-            container: ["docker", "podman"]
-                .into_iter()
-                .find(|name| answering(name).is_some()),
         }
     }
 
@@ -291,6 +322,8 @@ pub(crate) struct Setup<'a> {
     /// Whoever started setup has gone (the session closed): nothing more is
     /// stored, started or written.
     pub(crate) stopped: &'a dyn Fn() -> bool,
+    /// Where a SearXNG container runs.
+    pub(crate) host: &'a dyn searxng::Host,
 }
 
 /// How a setup run ended.
@@ -450,14 +483,32 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         if uv_ok { "uv found" } else { "needs uv" }
     ));
     say(&format!("    {}", Backend::DuckDuckGo.privacy()));
-    say("Tier 2, a search engine on this machine:");
-    say(&format!(
-        "  SearXNG in a container ({}): not available in this version.",
-        found.container.map_or_else(
-            || "no Docker or Podman found".to_string(),
-            |found| format!("{found} found")
-        )
-    ));
+    let containers = searxng::detect(s.host, &|name| s.probes.find(name));
+    say("Tier 2, a search engine on this computer:");
+    match &containers {
+        searxng::Found::Ready(engines) => say(&format!(
+            "  {} ({} found{})",
+            Backend::SearXng.title(),
+            engines
+                .iter()
+                .map(searxng::Engine::describe)
+                .collect::<Vec<_>>()
+                .join(", "),
+            if node_ok {
+                String::new()
+            } else {
+                format!("; needs Node.js {NODE_MIN_MAJOR} or later")
+            }
+        )),
+        searxng::Found::Unavailable(reason) => {
+            say(&format!(
+                "  {} (not available here)",
+                Backend::SearXng.title()
+            ));
+            say(&format!("    {reason}"));
+        }
+    }
+    say(&format!("    {}", Backend::SearXng.privacy()));
     say("Tier 3, your own key:");
     for backend in [Backend::Brave, Backend::Tavily] {
         say(&format!(
@@ -477,6 +528,10 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         .map(|backend| {
             if !s.keys && backend.key_variable().is_some() {
                 format!("{} (set up in a terminal)", backend.title())
+            } else if *backend == Backend::SearXng
+                && matches!(containers, searxng::Found::Unavailable(_))
+            {
+                format!("{} (not available here)", backend.title())
             } else {
                 backend.title().to_string()
             }
@@ -507,6 +562,11 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         );
         say(&reason);
         return Outcome::Stopped(reason);
+    }
+
+    if let (Backend::SearXng, searxng::Found::Unavailable(reason)) = (backend, &containers) {
+        say(reason);
+        return Outcome::Stopped(reason.clone());
     }
 
     // 2. What it needs.
@@ -542,7 +602,17 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     } else {
         None
     };
+    let planned = match (backend, &containers) {
+        (Backend::SearXng, searxng::Found::Ready(engines)) => match plan_searxng(s, engines) {
+            Ok(planned) => Some(planned),
+            Err(outcome) => return outcome,
+        },
+        _ => None,
+    };
     let mut entry = backend.entry(&program, alias.as_deref());
+    if let Some(planned) = &planned {
+        at_port(&mut entry, planned.port);
+    }
     let previous = (s.effective)()
         .ok()
         .and_then(|config| config.search.managed.get(backend.id()).cloned());
@@ -550,6 +620,9 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     // 4. Exactly what will happen.
     say("");
     say("Setup will:");
+    if let Some(planned) = &planned {
+        preview_searxng(s, planned);
+    }
     say(&format!("  run: {}", command_line(&entry)));
     for (name, item) in &entry.env {
         match item {
@@ -616,7 +689,7 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
             say("No key was entered. Nothing was set up.");
             return Outcome::Cancelled;
         }
-        if let Some(outcome) = halted(s, backend, None, "key") {
+        if let Some(outcome) = halted(s, backend, None, None, "key") {
             return outcome;
         }
         // The preview promised a fresh name; something may have taken it
@@ -641,8 +714,17 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         }
     }
 
+    // 6b. SearXNG itself: settings, container, liveness, engines.
+    let made = match &planned {
+        Some(planned) => match searxng_up(s, backend, planned, &mut entry) {
+            Ok(made) => Some(made),
+            Err(outcome) => return outcome,
+        },
+        None => None,
+    };
+
     // 7. Start it once: download, handshake, and its search tool's shape.
-    if let Some(outcome) = halted(s, backend, alias.as_deref(), "check") {
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), made.as_ref(), "check") {
         return outcome;
     }
     say("Starting it once to download it and check its search tool (the first time can take a minute)...");
@@ -663,7 +745,7 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
                 backend,
                 &format!("at=check reason={}", error.decision()),
             );
-            let left = forget_alias(s, backend, alias.as_deref());
+            let left = left_behind(s, backend, alias.as_deref(), made.as_ref());
             return stop(
                 s,
                 &format!(
@@ -676,7 +758,7 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     say("It started and offers a search tool LocalPilot can use.");
 
     // 8. Unattended research, off unless asked for.
-    if let Some(outcome) = halted(s, backend, alias.as_deref(), "unattended") {
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), made.as_ref(), "unattended") {
         return outcome;
     }
     entry.unattended = match s
@@ -687,14 +769,14 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         Answer::No => false,
         Answer::Cancel => {
             audit(&s.state_dir, "setup-cancelled", backend, "at=unattended");
-            let left = forget_alias(s, backend, alias.as_deref());
+            let left = left_behind(s, backend, alias.as_deref(), made.as_ref());
             say(&format!("Nothing was set up{left}."));
             return Outcome::Cancelled;
         }
     };
 
     // 9. One locked edit, then read back what is in effect.
-    if let Some(outcome) = halted(s, backend, alias.as_deref(), "write") {
+    if let Some(outcome) = halted(s, backend, alias.as_deref(), made.as_ref(), "write") {
         return outcome;
     }
     let id = backend.id();
@@ -706,11 +788,12 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     }) {
         Ok(ConfigEdit::Written | ConfigEdit::Unchanged) => {}
         Err(ConfigError::Before(_)) if (s.stopped)() => {
-            return halted(s, backend, alias.as_deref(), "write").unwrap_or(Outcome::Cancelled);
+            return halted(s, backend, alias.as_deref(), made.as_ref(), "write")
+                .unwrap_or(Outcome::Cancelled);
         }
         Err(ConfigError::Before(reason)) => {
             audit(&s.state_dir, "setup-failed", backend, "at=write");
-            let left = forget_alias(s, backend, alias.as_deref());
+            let left = left_behind(s, backend, alias.as_deref(), made.as_ref());
             return stop(s, &format!("the config was not changed ({reason}){left}"));
         }
         Err(ConfigError::After(reason)) => {
@@ -787,6 +870,14 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
         backend.title(),
         id
     ));
+    if let Some(made) = &made {
+        if let Some(owned) = &made.owned {
+            say(&format!(
+                "SearXNG is running on 127.0.0.1:{}. When it is stopped, LocalPilot starts it again at the next search; localpilot search stop frees its memory.",
+                owned.port
+            ));
+        }
+    }
     Outcome::Configured(id.to_string())
 }
 
@@ -795,7 +886,13 @@ pub(crate) const STOPPED: &str = "setup was stopped";
 
 /// When setup was stopped (its session closed), record where, remove the key
 /// this run stored, and end. `None` while it may go on.
-fn halted(s: &Setup<'_>, backend: Backend, alias: Option<&str>, at: &str) -> Option<Outcome> {
+fn halted(
+    s: &Setup<'_>,
+    backend: Backend,
+    alias: Option<&str>,
+    made: Option<&Made>,
+    at: &str,
+) -> Option<Outcome> {
     if !(s.stopped)() {
         return None;
     }
@@ -805,9 +902,402 @@ fn halted(s: &Setup<'_>, backend: Backend, alias: Option<&str>, at: &str) -> Opt
         backend,
         &format!("at={at} reason=stopped"),
     );
-    let left = forget_alias(s, backend, alias);
+    let left = left_behind(s, backend, alias, made);
     s.console.say(&format!("Nothing was set up{left}."));
     Some(Outcome::Cancelled)
+}
+
+/// Undo what this run created and nothing was written to use: the key, and a
+/// SearXNG container and settings folder. Returns what is left behind.
+fn left_behind(
+    s: &Setup<'_>,
+    backend: Backend,
+    alias: Option<&str>,
+    made: Option<&Made>,
+) -> String {
+    let mut left = forget_alias(s, backend, alias);
+    if let Some(made) = made {
+        left.push_str(&teardown(s, backend, made));
+    }
+    left
+}
+
+// ---------------------------------------------------------------- SearXNG
+
+/// Where and how SearXNG will run, chosen before the preview.
+struct Planned {
+    /// Held until setup ends: no other setup or search command changes
+    /// SearXNG meanwhile.
+    _lock: searxng::Lock,
+    engine: searxng::Engine,
+    port: u16,
+    /// The settings folder, and the path Docker mounts it from.
+    dir: PathBuf,
+    mount: String,
+}
+
+/// What this run created for SearXNG, so a failure undoes exactly that.
+struct Made {
+    engine: searxng::Engine,
+    owned: Option<searxng::Owned>,
+    made_dir: bool,
+    dir: PathBuf,
+}
+
+/// Choose the runtime (asking when several WSL distributions qualify), refuse
+/// a second instance, and pick a free loopback port.
+fn plan_searxng(s: &Setup<'_>, engines: &[searxng::Engine]) -> Result<Planned, Outcome> {
+    let engine = if engines.len() > 1 {
+        let options: Vec<String> = engines.iter().map(searxng::Engine::describe).collect();
+        match s.console.pick("Which Docker should run SearXNG?", &options) {
+            Pick::Option(index) if index < engines.len() => engines[index].clone(),
+            _ => {
+                s.console.say("Nothing was set up.");
+                return Err(Outcome::Cancelled);
+            }
+        }
+    } else if let Some(engine) = engines.first() {
+        engine.clone()
+    } else {
+        return Err(Outcome::Cancelled);
+    };
+    let lock = searxng::lock(&s.state_dir).map_err(|reason| stop(s, &reason))?;
+    if let Some(record) = searxng::load_owned(&s.state_dir) {
+        let what = record.map_or_else(
+            |reason| reason,
+            |owned| format!("the container {} is recorded", owned.container_name),
+        );
+        return Err(stop(
+            s,
+            &format!(
+                "SearXNG is already set up here ({what}); run localpilot search remove first, or localpilot search update for a newer image"
+            ),
+        ));
+    }
+    let Some(port) = searxng::free_port(s.host, searxng::FIRST_PORT) else {
+        return Err(stop(s, "no free local port was found for SearXNG"));
+    };
+    let dir = searxng::settings_dir(&s.state_dir);
+    let mount = searxng::mount_path(s.host, &engine, &dir).map_err(|reason| stop(s, &reason))?;
+    Ok(Planned {
+        _lock: lock,
+        engine,
+        port,
+        dir,
+        mount,
+    })
+}
+
+/// The SearXNG part of the preview.
+fn preview_searxng(s: &Setup<'_>, planned: &Planned) {
+    let say = |line: &str| s.console.say(line);
+    let create = planned.engine.argv(
+        &searxng::create_args(planned.port, &planned.mount)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    say(&format!(
+        "  download the SearXNG image {} (pinned as {}) and create its container with {}:",
+        searxng::IMAGE_TAG,
+        searxng::IMAGE,
+        planned.engine.describe()
+    ));
+    say(&format!("    {}", searxng::shown(&create)));
+    say(&format!(
+        "  then start it; it answers only on 127.0.0.1:{} (if that port is taken by then, the next free one)",
+        planned.port
+    ));
+    say(&format!(
+        "  write its settings to {}: JSON results on, a random secret key, rate limiter and public-instance mode off (an edited settings.yml there is kept unless you agree to replace it)",
+        planned.dir.join("settings.yml").display()
+    ));
+    say(&format!(
+        "  General web engines this image enables: {}. Each query goes to the engines enabled for it, from your own IP address.",
+        searxng::GENERAL_ENGINES.join(", ")
+    ));
+    say(&format!(
+        "  It uses about 105 MB of memory while it runs{}. It keeps running after setup; when it is stopped, LocalPilot starts it again at the next search.",
+        if planned.engine.distro().is_some() {
+            ", plus the WSL distribution it runs in"
+        } else {
+            ""
+        }
+    ));
+}
+
+/// Put SearXNG in place: settings, container (created, recorded, then
+/// started; one retry on a port taken in between), liveness and its engines.
+/// Any failure undoes what this run created.
+fn searxng_up(
+    s: &Setup<'_>,
+    backend: Backend,
+    planned: &Planned,
+    entry: &mut ManagedSearchBackend,
+) -> Result<Made, Outcome> {
+    let say = |line: &str| s.console.say(line);
+    let mut made = Made {
+        engine: planned.engine.clone(),
+        owned: None,
+        made_dir: false,
+        dir: planned.dir.clone(),
+    };
+    if let Some(outcome) = halted(s, backend, None, None, "settings") {
+        return Err(outcome);
+    }
+    let secret = match ((s.random_suffix)(), (s.random_suffix)()) {
+        (Some(one), Some(two)) => format!("{one}{two}"),
+        _ => {
+            return Err(stop(
+                s,
+                "no random bytes were available for SearXNG's secret key",
+            ))
+        }
+    };
+    let replace = || {
+        s.console
+            .ask("SearXNG's settings.yml was changed by hand. Replace it with LocalPilot's?")
+            == Answer::Yes
+    };
+    match searxng::prepare_settings(&planned.dir, &secret, &replace) {
+        Ok(prepared) => made.made_dir = prepared.made_dir,
+        Err(reason) => {
+            audit(&s.state_dir, "setup-failed", backend, "at=settings");
+            return Err(stop(s, &reason));
+        }
+    }
+    audit(
+        &s.state_dir,
+        "searxng-settings",
+        backend,
+        &format!("dir={} made={}", planned.dir.display(), made.made_dir),
+    );
+    let fail = |made: &Made, at: &str, reason: &str| {
+        audit(&s.state_dir, "setup-failed", backend, &format!("at={at}"));
+        let left = teardown(s, backend, made);
+        stop(s, &format!("{reason}; the config was not changed{left}"))
+    };
+    let mut port = planned.port;
+    for attempt in 0..2 {
+        if let Some(outcome) = halted(s, backend, None, Some(&made), "container") {
+            return Err(outcome);
+        }
+        if let Some(seen) = searxng::inspect(s.host, &planned.engine, &searxng::container_name()) {
+            return Err(fail(
+                &made,
+                "container",
+                &format!(
+                    "a container named {} ({}) already exists; setup never adopts or replaces a container",
+                    searxng::container_name(),
+                    searxng::short(&seen.id)
+                ),
+            ));
+        }
+        if !audit(
+            &s.state_dir,
+            "searxng-create",
+            backend,
+            &format!("port={port}"),
+        ) {
+            return Err(fail(
+                &made,
+                "create",
+                "the setup audit record could not be written; no container was created",
+            ));
+        }
+        say("Downloading the SearXNG image and creating its container (the first time can take a few minutes)...");
+        let id = match searxng::create(s.host, &planned.engine, port, &planned.mount) {
+            Ok(id) => id,
+            Err(reason) => return Err(fail(&made, "create", &reason)),
+        };
+        let owned = searxng::Owned {
+            route: planned.engine.route.clone(),
+            endpoint: planned.engine.endpoint.clone(),
+            container_id: id.clone(),
+            container_name: searxng::container_name(),
+            image: searxng::IMAGE.to_string(),
+            port,
+            settings_dir: planned.dir.clone(),
+        };
+        made.owned = Some(owned.clone());
+        audit(
+            &s.state_dir,
+            "searxng-created",
+            backend,
+            &format!("container={id} port={port}"),
+        );
+        if let Err(reason) = searxng::save_owned(&s.state_dir, &owned) {
+            return Err(fail(&made, "record", &reason));
+        }
+        if let Some(outcome) = halted(s, backend, None, Some(&made), "start") {
+            return Err(outcome);
+        }
+        if !audit(
+            &s.state_dir,
+            "searxng-start",
+            backend,
+            &format!("container={id}"),
+        ) {
+            return Err(fail(
+                &made,
+                "start",
+                "the setup audit record could not be written; the container was not started",
+            ));
+        }
+        let started = searxng::start(s.host, &planned.engine, &id);
+        let result = match &started {
+            searxng::Started::Yes => "started",
+            searxng::Started::PortTaken => "port-taken",
+            searxng::Started::No(_) => "failed",
+        };
+        audit(
+            &s.state_dir,
+            "searxng-start-result",
+            backend,
+            &format!("container={id} result={result}"),
+        );
+        match started {
+            searxng::Started::Yes => break,
+            searxng::Started::PortTaken if attempt == 0 => {
+                let next = searxng::free_port(s.host, port.saturating_add(1));
+                let undone = teardown_container(s, backend, &made);
+                made.owned = None;
+                if !undone.is_empty() {
+                    return Err(fail(
+                        &made,
+                        "start",
+                        &format!("port {port} was taken{undone}"),
+                    ));
+                }
+                let Some(next) = next else {
+                    return Err(fail(
+                        &made,
+                        "start",
+                        &format!("port {port} was taken and no other was free"),
+                    ));
+                };
+                say(&format!(
+                    "Port {port} was taken in the meantime; trying {next}."
+                ));
+                port = next;
+            }
+            searxng::Started::PortTaken => {
+                return Err(fail(&made, "start", &format!("port {port} was taken too")));
+            }
+            searxng::Started::No(reason) => {
+                return Err(fail(
+                    &made,
+                    "start",
+                    &format!("the container did not start ({reason})"),
+                ));
+            }
+        }
+    }
+    if made.owned.is_none() {
+        return Err(fail(&made, "start", "the container did not start"));
+    }
+    at_port(entry, port);
+    say(&format!(
+        "Waiting for SearXNG to answer on 127.0.0.1:{port} (up to {} seconds)...",
+        searxng::LIVE_WAIT.as_secs()
+    ));
+    if !searxng::wait_live(s.host, port, searxng::LIVE_WAIT, s.stopped) {
+        if let Some(outcome) = halted(s, backend, None, Some(&made), "live") {
+            return Err(outcome);
+        }
+        return Err(fail(
+            &made,
+            "live",
+            &format!(
+                "SearXNG did not answer on 127.0.0.1:{port} within {} seconds",
+                searxng::LIVE_WAIT.as_secs()
+            ),
+        ));
+    }
+    audit(
+        &s.state_dir,
+        "searxng-live",
+        backend,
+        &format!("port={port}"),
+    );
+    match searxng::live_engines(s.host, port) {
+        Some(engines) if !engines.is_empty() => say(&format!(
+            "SearXNG answers. General web engines it has enabled: {}.",
+            engines.join(", ")
+        )),
+        _ => say("SearXNG answers, but its engine list could not be read."),
+    }
+    Ok(made)
+}
+
+/// Remove the container this run created, if any; what is left behind.
+fn teardown_container(s: &Setup<'_>, backend: Backend, made: &Made) -> String {
+    let Some(owned) = &made.owned else {
+        return String::new();
+    };
+    let id = &owned.container_id;
+    if !audit(
+        &s.state_dir,
+        "searxng-remove",
+        backend,
+        &format!("container={id}"),
+    ) {
+        return format!(
+            "; the container {} was left because the audit log cannot be written: run localpilot search remove",
+            searxng::short(id)
+        );
+    }
+    match searxng::remove_container(s.host, &made.engine, id) {
+        Ok(()) => {
+            let mut left = String::new();
+            if !audit(
+                &s.state_dir,
+                "searxng-removed",
+                backend,
+                &format!("container={id}"),
+            ) {
+                left.push_str("; the removal could not be recorded in the audit log");
+            }
+            // Forget the record only while it still names this container.
+            let ours = matches!(
+                searxng::load_owned(&s.state_dir),
+                Some(Ok(record)) if record.container_id == *id
+            );
+            if ours {
+                if let Err(reason) = searxng::forget_owned(&s.state_dir) {
+                    left.push_str(&format!("; {reason}"));
+                }
+            }
+            left
+        }
+        Err(reason) => {
+            // The record stays, so localpilot search remove can find it.
+            audit(
+                &s.state_dir,
+                "setup-cleanup-failed",
+                backend,
+                &format!("container={}", owned.container_id),
+            );
+            format!("; {reason}: run localpilot search remove")
+        }
+    }
+}
+
+/// Undo the SearXNG part of this run; what is left behind.
+fn teardown(s: &Setup<'_>, backend: Backend, made: &Made) -> String {
+    let mut left = teardown_container(s, backend, made);
+    if made.made_dir && left.is_empty() {
+        if let Err(reason) = searxng::remove_settings(&made.dir) {
+            audit(
+                &s.state_dir,
+                "setup-cleanup-failed",
+                backend,
+                &format!("settings={}", made.dir.display()),
+            );
+            left.push_str(&format!("; {reason}"));
+        }
+    }
+    left
 }
 
 fn stop(s: &Setup<'_>, reason: &str) -> Outcome {
@@ -1084,6 +1574,7 @@ pub(crate) async fn offer_in_session(
         write: &write,
         keys: false,
         stopped: &stopped,
+        host: &searxng::LocalHost,
     };
     run(&setup).await
 }
@@ -1127,6 +1618,7 @@ pub(crate) async fn run_command() -> anyhow::Result<()> {
         write: &write,
         keys: true,
         stopped: &|| false,
+        host: &searxng::LocalHost,
     };
     match run(&setup).await {
         Outcome::Configured(_) | Outcome::Declined | Outcome::Cancelled => Ok(()),
@@ -1423,6 +1915,9 @@ mod tests {
             write,
             keys,
             stopped,
+            host: &searxng::tests::FakeHost::new(|_| {
+                searxng::tests::failed("no container runtime here")
+            }),
         };
         run(&setup).await
     }
@@ -1522,7 +2017,7 @@ mod tests {
         assert!(
             matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("uv is not installed"))
         );
-        let console = Script::new(Pick::Option(1), &[Answer::Yes], Some("key"));
+        let console = Script::new(Pick::Option(2), &[Answer::Yes], Some("key"));
         let outcome = run_with(
             &home,
             &console,
@@ -1565,7 +2060,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_check_on_re_setup_keeps_the_old_entry_and_key() {
         let home = brave_home();
-        let console = Script::new(Pick::Option(1), &[Answer::Yes], Some("candidate-key"));
+        let console = Script::new(Pick::Option(2), &[Answer::Yes], Some("candidate-key"));
         let outcome = run_with(
             &home,
             &console,
@@ -1583,7 +2078,7 @@ mod tests {
     async fn a_refused_write_on_re_setup_keeps_the_old_entry_and_key() {
         let home = brave_home();
         let console = Script::new(
-            Pick::Option(1),
+            Pick::Option(2),
             &[Answer::Yes, Answer::No],
             Some("candidate-key"),
         );
@@ -1607,7 +2102,7 @@ mod tests {
     async fn an_unconfirmed_write_keeps_the_key_the_config_may_use() {
         let home = brave_home();
         let console = Script::new(
-            Pick::Option(1),
+            Pick::Option(2),
             &[Answer::Yes, Answer::No],
             Some("candidate-key"),
         );
@@ -1639,7 +2134,7 @@ mod tests {
     async fn a_keyed_setup_uses_a_fresh_alias_and_reports_the_old_one() {
         let home = brave_home();
         let console = Script::new(
-            Pick::Option(1),
+            Pick::Option(2),
             &[Answer::Yes, Answer::Yes],
             Some("candidate-key"),
         );
@@ -1689,7 +2184,7 @@ mod tests {
         home.credentials
             .generic_set(NEW_ALIAS, &Secret::new("someone-elses"))
             .unwrap();
-        let console = Script::new(Pick::Option(1), &[Answer::Yes], Some("candidate-key"));
+        let console = Script::new(Pick::Option(2), &[Answer::Yes], Some("candidate-key"));
         let outcome = run_with(
             &home,
             &console,
@@ -1712,7 +2207,7 @@ mod tests {
     async fn cancelling_the_last_question_writes_nothing_and_removes_the_new_key() {
         let home = brave_home();
         let console = Script::new(
-            Pick::Option(1),
+            Pick::Option(2),
             &[Answer::Yes, Answer::Cancel],
             Some("candidate-key"),
         );
@@ -1736,7 +2231,7 @@ mod tests {
     #[tokio::test]
     async fn an_alias_taken_while_setup_waits_is_never_overwritten() {
         let home = brave_home();
-        let mut console = Script::new(Pick::Option(1), &[Answer::Yes], Some("candidate-key"));
+        let mut console = Script::new(Pick::Option(2), &[Answer::Yes], Some("candidate-key"));
         let store = home.credentials.clone();
         console.on_secret = Some(Box::new(move || {
             store
@@ -1765,7 +2260,7 @@ mod tests {
     #[tokio::test]
     async fn a_key_that_cannot_be_removed_is_named_and_recorded() {
         let home = brave_home();
-        let console = Script::new(Pick::Option(1), &[Answer::Yes], Some("candidate-key"));
+        let console = Script::new(Pick::Option(2), &[Answer::Yes], Some("candidate-key"));
         // The check fails, and by then the credential file can no longer be
         // rewritten (a folder now stands where it was).
         let store_file = home._dir.path().join("credentials.toml");
@@ -1793,7 +2288,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_terminal_a_key_backend_is_sent_to_the_terminal_command() {
         let home = brave_home();
-        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], Some("k"));
+        let console = Script::new(Pick::Option(2), &[Answer::Yes, Answer::No], Some("k"));
         let outcome = run_as(
             &home,
             &console,
@@ -1822,7 +2317,7 @@ mod tests {
     async fn a_session_that_goes_away_mid_setup_writes_nothing_and_removes_the_key() {
         let home = brave_home();
         let console = Script::new(
-            Pick::Option(1),
+            Pick::Option(2),
             &[Answer::Yes, Answer::No],
             Some("candidate-key"),
         );
@@ -2054,6 +2549,370 @@ mod tests {
         drop(notes.recv().await);
         drop(notes);
         assert_eq!(ask.await.unwrap(), Answer::Cancel);
+    }
+
+    /// EVERYTHING, plus Docker on PATH.
+    struct WithDocker;
+
+    impl Probes for WithDocker {
+        fn find(&self, program: &str) -> Option<PathBuf> {
+            if program == "docker" {
+                Some(PathBuf::from("/usr/bin/docker"))
+            } else {
+                EVERYTHING.find(program)
+            }
+        }
+        fn version(&self, program: &Path) -> Option<String> {
+            EVERYTHING.version(program)
+        }
+    }
+
+    async fn run_searxng(
+        home: &Home,
+        console: &Script,
+        host: &searxng::tests::FakeHost,
+        launcher: Launcher,
+    ) -> Outcome {
+        let config = home.config.clone();
+        let read = move || effective(&config);
+        let suffix = || Some("0123456789abcdef".to_string());
+        let setup = Setup {
+            console,
+            probes: &WithDocker,
+            credentials: &home.credentials,
+            config_path: Some(home.config.clone()),
+            state_dir: home.state.clone(),
+            launcher,
+            effective: &read,
+            random_suffix: &suffix,
+            write: &real_write,
+            keys: true,
+            stopped: &|| false,
+            host,
+        };
+        run(&setup).await
+    }
+
+    fn audit_text(home: &Home) -> String {
+        std::fs::read_to_string(audit_path(&home.state)).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn searxng_setup_runs_a_recorded_loopback_container_then_writes_the_bridge() {
+        use searxng::tests::{docker_reply, FakeHost, ID};
+        let home = home("");
+        let host = FakeHost::new(docker_reply);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], None);
+        let outcome = run_searxng(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            Outcome::Configured("searxng".to_string()),
+            "{}",
+            console.text()
+        );
+        let said = console.text();
+        // The preview named the exact container command, the engines, the
+        // anonymity limit and the memory before the question.
+        for needed in [
+            "-p 127.0.0.1:8888:8080",
+            "--host unix:///var/run/docker.sock",
+            searxng::IMAGE,
+            "google cse",
+            "not anonymous",
+            "105 MB",
+            "mcp-searxng@2.11.0",
+        ] {
+            assert!(
+                said.contains(needed),
+                "{needed} missing from:
+{said}"
+            );
+        }
+        // The live engine list was read from the instance.
+        assert!(
+            said.contains("General web engines it has enabled: duckduckgo, wikipedia."),
+            "{said}"
+        );
+        // Created, recorded, then started; every container command bound.
+        let commands = host.commands();
+        let create = commands
+            .iter()
+            .position(|c| c.contains(" create "))
+            .unwrap();
+        let start = commands.iter().position(|c| c.contains(" start ")).unwrap();
+        assert!(create < start);
+        for command in commands.iter().skip(1) {
+            assert!(
+                command.contains("--host unix:///var/run/docker.sock"),
+                "{command}"
+            );
+        }
+        let owned = searxng::load_owned(&home.state).unwrap().unwrap();
+        assert_eq!(owned.container_id, ID);
+        assert_eq!(owned.port, 8888);
+        // The bridge entry, last.
+        let config = effective(&home.config).unwrap();
+        let entry = &config.search.managed["searxng"];
+        assert_eq!(entry.tier, SearchTier::SelfHosted);
+        assert_eq!(entry.tool, searxng::BRIDGE_TOOL);
+        assert!(entry.identity_matches());
+        assert_eq!(
+            entry.env.get("SEARXNG_URL"),
+            Some(&McpEnvEntry::Plain("http://127.0.0.1:8888".to_string()))
+        );
+        let audit = audit_text(&home);
+        for event in [
+            "setup-start",
+            "searxng-settings",
+            "searxng-create",
+            "searxng-created",
+            "searxng-live",
+            "setup-done",
+        ] {
+            assert!(
+                audit.contains(&format!("event={event} ")),
+                "{event}: {audit}"
+            );
+        }
+        // A second setup refuses rather than starting another container.
+        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], None);
+        let again = run_searxng(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert!(
+            matches!(again, Outcome::Stopped(ref reason) if reason.contains("already set up")),
+            "{again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_port_taken_after_the_preview_moves_once_to_the_next_free_one() {
+        use searxng::tests::{after_host, docker_reply, failed, FakeHost};
+        let home = home("");
+        let starts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&starts);
+        let host = FakeHost::new(move |argv| {
+            if after_host(argv).first() == Some(&"start") {
+                counted.set(counted.get() + 1);
+                if counted.get() == 1 {
+                    return failed("Error response from daemon: Bind for 127.0.0.1:8888 failed: port is already allocated");
+                }
+            }
+            docker_reply(argv)
+        });
+        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], None);
+        let outcome = run_searxng(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            Outcome::Configured("searxng".to_string()),
+            "{}",
+            console.text()
+        );
+        let commands = host.commands();
+        // The first container was removed (after checking it is ours), and the
+        // second was published on the next port.
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| c.contains(" rm --force "))
+                .count(),
+            1
+        );
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("-p 127.0.0.1:8889:8080")));
+        assert_eq!(
+            searxng::load_owned(&home.state).unwrap().unwrap().port,
+            8889
+        );
+        let config = effective(&home.config).unwrap();
+        let entry = &config.search.managed["searxng"];
+        assert_eq!(
+            entry.env.get("SEARXNG_URL"),
+            Some(&McpEnvEntry::Plain("http://127.0.0.1:8889".to_string()))
+        );
+        assert!(entry.identity_matches());
+        assert_eq!(starts.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_container_removes_what_this_run_made() {
+        use searxng::tests::{docker_reply, FakeHost};
+        // SearXNG never answers.
+        let first = home("# mine\n");
+        let host = FakeHost::new(docker_reply);
+        host.live_after.set(1000);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(
+            &first,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("did not answer")),
+            "{outcome:?}"
+        );
+        assert!(host.commands().iter().any(|c| c.contains(" rm --force ")));
+        assert!(searxng::load_owned(&first.state).is_none());
+        assert!(!searxng::settings_dir(&first.state).exists());
+        assert_eq!(std::fs::read_to_string(&first.config).unwrap(), "# mine\n");
+
+        // The bridge fails its check: the running container goes too.
+        let second = home("# mine\n");
+        let host = FakeHost::new(docker_reply);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(&second, &console, &host, failing_launcher()).await;
+        assert!(matches!(outcome, Outcome::Stopped(_)), "{outcome:?}");
+        assert!(host.commands().iter().any(|c| c.contains(" rm --force ")));
+        assert!(searxng::load_owned(&second.state).is_none());
+        assert!(!searxng::settings_dir(&second.state).exists());
+        assert_eq!(std::fs::read_to_string(&second.config).unwrap(), "# mine\n");
+        assert!(audit_text(&second).contains("event=searxng-removed "));
+    }
+
+    #[tokio::test]
+    async fn no_container_is_created_or_started_without_its_audit_record() {
+        use searxng::tests::{docker_reply, FakeHost};
+        let home = home("# mine\n");
+        let host = FakeHost::new(docker_reply);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let config = home.config.clone();
+        let read = move || effective(&config);
+        let log = audit_path(&home.state);
+        // The secret is made after the first record and before the container:
+        // from then on the audit log refuses writes.
+        let suffix = || {
+            let mut permissions = std::fs::metadata(&log).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&log, permissions).unwrap();
+            Some("0123456789abcdef".to_string())
+        };
+        let setup = Setup {
+            console: &console,
+            probes: &WithDocker,
+            credentials: &home.credentials,
+            config_path: Some(home.config.clone()),
+            state_dir: home.state.clone(),
+            launcher: working_launcher(searxng::BRIDGE_TOOL),
+            effective: &read,
+            random_suffix: &suffix,
+            write: &real_write,
+            keys: true,
+            stopped: &|| false,
+            host: &host,
+        };
+        let outcome = run(&setup).await;
+        let mut permissions = std::fs::metadata(&log).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&log, permissions).unwrap();
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("no container was created")),
+            "{outcome:?}"
+        );
+        let commands = host.commands();
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c.contains(" create ") || c.contains(" start ")),
+            "{commands:?}"
+        );
+        assert!(!searxng::settings_dir(&home.state).exists());
+        assert_eq!(std::fs::read_to_string(&home.config).unwrap(), "# mine\n");
+    }
+
+    #[tokio::test]
+    async fn setup_waits_for_no_other_searxng_change() {
+        use searxng::tests::{docker_reply, FakeHost};
+        let home = home("");
+        let held = searxng::lock(&home.state).unwrap();
+        let host = FakeHost::new(docker_reply);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("another SearXNG setup")),
+            "{outcome:?}"
+        );
+        assert!(!host.commands().iter().any(|c| c.contains(" create ")));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_container_with_our_name_that_is_not_ours_is_never_adopted() {
+        use searxng::tests::{after_host, docker_reply, ok, FakeHost};
+        let home = home("");
+        let host = FakeHost::new(|argv| {
+            if after_host(argv).first() == Some(&"container") {
+                return ok(r#""0123456789abcdef0123" {"other":"x"} false"#);
+            }
+            docker_reply(argv)
+        });
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("already exists")),
+            "{outcome:?}"
+        );
+        let commands = host.commands();
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c.contains(" create ") || c.contains(" rm ")),
+            "{commands:?}"
+        );
+        assert!(!searxng::settings_dir(&home.state).exists());
+    }
+
+    #[tokio::test]
+    async fn searxng_without_a_usable_docker_is_listed_with_the_reason_and_stops() {
+        let home = home("");
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_with(
+            &home,
+            &console,
+            &EVERYTHING,
+            working_launcher("x"),
+            &real_write,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("No Docker was found")),
+            "{outcome:?}"
+        );
+        assert!(console
+            .text()
+            .contains("SearXNG on this computer, in Docker (not available here)"));
+        assert!(!home.state.join("setup-audit.log").exists());
     }
 
     #[test]

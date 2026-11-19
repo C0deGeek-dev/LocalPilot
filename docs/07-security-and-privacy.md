@@ -927,6 +927,23 @@ construction:
   not a tool). Keys are not entered in the session. If the session closes while
   setup runs, nothing more is stored, started or written; a key it stored is
   removed.
+- **A local SearXNG container.** Setup uses only this computer's own Docker: it
+  asks the Docker CLI which endpoint it would use and accepts a local Unix socket
+  or local named pipe, never a TCP, SSH or remote-pipe endpoint, with Docker
+  Engine 28.0.0 or later (older Engines let other hosts on the local network
+  reach a port published on localhost). Every later command passes that
+  endpoint with `--host` and drops `DOCKER_HOST`, `DOCKER_CONTEXT`,
+  `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`, so the environment cannot switch
+  daemons between the check and the command. The image is pinned by digest; the
+  container is published on `127.0.0.1` only, with `--restart no`, a
+  LocalPilot label, and its ID recorded when it is created and before it starts.
+  Removal acts only on a container whose ID and label both match the record, and
+  on a settings folder that carries LocalPilot's marker. The secret key in its
+  settings is random per setup. Liveness and engine checks go to `127.0.0.1`
+  only. The consent says that SearXNG forwards each query to its enabled engines
+  from your IP address and that a local instance is not anonymous. Podman, and
+  Docker that runs only inside WSL, are reported and not used until their
+  loopback-only publishing has been checked.
 - **Disableable, twice.** `--no-web` skips the web source for one run — no
   search and no fetch. `[research.web] enabled = false`
   removes the entire outbound path and is the absolute kill switch — no flag

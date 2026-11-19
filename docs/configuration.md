@@ -1541,8 +1541,33 @@ each needs and where queries go:
 | DuckDuckGo, no key | `uv` | `[search.managed.duckduckgo]` running `uvx --with "duckduckgo-mcp-server[browser]==0.7.0" duckduckgo-mcp-server==0.7.0` | DuckDuckGo, from your IP address; the package reads its HTML results page, which is not an official API and may be slowed or blocked |
 | Brave Search API, your key | Node.js 22+ | `[search.managed.brave]` running `npx -y @brave/brave-search-mcp-server@2.1.5 --transport stdio` | Brave, under your account and quota |
 | Tavily, your key | Node.js 22+ | `[search.managed.tavily]` running `npx -y tavily-mcp@0.2.22` | Tavily, under your account and quota |
+| SearXNG on this computer, in Docker | Docker Engine 28+ on this computer, Node.js 22+ | `[search.managed.searxng]` running `npx -y mcp-searxng@2.11.0` with `SEARXNG_URL=http://127.0.0.1:<port>` | The search engines SearXNG has enabled, from your IP address; a local instance is not anonymous |
 
-A local SearXNG engine in a container is listed but not yet available. `uvx`
+For SearXNG, setup uses the `docker` on `PATH` and only when it is this
+computer's own: it asks Docker which endpoint it would use (so `DOCKER_HOST`,
+`DOCKER_CONTEXT` and the current context are applied as Docker applies them)
+and accepts only a local Unix socket or a local named pipe, with Docker Engine
+28.0.0 or later, on which a port published on `127.0.0.1` cannot be reached
+from the local network. Every later Docker command names that endpoint with
+`--host` and runs without the `DOCKER_HOST`, `DOCKER_CONTEXT`,
+`DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH` variables. Podman, and Docker that
+runs only inside WSL, are reported but not used yet. Setup writes the settings
+to `~/.localpilot/search/searxng/settings/` (JSON results on, a random secret
+key, rate limiter and public-instance mode off); a folder there that LocalPilot
+did not make is refused, and a `settings.yml` you edited is replaced only if you
+agree. It then creates the container from the image pinned by digest (named
+`localpilot-searxng-<digest prefix>`, labelled `dev.localpilot.managed=search-searxng`,
+`--restart no`, published on `127.0.0.1:<port>` only, from 8888 or the next free
+port), records it in `~/.localpilot/search/searxng/state.json`, starts it (if
+the port was taken in between, it removes that container and tries the next
+free port once), waits up to 60 seconds for `/healthz`, and shows the engines
+the instance has enabled from its `/config`. A container with that name that
+LocalPilot did not create is never adopted or replaced. If anything fails before
+the config is written, setup removes the container and settings folder it
+created in that run, and only those. The container keeps running after setup
+(about 105 MB of memory).
+
+`uvx`
 and `npx` are looked up in the absolute entries of `PATH` only (never the
 working directory) and written with their full path, so a later change of which
 program that name finds is refused at launch until setup runs again. Setup

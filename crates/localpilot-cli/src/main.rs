@@ -92,6 +92,7 @@ mod research;
 mod rpc_cmd;
 mod search_backend;
 mod search_setup;
+mod searxng;
 mod self_review_cmd;
 mod selfdev_cmd;
 mod selfdev_reload;
