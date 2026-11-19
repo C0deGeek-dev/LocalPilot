@@ -204,6 +204,17 @@ disclosure names every designated tool. The proposer parses the common result
 shapes (plain-text `URL:` lists, JSON-in-text, `structuredContent`,
 `resource_link` items) and treats URL-less prose as an empty round.
 
+The same designated tools back the chat `web_search` tool in the fullscreen
+session: there each search server is asked about once per session before chat
+search starts its own instance or sends it a query (the same server listed as
+an ordinary MCP tool server, and doctor's probe, keep their usual lifecycle;
+the HTTP deny list does not constrain what the server itself contacts), the query is redacted and length-bounded, results
+come back as untrusted URL leads to read with `fetch`, and the audit line
+records the server and outcome but never the query (see
+[`docs/05-tool-system.md`](05-tool-system.md) and ADR-0289). `localpilot
+doctor` lists them as configured; its MCP section probes whether each server
+starts, which does not prove a search works.
+
 Note on provenance: some community search servers scrape engines that offer
 no official API, while vendor servers (and self-hosted SearXNG) speak
 official interfaces — the choice of server, and its provenance, is yours.

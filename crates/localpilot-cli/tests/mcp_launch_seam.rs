@@ -1,7 +1,8 @@
 //! Every MCP launch path goes through one resolver and one spawn.
 //!
 //! Session server discovery, designated research search, and `doctor` each used
-//! to call `StdioTransport::spawn` themselves. Three copies of a launch policy
+//! to call `StdioTransport::spawn` themselves; chat web search launches through
+//! the same seam. Three copies of a launch policy
 //! is how they drift: a change to what an entry form means, or to what a missing
 //! credential does, lands in one and silently misses the others — which is the
 //! defect this seam exists to prevent, not merely a tidiness preference.
@@ -12,6 +13,7 @@
 const MCP_SRC: &str = include_str!("../src/mcp.rs");
 const RESEARCH_SRC: &str = include_str!("../src/research.rs");
 const DOCTOR_SRC: &str = include_str!("../src/doctor.rs");
+const CHAT_WEB_SRC: &str = include_str!("../src/chat_web.rs");
 const SEAM_SRC: &str = include_str!("../src/mcp_env.rs");
 
 /// The launch paths that must not grow their own spawn.
@@ -19,6 +21,7 @@ const CALLERS: &[(&str, &str)] = &[
     ("mcp.rs (session discovery)", MCP_SRC),
     ("research.rs (designated search)", RESEARCH_SRC),
     ("doctor.rs (connectivity probe)", DOCTOR_SRC),
+    ("chat_web.rs (chat web search)", CHAT_WEB_SRC),
 ];
 
 #[test]

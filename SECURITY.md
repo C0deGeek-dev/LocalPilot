@@ -29,6 +29,7 @@ Security-sensitive areas:
 - transcript persistence
 - MCP server integration
 - web research egress
+- chat web access (`fetch` and `web_search` in ordinary chat)
 - the opt-in remote gateway, paired devices and the phone companion app
 - phone notifications (Web Push)
 
@@ -78,3 +79,13 @@ Security-sensitive areas:
   cannot override. See
   [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) §Web Research
   Egress.
+- Chat web access starts every session with none. In the fullscreen session
+  only, the person at the terminal is asked before the first request to each
+  site and the first query to each configured search server; no permission
+  profile, pre-approval or paired device answers that question, and hosts
+  without a person behind them get no web access. `[tools] web = "off"` or
+  `[research.web] enabled = false` turns it off, incognito sessions have none,
+  and every request is audited (metadata only for searches) before it is sent.
+  A configured search server is a local program with its own network access.
+  See [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) and
+  ADR-0289.

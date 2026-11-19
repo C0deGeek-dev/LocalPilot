@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Ordinary chat can reach the web (LocalPilot#9). In the fullscreen session
+  `fetch` reads a page from the internet and the new `web_search` tool searches
+  through the MCP search tools named in `[research.mcp] tools`, returning links
+  to read with `fetch`. Every session starts with no web access: you are asked
+  before the first request to each site and the first query to each search
+  server, the question says a yes lasts for the session, and nothing else (a
+  permission profile, a pre-approval, a paired device) can answer it. Requests
+  use `[research.web]`'s deny list and audit log (searches are recorded without
+  the query); `[tools] web = "off"` or `[research.web] enabled = false` turns
+  it off, and incognito sessions have none. With no search tool set up,
+  `web_search` explains how to add one instead of the model saying it has no
+  internet. A short request such as "search online" or "open this URL" now
+  reveals the matching tool, the system prompt says what web access the
+  session has, and `localpilot doctor` shows a `chat web:` status (ADR-0289).
+
 - Embed LocalLink 0.1.6: the companion app meets WCAG 2.2 AA from the
   LocalHub#292 audit. On a phone the chat under the session list is no longer
   reachable with a screen reader, focus no longer disappears after pairing or

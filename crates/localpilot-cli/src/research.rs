@@ -3237,10 +3237,13 @@ mod tests {
     /// which gate covers it.
     ///
     /// Kept as an inventory rather than a one-sided assertion because the
-    /// workspace has **two** egress gates and always did: this consent seam, for
-    /// web research and skill discovery; and the tool permission system, for the
-    /// `fetch` tool, which declares `Effect::Network` and is asked about through
-    /// the permission profile. Both ask a person. Neither covers the other.
+    /// workspace has more than one egress gate: this consent seam, for web
+    /// research and skill discovery; the tool permission system, for the `fetch`
+    /// tool's requests to this machine (`Effect::Network`, asked through the
+    /// permission profile); and chat web consent (ADR-0289), which a chat
+    /// `fetch` or `web_search` to the internet needs on top of tool permission,
+    /// asked of the person at the fullscreen terminal per site or search server
+    /// per session. Each asks a person. None covers another.
     ///
     /// The rest are not user-directed reach at all: inference (loopback-only,
     /// ADR-0164), credential exchange the user initiated by logging in, and the

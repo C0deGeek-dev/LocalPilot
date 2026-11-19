@@ -1339,6 +1339,14 @@ mod tests {
     }
 
     fn search_fixture(backends: &[(&str, serde_json::Value)], script: &[bool]) -> SearchFixture {
+        search_fixture_with(|_| {}, backends, script)
+    }
+
+    fn search_fixture_with(
+        edit: impl FnOnce(&mut Config),
+        backends: &[(&str, serde_json::Value)],
+        script: &[bool],
+    ) -> SearchFixture {
         let starts = Arc::new(AtomicUsize::new(0));
         let servers: Arc<Mutex<HashMap<String, Arc<FakeSearch>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -1390,6 +1398,7 @@ mod tests {
                             tool: "search".to_string(),
                         });
                 }
+                edit(config);
             },
             table(&[]),
             false,
@@ -1476,6 +1485,212 @@ mod tests {
             0,
             "nothing could leave, so nothing was asked"
         );
+    }
+
+    /// The egress matrix: every permission profile, both host interactivity
+    /// kinds, both modes and both consent answers, for both ways out (`fetch`
+    /// and `web_search`), through the real tool dispatch with a permission
+    /// approver that always says yes. Nothing reaches a server or a search
+    /// backend unless chat web is on and the person said yes to its consent
+    /// question, and an "off" session never asks.
+    #[tokio::test]
+    async fn no_profile_or_host_reaches_the_web_without_consent() {
+        use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
+        let server = page_server(200, "page").await;
+        let port = server.address().port();
+        let profiles = [
+            Profile::Default,
+            Profile::ReadOnly,
+            Profile::Relaxed,
+            Profile::Bypass,
+            Profile::Unrestricted,
+        ];
+        let mut reached = (0, 0);
+        for profile in profiles {
+            for interactivity in [Interactivity::Interactive, Interactivity::NonInteractive] {
+                for mode in [ChatWebMode::Off, ChatWebMode::Ask] {
+                    for consent in [false, true] {
+                        let case =
+                            format!("{profile:?} {interactivity:?} {mode:?} consent={consent}");
+                        let dir = tempfile::tempdir().unwrap();
+                        let workspace = Workspace::new(dir.path()).unwrap();
+                        let engine = PermissionEngine::new(profile, Vec::new());
+                        let registry = localpilot_tools::ToolRegistry::with_builtins();
+
+                        // fetch, to a public-looking name that resolves to the
+                        // local test server.
+                        let before = hits(&server).await;
+                        let f = fixture(
+                            |config| config.tools.web = mode,
+                            table(&[("site.test", [127, 0, 0, 1])]),
+                            true,
+                            &[consent],
+                        );
+                        let context = localpilot_tools::ToolContext {
+                            workspace: &workspace,
+                            interactivity,
+                            trusted: true,
+                            retention: None,
+                            processes: None,
+                            agents: None,
+                            prompter: None,
+                            peers: None,
+                            web: Some(WebContext {
+                                gateway: &f.web,
+                                incognito: false,
+                            }),
+                        };
+                        let call = localpilot_core::ToolCall::new(
+                            localpilot_core::ToolUseId::from("c1"),
+                            "fetch",
+                            serde_json::json!({ "url": format!("http://site.test:{port}/") }),
+                        );
+                        registry
+                            .dispatch(&call, &context, &engine, &ScriptedApprover::always())
+                            .await;
+                        let fetched = hits(&server).await > before;
+
+                        // web_search, to a configured search backend.
+                        let s = search_fixture_with(
+                            |config| config.tools.web = mode,
+                            &[("finder", links(&["https://example.com/a"]))],
+                            &[consent],
+                        );
+                        let context = localpilot_tools::ToolContext {
+                            web: Some(WebContext {
+                                gateway: &s.fixture.web,
+                                incognito: false,
+                            }),
+                            ..context
+                        };
+                        let call = localpilot_core::ToolCall::new(
+                            localpilot_core::ToolUseId::from("c2"),
+                            "web_search",
+                            serde_json::json!({ "query": "latest release" }),
+                        );
+                        registry
+                            .dispatch(&call, &context, &engine, &ScriptedApprover::always())
+                            .await;
+                        let searched = s
+                            .servers
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .any(|server| !server.queries.lock().unwrap().is_empty());
+                        let started = s.starts.load(Ordering::SeqCst) > 0;
+
+                        let interactive = matches!(interactivity, Interactivity::Interactive);
+                        let allowed = matches!(mode, ChatWebMode::Ask) && consent && interactive;
+                        assert!(!fetched || allowed, "fetch left without consent: {case}");
+                        assert!(!searched || allowed, "search left without consent: {case}");
+                        assert!(
+                            !started || allowed,
+                            "search server started without consent: {case}"
+                        );
+                        if matches!(mode, ChatWebMode::Off) || !interactive {
+                            assert_eq!(f.answers.asked(), 0, "asked: {case}");
+                            assert_eq!(s.fixture.answers.asked(), 0, "asked: {case}");
+                        }
+                        reached.0 += usize::from(fetched);
+                        reached.1 += usize::from(searched);
+                    }
+                }
+            }
+        }
+        // Not vacuous: consented cases do reach the server and the backend.
+        assert!(reached.0 > 0 && reached.1 > 0, "{reached:?}");
+    }
+
+    /// The two gates are independent. Where the ordinary permission answer is
+    /// no, nothing is asked locally, written to the audit log, started or sent.
+    /// Where the profile approves on its own (an allowlisted relaxed profile,
+    /// bypass, unrestricted), the local consent question is still asked and a
+    /// no still stops everything.
+    #[tokio::test]
+    async fn tool_permission_and_chat_web_consent_each_stop_the_request() {
+        use localpilot_sandbox::{PermissionEngine, Profile, Workspace};
+        let server = page_server(200, "page").await;
+        let port = server.address().port();
+        let allowlisted = vec!["fetch".to_string(), "web_search".to_string()];
+        // (profile, allowlist, ordinary approval asked, consent asked)
+        let cases = [
+            (Profile::Default, Vec::new(), true, false),
+            (Profile::ReadOnly, Vec::new(), true, false),
+            (Profile::Relaxed, Vec::new(), true, false),
+            (Profile::Relaxed, allowlisted.clone(), false, true),
+            (Profile::Bypass, Vec::new(), false, true),
+            (Profile::Unrestricted, Vec::new(), false, true),
+        ];
+        for (profile, allowlist, ordinary_asked, consent_asked) in cases {
+            let case = format!("{profile:?} allowlist={allowlist:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = Workspace::new(dir.path()).unwrap();
+            let engine = PermissionEngine::new(profile, allowlist);
+            let registry = localpilot_tools::ToolRegistry::with_builtins();
+            // Both gates answer no: where the ordinary one decides, the
+            // local one is never reached; where the profile approves, the
+            // local one is asked and its no stops the request.
+            let ordinary = Answers::new(&[]);
+            let f = fixture(
+                |_| {},
+                table(&[("site.test", [127, 0, 0, 1])]),
+                true,
+                &[false],
+            );
+            let s = search_fixture(&[("finder", links(&["https://example.com/a"]))], &[false]);
+            for (gateway, tool, input) in [
+                (
+                    &f.web,
+                    "fetch",
+                    serde_json::json!({ "url": format!("http://site.test:{port}/") }),
+                ),
+                (
+                    &s.fixture.web,
+                    "web_search",
+                    serde_json::json!({ "query": "latest release" }),
+                ),
+            ] {
+                let context = localpilot_tools::ToolContext {
+                    workspace: &workspace,
+                    interactivity: Interactivity::Interactive,
+                    trusted: true,
+                    retention: None,
+                    processes: None,
+                    agents: None,
+                    prompter: None,
+                    peers: None,
+                    web: Some(WebContext {
+                        gateway,
+                        incognito: false,
+                    }),
+                };
+                let call = localpilot_core::ToolCall::new(
+                    localpilot_core::ToolUseId::from("c1"),
+                    tool,
+                    input,
+                );
+                let result = registry.dispatch(&call, &context, &engine, &ordinary).await;
+                assert!(result.is_error(), "{case} {tool}: {}", result.output);
+            }
+            assert_eq!(hits(&server).await, 0, "{case}");
+            assert_eq!(s.starts.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(
+                ordinary.asked() > 0,
+                ordinary_asked,
+                "{case}: ordinary approval asked {}",
+                ordinary.asked()
+            );
+            let consent = f.answers.asked() + s.fixture.answers.asked();
+            assert_eq!(
+                consent,
+                if consent_asked { 2 } else { 0 },
+                "{case}: local consent asked {consent}"
+            );
+            if !consent_asked {
+                assert!(!audit_text(&f).contains("chat-"), "{case}");
+                assert!(!audit_text(&s.fixture).contains("chat-"), "{case}");
+            }
+        }
     }
 
     #[test]

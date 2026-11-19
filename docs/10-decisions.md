@@ -2,6 +2,78 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0289: Ordinary Chat Reaches The Web Only Through Per-Session Consent At The Fullscreen Terminal
+
+**Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0076 (the web
+research exception, which is not precedent for chat), ADR-0100 (per-hop
+re-gating), ADR-0164 (loopback-only inference) and ADR-0216/ADR-0218 (request
+reveal). Refs LocalPilot#9.
+
+**Context.** The `fetch` tool declared a network effect and was gated only by
+the permission profile: after a generic network approval it could reach public
+hosts, with no egress boundary of its own (no consent naming the host, no audit
+record, no deny list, no public-address check), and a model rarely found it.
+There was no search tool at all. Asked to look something up online, the model
+said it had no internet access. Research had web access through its own
+disclosed, audited seam; extending that exception to chat would have let a
+profile or a pre-approval decide egress.
+
+**Decision.**
+1. **Own, default-inert enablement.** `[tools] web = "off" | "ask"`, default
+   `ask`, means every session starts with no web access. A request to a site
+   needs the person's yes to a consent question naming the host, what is sent
+   (only the address) and where it is recorded; a search needs a yes naming the
+   search server, the tool and the query. A yes lasts for that host or server
+   until the session changes (new, resumed or forked session, entering or
+   leaving incognito), and the question says so.
+2. **Two independent gates.** Tool permission keeps its meaning and chat web
+   consent is checked on top of it; neither implies the other. The consent
+   question goes to the fullscreen session's own prompt only. No permission
+   profile (bypass and unrestricted included), pre-approval, allowlist, reveal,
+   research consent or paired device answers it. A host with nobody to ask (a
+   piped run, a subagent, a host without a person) gets no gateway and so no
+   web access. The generic permission question and the progress line show only
+   a search query's length; its words appear only on the local consent prompt.
+3. **One executor, shared policy.** Chat requests use the shared gated fetch
+   chain: `[research.web]` deny list (deny wins), public addresses only, own
+   resolver, no proxy, every redirect hop re-checked and asked about as a new
+   host. `[research.web] enabled = false` turns chat web access off too, and
+   incognito sessions have none because every request is audited.
+4. **Audit before transport.** An audit line is written before any request is
+   sent or any search server is started, and a failed write refuses the
+   request. URLs are recorded with secrets removed; searches record the server,
+   the decision and the result count, never the query.
+5. **This machine is not the web.** A `fetch` of `localhost` or a loopback
+   address stays the existing local request under tool permission and needs no
+   chat web consent.
+6. **A seam, not a new crate.** The tools crate defines a web gateway trait;
+   the CLI injects its implementation into the fullscreen session. The
+   `fetch` input schema is unchanged.
+7. **Search uses the user's own tools.** `web_search` calls only the tools
+   designated in `[research.mcp] tools`; there is no built-in search client and
+   no LocalX service. Consent covers the search-owned start of that server and
+   each query sent to it: the chat search starts its own instance only after
+   consent, once per session. The same server configured as an ordinary MCP
+   tool server, and `localpilot doctor`'s MCP probe, keep their existing
+   lifecycle. A search server is a local program that owns its own outbound
+   requests; the HTTP deny list does not constrain what it contacts. Results are untrusted
+   URL-only leads, never evidence or instructions. With no designated tool,
+   nothing can leave, so the tool asks nothing and explains how to set one up,
+   that `fetch` reads a known address and that `/research` exists.
+8. **Findable and visible.** A request plainly about the web lifts the built-in
+   web tools to the reveal floor (MCP tools and ordinary local requests are
+   unaffected). Where the gateway is wired the system prompt carries one line
+   saying what web access the session has now, kept current across session and
+   privacy changes. `localpilot doctor` reports the mode, the shared switch, the
+   audit log and the configured search tools; its MCP probe shows whether a
+   server starts, which does not prove a search works.
+
+**Consequences.** Chat web access ships for the fullscreen session only. The
+egress inventory test lists the chat gateway as its own gate. The built-in tool
+specification budget rises to 16,600 bytes for the new tool. A live search
+through a user-configured server is an acceptance check by the user; the
+automated tests use scripted search transports.
+
 ## ADR-0288: The Gateway Can Run In The Background And Be Stopped From Any Terminal
 
 **Status:** accepted · **Date:** 2026-11-15. Amends ADR-0247 and ADR-0269. Refs
