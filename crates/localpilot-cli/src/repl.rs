@@ -446,6 +446,10 @@ pub(crate) async fn run_skills_slash(
                     global,
                     !no_web,
                     &style,
+                    crate::skill_discovery::DiscoveryEgress {
+                        approval: crate::egress_consent::terminal_approval(),
+                        stop: None,
+                    },
                     out,
                 )
                 .await?;

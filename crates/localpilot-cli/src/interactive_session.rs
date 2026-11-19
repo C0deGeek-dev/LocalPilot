@@ -984,6 +984,13 @@ pub(crate) fn research_launch_approver(tx: mpsc::UnboundedSender<ApprovalCall>) 
     }
 }
 
+/// The prompter a full-screen research run asks its page questions through.
+/// Its channel belongs to that run alone, so only the person at this terminal
+/// answers.
+pub(crate) fn research_page_prompter(tx: mpsc::UnboundedSender<QuestionCall>) -> impl UserPrompter {
+    TuiPrompter { tx }
+}
+
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
     let target_kind = match request.effect {
         Effect::ReadPath { .. } | Effect::WritePath { .. } | Effect::ScratchPath { .. } => "path",

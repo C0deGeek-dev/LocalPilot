@@ -5317,7 +5317,6 @@ async fn drive_operation_chain(
                             &prompt.text,
                             queue,
                             BeginWork::AlreadyBusy,
-                            authority.approval_tx,
                         )
                         .await?
                     }
@@ -5461,17 +5460,7 @@ async fn drive_slash_command(
             drive_ingest(terminal, app, runtime, ctx, action, queue).await
         }
         PumpedSlash::Research { topic } => {
-            drive_research(
-                terminal,
-                app,
-                runtime,
-                ctx,
-                &topic,
-                queue,
-                BeginWork::Own,
-                authority.approval_tx,
-            )
-            .await
+            drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
         }
         PumpedSlash::HarnessResume => {
             ctx.execution =
@@ -6780,7 +6769,6 @@ enum BeginWork {
 /// Run a research pass on the operation pump: preflight before Busy, show the egress
 /// disclosure and draw before any request, then a signal-then-await-partial run
 /// whose buffered output is presented through the bounded report presenter.
-#[allow(clippy::too_many_arguments)]
 async fn drive_research(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -6789,14 +6777,29 @@ async fn drive_research(
     topic: &str,
     queue: &mut VecDeque<QueuedOperation>,
     begin: BeginWork,
-    approval_tx: &mpsc::UnboundedSender<ApprovalCall>,
 ) -> Result<bool> {
-    // A managed search backend may start only with the person's own answer,
-    // asked on this terminal's approval prompt (never a paired device), which
-    // the operation pump below services while the run waits.
-    let launch_consent = crate::research::SearchLaunchConsent::Ask(Arc::new(
-        crate::interactive_session::research_launch_approver(approval_tx.clone()),
-    ));
+    // The run's consent questions go to channels that belong to this run
+    // alone, which the operation pump below services: whether a managed search
+    // backend may start on its own approval channel, and requests to hosts no
+    // standing rule covers on its own question channel (three answers, as on
+    // the command line). Nobody but the person at this terminal can answer
+    // them, and once the pump stops both are closed, so anything the run still
+    // asks is refused.
+    let cancel = CancellationToken::new();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (launch_tx, mut launch_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+    let (page_tx, mut page_rx) = mpsc::unbounded_channel::<QuestionCall>();
+    let launch_consent = crate::research::SearchLaunchConsent::Ask {
+        launch: Arc::new(crate::interactive_session::research_launch_approver(
+            launch_tx,
+        )),
+        pages: localpilot_research::shared_approval(
+            crate::egress_consent::PromptedApproval::new(Arc::new(
+                crate::interactive_session::research_page_prompter(page_tx),
+            ))
+            .when_abandoned(cancel.clone(), Arc::clone(&stop)),
+        ),
+    };
     let prepared = match crate::research::prepare_interactive_research(ctx.cwd) {
         Ok(Some(prepared)) => prepared,
         other => {
@@ -6819,7 +6822,6 @@ async fn drive_research(
         provider_id: runtime.active_provider_id().to_string(),
         vision_capable: runtime.active_accepts_images(),
     };
-    let cancel = CancellationToken::new();
     if matches!(begin, BeginWork::Own) {
         app.begin_work();
     }
@@ -6830,37 +6832,58 @@ async fn drive_research(
     app.apply_runtime(RuntimeUpdate::Notice(prepared.disclosure.clone()));
     draw_synchronized(terminal, app)?;
 
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let root = ctx.cwd.to_path_buf();
     let topic = topic.to_string();
     let conversation_topic = topic.clone();
-    let operation = {
-        let cancel = cancel.clone();
-        let stop = stop.clone();
-        async move {
-            let mut out: Vec<u8> = Vec::new();
-            let result = {
-                let run = crate::research::run_prepared_interactive_research(
-                    &root,
-                    &topic,
-                    prepared,
-                    stop.clone(),
-                    &launch_consent,
-                    &mut out,
-                );
-                tokio::pin!(run);
-                tokio::select! {
-                    res = &mut run => res,
-                    // Signal-then-await-partial: set the stop flag and keep awaiting so
-                    // the run returns a partial report; the future is never dropped mid-run.
-                    _ = cancel.cancelled() => {
-                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                        (&mut run).await
-                    }
-                }
-            };
-            (result, out)
-        }
+    // The run waits on its page questions synchronously (the egress policy is
+    // synchronous), so it runs on a thread of its own, never on this one, which
+    // has to keep drawing the question and reading the answer.
+    let runtime_handle = tokio::runtime::Handle::current();
+    let (done_tx, done_rx) = oneshot::channel();
+    let worker = ResearchWorker {
+        cancel: cancel.clone(),
+        stop: stop.clone(),
+        handle: {
+            let cancel = cancel.clone();
+            let stop = stop.clone();
+            tokio::task::spawn_blocking(move || {
+                let done = runtime_handle.block_on(async move {
+                    let mut out: Vec<u8> = Vec::new();
+                    let result = {
+                        let run = crate::research::run_prepared_interactive_research(
+                            &root,
+                            &topic,
+                            prepared,
+                            stop.clone(),
+                            &launch_consent,
+                            &mut out,
+                        );
+                        tokio::pin!(run);
+                        tokio::select! {
+                            res = &mut run => res,
+                            // Signal-then-await-partial: set the stop flag and keep awaiting so
+                            // the run returns a partial report; the future is never dropped mid-run.
+                            _ = cancel.cancelled() => {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                (&mut run).await
+                            }
+                        }
+                    };
+                    (result, out)
+                });
+                let _ = done_tx.send(done);
+            })
+        },
+    };
+    let operation = async move {
+        done_rx.await.unwrap_or_else(|_| {
+            (
+                Err(anyhow::anyhow!(
+                    "the research run stopped before it finished"
+                )),
+                Vec::new(),
+            )
+        })
     };
     let mut io = TerminalIo {
         poll: |timeout: Duration| event::poll(timeout),
@@ -6868,11 +6891,11 @@ async fn drive_research(
         draw: |app: &AppModel| draw_synchronized(terminal, app),
         event_driven: true,
     };
-    drive_fullscreen_operation(
+    let outcome = drive_fullscreen_operation(
         app,
         SlashContext {
-            approval_rx: &mut *ctx.approval_rx,
-            question_rx: &mut *ctx.question_rx,
+            approval_rx: &mut launch_rx,
+            question_rx: &mut page_rx,
             cwd: ctx.cwd,
             history: ctx.history,
             mouse_state: &mut *ctx.mouse_state,
@@ -6889,7 +6912,7 @@ async fn drive_research(
         queue,
         OperationKind::Command,
         EventLane::Bare,
-        QuestionMode::Inert,
+        QuestionMode::Serviced,
         ProgressLane::None,
         operation,
         |app: &mut AppModel,
@@ -6919,7 +6942,38 @@ async fn drive_research(
             app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
         },
     )
-    .await
+    .await;
+    // However the pump ended (the run finished, the session is closing, or the
+    // terminal failed), the run must not outlive it: close both consent
+    // channels, then stop the run and wait for it.
+    worker.stop();
+    drop(launch_rx);
+    drop(page_rx);
+    worker.join().await;
+    outcome
+}
+
+/// A research run on a blocking thread, owned by the operation that shows it.
+struct ResearchWorker {
+    handle: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ResearchWorker {
+    /// Tell the run to stop: it sends nothing new from here on, even a request
+    /// someone already allowed, and ends at its next boundary.
+    fn stop(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel.cancel();
+    }
+
+    /// Wait for the run to end. Called after [`Self::stop`] and after its
+    /// consent channels are closed, so whatever it still asks is refused rather
+    /// than waiting for an answer nobody can give.
+    async fn join(self) {
+        let _ = self.handle.await;
+    }
 }
 
 /// The resume-only ambient authority the pumped `/harness-resume` / `/wait-resume`
@@ -9830,6 +9884,12 @@ where
         }
     }
     .await;
+    // An operation abandoned by a terminal failure is cancelled before its
+    // open prompts are refused, as one the user exits is, so it learns it was
+    // abandoned before it sees the refusal.
+    if outcome.is_err() {
+        cancel.cancel();
+    }
     if let Some(thread) = input_thread.take() {
         thread.stop();
     }
@@ -12000,6 +12060,53 @@ mod tests {
             }],
             multi_select: false,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_pump_leaves_the_research_run_nothing_it_can_send() {
+        use localpilot_research::{ConsentAnswer, EgressApproval, EgressRequest};
+        let (page_tx, mut page_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handle = tokio::runtime::Handle::current();
+        let worker = ResearchWorker {
+            cancel: cancel.clone(),
+            stop: Arc::clone(&stop),
+            handle: {
+                let stop = Arc::clone(&stop);
+                let answers = Arc::clone(&answers);
+                tokio::task::spawn_blocking(move || {
+                    let _entered = handle.enter();
+                    let mut approval = crate::egress_consent::PromptedApproval::new(Arc::new(
+                        crate::interactive_session::research_page_prompter(page_tx),
+                    ));
+                    // A run that keeps finding new hosts until it is told to stop.
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let answer = approval.ask(&EgressRequest {
+                            host: "example.com",
+                            url: "https://example.com/a",
+                            purpose: "q",
+                        });
+                        answers.lock().unwrap().push(answer);
+                    }
+                })
+            },
+        };
+        // The pump shows the first question, then stops without answering it
+        // (the session closed, or the terminal failed).
+        let shown = page_rx.recv().await.expect("the first question is shown");
+        worker.stop();
+        drop(shown);
+        drop(page_rx);
+        worker.join().await;
+        assert!(cancel.is_cancelled());
+        let answers = answers.lock().unwrap();
+        assert!(!answers.is_empty());
+        assert!(
+            answers.iter().all(|answer| *answer == ConsentAnswer::Deny),
+            "nothing is allowed once the pump is gone: {answers:?}"
+        );
     }
 
     #[tokio::test]

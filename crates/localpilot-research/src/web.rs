@@ -143,6 +143,10 @@ pub struct WebAccess {
     /// Defaults to [`DenyWhenNobodyToAsk`], so a `WebAccess` built without
     /// wiring one up refuses rather than waves things through.
     approval: SharedApproval,
+    /// The run's stop request, **shared across clones**. Once it is set,
+    /// nothing new is sent: every request is refused as if web access were
+    /// off, including one a person has just allowed.
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl std::fmt::Debug for WebAccess {
@@ -171,7 +175,22 @@ impl WebAccess {
             disallowlist,
             allow_all: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             approval: shared_approval(DenyWhenNobodyToAsk),
+            stop: None,
         }
+    }
+
+    /// Stop sending anything once `stop` is set (a cancelled or abandoned
+    /// run). Checked before every request and again after every answer.
+    #[must_use]
+    pub fn with_stop(mut self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Record the operator's explicit per-session opt-in (the loud consent). A
@@ -187,7 +206,7 @@ impl WebAccess {
     /// **and** per-session consent granted.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.enabled && self.session_opt_in
+        self.enabled && self.session_opt_in && !self.stopped()
     }
 
     /// Attach the surface that asks a person. Without this, every request that
@@ -220,10 +239,16 @@ impl WebAccess {
                 let Ok(mut approval) = self.approval.lock() else {
                     return EgressOutcome::Skip;
                 };
-                match approval.ask(request) {
+                let answer = approval.ask(request);
+                drop(approval);
+                // The run may have been stopped while the person was deciding;
+                // a yes to a run that has ended sends nothing.
+                if self.stopped() {
+                    return EgressOutcome::Skip;
+                }
+                match answer {
                     ConsentAnswer::AllowOnce => EgressOutcome::Fetch,
                     ConsentAnswer::AllowSessionWide => {
-                        drop(approval);
                         self.grant_session_wide();
                         EgressOutcome::Fetch
                     }
@@ -619,6 +644,56 @@ mod consent_tests {
             access.decide(&request("allowed.example")),
             EgressOutcome::Fetch
         );
+    }
+
+    #[test]
+    fn a_stopped_run_sends_nothing_even_to_an_allowlisted_host() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut access = WebAccess::new(true, vec!["allowed.example".to_string()], Vec::new())
+            .with_stop(std::sync::Arc::clone(&stop));
+        access.grant_session();
+        let clone = access.clone();
+        assert_eq!(
+            access.decide(&request("allowed.example")),
+            EgressOutcome::Fetch
+        );
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(!access.is_active());
+        assert_eq!(
+            access.decide(&request("allowed.example")),
+            EgressOutcome::Off
+        );
+        assert_eq!(
+            clone.decide(&request("allowed.example")),
+            EgressOutcome::Off
+        );
+        assert_eq!(
+            access.decide_host("allowed.example"),
+            FetchDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn a_yes_given_after_the_run_stopped_sends_nothing() {
+        struct StopsWhileAsking(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl EgressApproval for StopsWhileAsking {
+            fn ask(&mut self, _request: &EgressRequest<'_>) -> ConsentAnswer {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                ConsentAnswer::AllowSessionWide
+            }
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut access = WebAccess::new(true, Vec::new(), Vec::new())
+            .with_stop(std::sync::Arc::clone(&stop))
+            .with_approval(shared_approval(StopsWhileAsking(std::sync::Arc::clone(
+                &stop,
+            ))));
+        access.grant_session();
+        assert_eq!(
+            access.decide(&request("unknown.example")),
+            EgressOutcome::Skip
+        );
+        assert!(!access.is_session_wide());
     }
 
     #[test]

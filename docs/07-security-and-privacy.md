@@ -937,7 +937,15 @@ construction:
   approving all of them. It is never persisted, and it does not lift
   `disallowlist`. Every refusal is **skipped and logged** exactly as a
   policy skip always was — a refusal nobody can see afterwards is not a
-  record of anything.
+  record of anything. In the fullscreen session the same three answers and
+  the same second question are asked in the session's own question dialog
+  (the research run waits on a thread of its own, so the screen keeps
+  drawing), and only the person at that terminal can answer: dismissing the
+  question, typing an answer of your own, or closing the session is a no.
+  Cancelling the run while a question is open (Ctrl+C) stops it: nothing more
+  is sent, not even to an allowlisted host, the skill repository search is
+  skipped, and the partial report is still written. Skill discovery's
+  repository search after a research run is asked the same way.
 - **One flag answers every prompt in advance** (ADR-0171).
   `--dangerously-skip-permissions` (aliases `--yolo`, `--full-auto`) pre-approves
   every tool permission request and every outbound request for the life of the

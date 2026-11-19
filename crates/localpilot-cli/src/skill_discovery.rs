@@ -392,8 +392,10 @@ pub async fn run_skill_research(
     global: bool,
     web: bool,
     style: &dyn SkillCatalogStyle,
+    egress: DiscoveryEgress,
     out: &mut dyn Write,
 ) -> anyhow::Result<SkillsOutcome> {
+    let DiscoveryEgress { approval, stop } = egress;
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
     let audit_log = config.research.web.audit_log.clone().map_or_else(
         || {
@@ -416,8 +418,19 @@ pub async fn run_skill_research(
         audit_log,
         autonomous_discovery: config.skills.autonomous_discovery,
         style,
+        approval,
+        stop,
     };
     run_discovery(root, query, global, web, &deps, out).await
+}
+
+/// Who answers discovery's requests to hosts no standing rule covers, and
+/// the calling run's stop request.
+pub struct DiscoveryEgress {
+    /// `None` refuses a request no standing rule covers.
+    pub approval: Option<localpilot_research::SharedApproval>,
+    /// Once set, nothing more is sent.
+    pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Injected dependencies for the discovery service, so the whole flow — local
@@ -434,6 +447,11 @@ struct DiscoveryDeps<'a> {
     audit_log: std::path::PathBuf,
     autonomous_discovery: bool,
     style: &'a dyn SkillCatalogStyle,
+    /// Who answers a request to a host no standing rule covers; `None`
+    /// refuses it.
+    approval: Option<localpilot_research::SharedApproval>,
+    /// The calling run's stop request: once set, nothing more is sent.
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The seam-injectable core of [`run_skill_research`].
@@ -490,13 +508,11 @@ async fn run_discovery(
         // stands and discovery reaches only pre-approved hosts.
         if crate::bypass::engaged() {
             access.grant_session_wide();
-        } else if crate::egress_consent::someone_to_ask() {
-            access = access.with_approval(localpilot_research::shared_approval(
-                crate::egress_consent::TerminalApproval::new(
-                    std::io::BufReader::new(std::io::stdin()),
-                    std::io::stderr(),
-                ),
-            ));
+        } else if let Some(approval) = deps.approval.clone() {
+            access = access.with_approval(approval);
+        }
+        if let Some(stop) = deps.stop.clone() {
+            access = access.with_stop(stop);
         }
         let cfg = WebDiscoveryConfig {
             access,
@@ -1026,6 +1042,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_stopped_during_validation_checks_no_further_repository() {
+        struct StopsAfterFirst {
+            inner: FakeFetcher,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            fetched: std::sync::Mutex<Vec<String>>,
+        }
+        impl RepoFetcher for StopsAfterFirst {
+            fn fetch(&self, url: &str, dest: &Path) -> Result<Snapshot, SkillError> {
+                self.fetched.lock().unwrap().push(url.to_string());
+                self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.inner.fetch(url, dest)
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = FakeProvider {
+            host: "github.com".to_string(),
+            urls: vec![
+                "https://github.com/one/skills".to_string(),
+                "https://github.com/two/skills".to_string(),
+            ],
+        };
+        let fetcher = StopsAfterFirst {
+            inner: FakeFetcher {
+                names: vec!["threejs-webgl".to_string()],
+                commit: "c0ffee1234".to_string(),
+            },
+            stop: Arc::clone(&stop),
+            fetched: std::sync::Mutex::new(Vec::new()),
+        };
+        let deps = DiscoveryDeps {
+            search: &provider,
+            fetcher: &fetcher,
+            home: Some(home),
+            web_enabled: true,
+            // Both candidates are pre-approved: only the stop can hold the
+            // second back.
+            allowlist: vec!["github.com".to_string(), "api.github.com".to_string()],
+            disallowlist: Vec::new(),
+            audit_log: root.join("egress-audit.log"),
+            autonomous_discovery: false,
+            style: &localpilot_skills::PlainSkillCatalogStyle,
+            approval: None,
+            stop: Some(Arc::clone(&stop)),
+        };
+        let mut buf = Vec::new();
+        run_discovery(&root, "threejs materials", false, true, &deps, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(
+            *fetcher.fetched.lock().unwrap(),
+            vec!["https://github.com/one/skills".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn end_to_end_threejs_discovers_recommends_saves_and_mutates_nothing() {
         // The #41 flagship acceptance case, fully hermetic: a configured provider
         // surfaces `freshtechbro/claudedesignskills`, the fetcher validates a catalog
@@ -1057,6 +1133,8 @@ mod tests {
                 .join("egress-audit.log"),
             autonomous_discovery: false,
             style: &localpilot_skills::PlainSkillCatalogStyle,
+            approval: None,
+            stop: None,
         };
         let mut buf = Vec::new();
         let outcome = run_discovery(

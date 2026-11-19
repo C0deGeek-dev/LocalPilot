@@ -17,6 +17,13 @@ is SemVer-stable; the configuration schema stability policy is in
   run whose backend was not allowed or could not start is a labelled local
   knowledge review.
 
+- Fixed: `/research` in the fullscreen session no longer freezes the screen
+  when a page or skill-discovery request needs your approval. The question
+  used to be read from the raw terminal behind the session; it is now asked in
+  the session's own question dialog with the same three answers (allow once,
+  deny, allow every request for the run, confirmed by a second question).
+  Dismissing it or closing the session denies the request.
+
 - `/research` takes candidate URLs only from real search results
   (LocalPilot#12, ADR-0290). The model no longer lists URLs from its own
   memory, which often invented or outdated links. With no search tool set up in

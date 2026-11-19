@@ -433,13 +433,13 @@ pub async fn run_research_command_with_config(
     } else if !config.research.web.enabled {
         // The inert source still prints the loud "disabled" disclosure.
         if let Ok(web_source) =
-            build_web_source(root, topic, config, admission, consent, out).await?
+            build_web_source(root, topic, config, admission, consent, stop.clone(), out).await?
         {
             sources.push(Box::new(web_source));
         }
         no_web = Some(NoWebReason::Disabled);
     } else {
-        match build_web_source(root, topic, config, admission, consent, out).await? {
+        match build_web_source(root, topic, config, admission, consent, stop.clone(), out).await? {
             Ok(web_source) => {
                 search = web_source.search.clone();
                 sources.push(Box::new(web_source));
@@ -570,9 +570,24 @@ pub async fn run_research_command_with_config(
     // recommendations are never research findings or memory candidates (they use a
     // separate proposal store, not the memory-candidate queue) (LocalHub#41).
     let skill_style = localpilot_skills::PlainSkillCatalogStyle;
-    if let Err(error) =
-        crate::skill_discovery::run_skill_research(root, topic, false, web_leg, &skill_style, out)
-            .await
+    if let Err(error) = crate::skill_discovery::run_skill_research(
+        root,
+        topic,
+        false,
+        // A cancelled or abandoned run makes no new request, the skill
+        // repository search included.
+        web_leg
+            && !stop_observer
+                .as_ref()
+                .is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Relaxed)),
+        &skill_style,
+        crate::skill_discovery::DiscoveryEgress {
+            approval: consent.page_approval(),
+            stop: stop_observer.clone(),
+        },
+        out,
+    )
+    .await
     {
         writeln!(out, "note: skill discovery skipped: {error}")?;
     }
@@ -1184,6 +1199,7 @@ async fn build_web_source(
     config: &Config,
     admission: Option<Arc<AdmissionJudge>>,
     consent: &SearchLaunchConsent,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     out: &mut dyn Write,
 ) -> anyhow::Result<Result<WebSource, NoWebReason>> {
     let web_config = &config.research.web;
@@ -1196,6 +1212,10 @@ async fn build_web_source(
         web_config.allowlist.clone(),
         web_config.disallowlist.clone(),
     );
+    // A stopped run sends nothing more, whoever has approved what.
+    if let Some(stop) = stop {
+        access = access.with_stop(stop);
+    }
     // A run launched with every prompt pre-approved has already answered this
     // one. The grant is session-wide from the start rather than asked for on the
     // first request — the flag exists precisely so nobody is interrupted.
@@ -1206,17 +1226,12 @@ async fn build_web_source(
     if crate::bypass::engaged() {
         access.grant_session_wide();
     }
-    // Otherwise, attach whoever will answer. With no terminal on both ends there
-    // is nobody to ask, and `WebAccess` already defaults to refusing in that
-    // case — so a piped or scheduled run reaches allowlisted hosts and nothing
-    // else.
-    else if crate::egress_consent::someone_to_ask() {
-        access = access.with_approval(localpilot_research::shared_approval(
-            crate::egress_consent::TerminalApproval::new(
-                std::io::BufReader::new(std::io::stdin()),
-                std::io::stderr(),
-            ),
-        ));
+    // Otherwise, attach whoever will answer: the full-screen session's own
+    // prompt, or the terminal. With nobody to ask, `WebAccess` already defaults
+    // to refusing — so a piped or scheduled run reaches allowlisted hosts and
+    // nothing else.
+    else if let Some(approval) = consent.page_approval() {
+        access = access.with_approval(approval);
     }
 
     write_research_disclosure(out, root, config)?;
@@ -1275,9 +1290,14 @@ fn build_renderer(_mode: localpilot_config::RenderMode) -> Option<Arc<dyn Render
 /// Only a person answers, and only on a channel that is theirs: never the
 /// permission profile, a pre-approval, bypass or a paired device.
 pub enum SearchLaunchConsent {
-    /// The fullscreen session's own approval prompt.
+    /// The fullscreen session's own prompts: `launch` answers whether a managed
+    /// backend may start, `pages` each request to a host no standing rule
+    /// covers.
     #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-    Ask(Arc<dyn localpilot_sandbox::Approver>),
+    Ask {
+        launch: Arc<dyn localpilot_sandbox::Approver>,
+        pages: localpilot_research::SharedApproval,
+    },
     /// A question on this terminal (a command-line run with a person present).
     Terminal,
     /// Nobody can be asked: only backends allowed to run unattended start.
@@ -1293,6 +1313,17 @@ impl SearchLaunchConsent {
             Self::Terminal
         } else {
             Self::Unattended
+        }
+    }
+
+    /// Who answers a request to a host no standing rule covers: the session's
+    /// prompt, the terminal, or nobody (refused).
+    #[must_use]
+    pub fn page_approval(&self) -> Option<localpilot_research::SharedApproval> {
+        match self {
+            Self::Ask { pages, .. } => Some(Arc::clone(pages)),
+            Self::Terminal => crate::egress_consent::terminal_approval(),
+            Self::Unattended => None,
         }
     }
 }
@@ -1339,7 +1370,9 @@ async fn connect_search_tools(
         let label = spec.label();
         if let Some(managed) = spec.managed.clone() {
             let allowed = match consent {
-                SearchLaunchConsent::Ask(approver) => {
+                SearchLaunchConsent::Ask {
+                    launch: approver, ..
+                } => {
                     let request = localpilot_sandbox::PermissionRequest {
                         tool: "research".to_string(),
                         effect: localpilot_sandbox::Effect::Network,
@@ -1599,12 +1632,26 @@ impl McpSearchProposer {
 
     /// Ask every designated tool for candidate URLs answering the redacted
     /// `query`. Returns the merged, order-preserving deduplicated URLs.
-    async fn propose(&self, query: &str, limit: usize, audit_log: &Path) -> Vec<String> {
+    /// `proceed` is asked before each backend is started and before each
+    /// query is sent: a stopped run asks no further backend.
+    async fn propose(
+        &self,
+        query: &str,
+        limit: usize,
+        audit_log: &Path,
+        proceed: &(dyn Fn() -> bool + Sync),
+    ) -> Vec<String> {
         let mut urls = Vec::new();
         for tool in &self.tools {
+            if !proceed() {
+                break;
+            }
             let Some(transport) = tool.transport(audit_log).await else {
                 continue;
             };
+            if !proceed() {
+                break;
+            }
             let (query, timeout) = tool.managed().map_or_else(
                 || {
                     (
@@ -2551,7 +2598,11 @@ impl Source for WebSource {
         // Candidates come only from real search results.
         let mut urls = Vec::new();
         if let Some(search) = &self.search {
-            urls.extend(search.propose(&query, limit, &self.audit_log).await);
+            urls.extend(
+                search
+                    .propose(&query, limit, &self.audit_log, &|| self.access.is_active())
+                    .await,
+            );
         }
         let mut seen = std::collections::HashSet::new();
         urls.retain(|url| seen.insert(url.clone()));
@@ -3250,10 +3301,28 @@ mod tests {
         let proposer = scripted_proposer("no results");
         let dir = tempfile::tempdir().unwrap();
         assert!(proposer
-            .propose("q", 5, &dir.path().join("audit.log"))
+            .propose("q", 5, &dir.path().join("audit.log"), &|| true)
             .await
             .is_empty());
         assert!(proposer.usable().await);
+    }
+
+    fn no_pages() -> localpilot_research::SharedApproval {
+        localpilot_research::shared_approval(localpilot_research::DenyWhenNobodyToAsk)
+    }
+
+    #[test]
+    fn page_questions_go_to_the_sessions_prompt_or_to_nobody() {
+        let pages = no_pages();
+        let ask = SearchLaunchConsent::Ask {
+            launch: RecordingApprover::new(&[]),
+            pages: Arc::clone(&pages),
+        };
+        let Some(given) = ask.page_approval() else {
+            panic!("the session's prompt answers page questions");
+        };
+        assert!(Arc::ptr_eq(&given, &pages));
+        assert!(SearchLaunchConsent::Unattended.page_approval().is_none());
     }
 
     #[tokio::test]
@@ -3262,7 +3331,10 @@ mod tests {
         let audit_log = dir.path().join("audit.log");
         // Declined: no tool, and the reason says it was not allowed.
         let approver = RecordingApprover::new(&[false]);
-        let consent = SearchLaunchConsent::Ask(approver.clone());
+        let consent = SearchLaunchConsent::Ask {
+            launch: approver.clone(),
+            pages: no_pages(),
+        };
         let mut out = Vec::new();
         let declined = connect_search_tools(&managed_config(true), &consent, &audit_log, &mut out)
             .await
@@ -3279,7 +3351,10 @@ mod tests {
         assert!(asked[0].contains("this run only"), "{}", asked[0]);
         // Allowed: the tool is ready but nothing has started yet.
         let approver = RecordingApprover::new(&[true]);
-        let consent = SearchLaunchConsent::Ask(approver);
+        let consent = SearchLaunchConsent::Ask {
+            launch: approver,
+            pages: no_pages(),
+        };
         let mut out = Vec::new();
         let allowed = connect_search_tools(&managed_config(false), &consent, &audit_log, &mut out)
             .await
@@ -3331,10 +3406,10 @@ mod tests {
             }],
         };
         let urls = proposer
-            .propose("how does tokio schedule tasks", 5, &audit_log)
+            .propose("how does tokio schedule tasks", 5, &audit_log, &|| true)
             .await;
         assert_eq!(urls, vec!["https://docs.rs/tokio"]);
-        proposer.propose("again", 5, &audit_log).await;
+        proposer.propose("again", 5, &audit_log, &|| true).await;
         assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
         let sent: Vec<_> = transport
             .calls()
@@ -3378,8 +3453,14 @@ mod tests {
                 })),
             }],
         };
-        assert!(proposer.propose("q", 5, &audit_log).await.is_empty());
-        assert!(proposer.propose("q", 5, &audit_log).await.is_empty());
+        assert!(proposer
+            .propose("q", 5, &audit_log, &|| true)
+            .await
+            .is_empty());
+        assert!(proposer
+            .propose("q", 5, &audit_log, &|| true)
+            .await
+            .is_empty());
         assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 0);
         let audit = std::fs::read_to_string(&audit_log).unwrap();
         assert_eq!(
@@ -5218,6 +5299,7 @@ mod tests {
             &config,
             None,
             &SearchLaunchConsent::Unattended,
+            None,
             &mut out,
         )
         .await
@@ -5283,6 +5365,102 @@ mod tests {
         assert!(
             log.contains("decision=allowed"),
             "the fetch is audited: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_mid_gather_requests_no_further_page_even_an_allowlisted_one() {
+        struct StopsWhenServed(Arc<std::sync::atomic::AtomicBool>);
+        impl wiremock::Respond for StopsWhenServed {
+            fn respond(&self, _request: &wiremock::Request) -> wiremock::ResponseTemplate {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("skin matrices first page")
+            }
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/first"))
+            .respond_with(StopsWhenServed(Arc::clone(&stop)))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::path("/second"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string("skin matrices second page"),
+            )
+            .mount(&server)
+            .await;
+        let first = format!("{}/first", server.uri());
+        let second = format!("{}/second", server.uri());
+        let host = parse_host(&first).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec![host], Vec::new()).with_stop(Arc::clone(&stop));
+        access.grant_session();
+        let source = WebSource::new(
+            "test topic",
+            localpilot_config::RenderMode::Off,
+            access,
+            audit.clone(),
+            Some(scripted_proposer(&format!(
+                "Result\n   URL: {first}\nResult\n   URL: {second}\n"
+            ))),
+            None,
+        )
+        .unwrap();
+        source.gather("how do skin matrices work", 3).await.unwrap();
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect();
+        assert_eq!(paths, vec!["/first".to_string()], "nothing after the stop");
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(!log.contains("/second"), "{log}");
+        // Stopped before a sub-question: not even the search is sent.
+        let before = std::fs::read_to_string(&audit).unwrap();
+        source.gather("another question", 3).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&audit).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_during_one_search_asks_no_further_backend() {
+        let first = Arc::new(localpilot_mcp::ScriptedTransport::new().with(
+            "tools/call",
+            serde_json::json!({ "content": [{ "type": "text", "text": "URL: https://a.example/x\n" }] }),
+        ));
+        let second = Arc::new(localpilot_mcp::ScriptedTransport::new().with(
+            "tools/call",
+            serde_json::json!({ "content": [{ "type": "text", "text": "URL: https://b.example/y\n" }] }),
+        ));
+        let proposer = McpSearchProposer {
+            tools: vec![
+                DesignatedSearchTool::connected(
+                    "first.search".to_string(),
+                    "search".to_string(),
+                    first.clone(),
+                ),
+                DesignatedSearchTool::connected(
+                    "second.search".to_string(),
+                    "search".to_string(),
+                    second.clone(),
+                ),
+            ],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // The run is stopped while the first backend is answering.
+        let first_seen = Arc::clone(&first);
+        let proceed = move || first_seen.calls().is_empty();
+        let urls = proposer
+            .propose("q", 5, &dir.path().join("audit.log"), &proceed)
+            .await;
+        assert_eq!(urls, vec!["https://a.example/x"]);
+        assert!(
+            second.calls().is_empty(),
+            "the second backend is never asked"
         );
     }
 

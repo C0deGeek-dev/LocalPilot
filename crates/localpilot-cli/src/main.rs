@@ -3062,6 +3062,10 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                         global,
                         !no_web,
                         &style,
+                        crate::skill_discovery::DiscoveryEgress {
+                            approval: crate::egress_consent::terminal_approval(),
+                            stop: None,
+                        },
                         &mut stdout,
                     )
                     .await?
