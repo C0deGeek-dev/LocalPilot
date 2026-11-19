@@ -4046,6 +4046,7 @@ fn render_dialog(
             tool,
             risk_class,
             incognito_creation,
+            lasting_grant,
             ..
         } => {
             let mut lines = vec![
@@ -4077,10 +4078,11 @@ fn render_dialog(
                 ));
             }
             lines.push(Line::styled(
-                if app.dialog_peer().is_some() {
-                    "Ctrl+C abort · Y allow once · N or Esc deny"
-                } else {
-                    "Y allow once · N deny · F6 remote"
+                match (app.dialog_peer().is_some(), *lasting_grant) {
+                    (true, false) => "Ctrl+C abort · Y allow once · N or Esc deny",
+                    (true, true) => "Ctrl+C abort · Y allow for this session · N or Esc deny",
+                    (false, false) => "Y allow once · N deny · F6 remote",
+                    (false, true) => "Y allow for this session · N deny · F6 remote",
                 },
                 theme.ui(UiRole::Muted),
             ));
@@ -4352,6 +4354,7 @@ fn render_screen_reader_dialog(
             tool,
             risk_class,
             incognito_creation,
+            lasting_grant,
             ..
         } => {
             let mut lines = vec![
@@ -4379,7 +4382,14 @@ fn render_screen_reader_dialog(
                     theme.ui(UiRole::Muted),
                 ));
             }
-            lines.push(Line::styled("Y allow once", theme.ui(UiRole::Foreground)));
+            lines.push(Line::styled(
+                if *lasting_grant {
+                    "Y allow for this session"
+                } else {
+                    "Y allow once"
+                },
+                theme.ui(UiRole::Foreground),
+            ));
             lines.push(Line::styled(
                 if app.dialog_peer().is_some() {
                     "N or Esc deny · Ctrl+C abort"
@@ -5539,6 +5549,7 @@ mod tests {
             target: "target".to_string(),
             risk_class: "test".to_string(),
             incognito_creation: false,
+            lasting_grant: false,
         });
         assert!(!app.pairing_shown());
         let text = rows_without_spaces(&screen_text(&app, 100, 40));
@@ -5837,6 +5848,7 @@ mod tests {
             target: "target".to_string(),
             risk_class: "test".to_string(),
             incognito_creation: false,
+            lasting_grant: false,
         });
         assert!(!app.pairing_shown(), "suspended under an ask");
         app.dialog = None;
@@ -7373,6 +7385,41 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("Permission required"));
         assert!(rendered.contains("Y allow once · N deny"));
+    }
+
+    #[test]
+    fn a_session_long_grant_says_so_on_both_layouts() {
+        for screen_reader in [false, true] {
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.request_session_approval("fetch", "Allow web access to example.com?", "network");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw approval dialog");
+            let rendered = terminal.backend().to_string();
+            assert!(
+                rendered.contains("Y allow for this session"),
+                "screen_reader={screen_reader}: {rendered}"
+            );
+            assert!(!rendered.contains("allow once"), "{rendered}");
+
+            let mut generic = model();
+            generic.capabilities.screen_reader = screen_reader;
+            generic.request_approval("fetch", "https://example.com/", "network");
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &generic);
+                })
+                .expect("draw approval dialog");
+            let rendered = terminal.backend().to_string();
+            assert!(rendered.contains("Y allow once"), "{rendered}");
+        }
     }
 
     fn approval_frame(

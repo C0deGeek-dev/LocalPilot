@@ -37,7 +37,7 @@ pub use broker::{
 };
 pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadImage,
-    ReadToolOutput, ReplaceInFile, SearchText, WriteFile,
+    ReadToolOutput, ReplaceInFile, SearchText, WebSearch, WriteFile, NO_SEARCH_INDEX,
 };
 pub use builtins_ask::{AskUser, ASK_USER};
 pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
@@ -74,4 +74,7 @@ pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,
     MalformedClass, SchemaIssue,
 };
-pub use web::{redact_url, WebContext, WebFetchRequest, WebGateway, WebPage, WebRefusal};
+pub use web::{
+    redact_url, WebContext, WebFetchRequest, WebGateway, WebPage, WebRefusal, WebSearchRequest,
+    WebSearchResults,
+};

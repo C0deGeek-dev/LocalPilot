@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 /// provider adapter adds its own wrapper around each schema). A component
 /// check; the CLI's default registry, LocalMind tools included, has its own
 /// gate. Measured at 15,628 bytes once generated annotations were removed and
-/// the longest descriptions tightened.
-const TOOL_SPEC_CEILING: usize = 16_000;
+/// the longest descriptions tightened, and at 16,352 once `web_search` joined
+/// the built-in set.
+const TOOL_SPEC_CEILING: usize = 16_600;
 /// Ceiling for the agent system prompt of a default session in an empty
 /// workspace (no instruction files, no hooks). Measured at 2,499 bytes after
 /// the prompt was rewritten (3,919 before), and at 2,605 on Windows once it

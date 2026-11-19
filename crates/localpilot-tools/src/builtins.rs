@@ -20,7 +20,7 @@ use crate::tool::{
     detail_preview, parse_input, schema_for, FileReadLimits, Tool, ToolContext, ToolOutput,
 };
 use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
-use crate::web::WebFetchRequest;
+use crate::web::{WebFetchRequest, WebSearchRequest};
 use localpilot_core::{ToolImage, ToolOutcome};
 
 /// Approval detail from a single string field of the input. Tools know their
@@ -1950,6 +1950,110 @@ impl Tool for Fetch {
             ToolOutcome::ReportedFailure
         };
         Ok(result)
+    }
+}
+
+// --- web_search ---------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WebSearchInput {
+    /// What to search the web for.
+    query: String,
+    /// Most result links to return.
+    #[serde(default)]
+    max_results: Option<usize>,
+}
+
+/// What `web_search` says when there is no search index to use.
+pub const NO_SEARCH_INDEX: &str = "No web search index is set up here, so nothing \
+was searched. To search from chat, add a search-capable MCP server under [mcp.servers] \
+and name its search tool in [research.mcp] tools = [{ server = \"...\", tool = \"...\" }]. \
+Meanwhile, fetch can retrieve a page whose address you already know, and \
+`/research <topic>` runs a researched answer.";
+
+pub struct WebSearch;
+
+#[async_trait]
+impl Tool for WebSearch {
+    fn name(&self) -> &'static str {
+        "web_search"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Search the web; returns result links to fetch.",
+            side_effect: SideEffectClass::Network,
+            reversibility: Reversibility::Reversible,
+            idempotency: Idempotency::Idempotent,
+            verification: VerificationMethod::Unverifiable,
+            ..ToolContract::default()
+        }
+    }
+    fn approval_detail(&self, input: &Value) -> String {
+        // This text is shown in progress events and on the shared approval
+        // channel; the words of the query stay on the host's own consent prompt.
+        input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("a web search ({} characters)", query.chars().count()))
+            .unwrap_or_default()
+    }
+    fn description(&self) -> &'static str {
+        "Search the web for pages; returns result links to read with fetch."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<WebSearchInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: WebSearchInput = parse_input(input)?;
+        if input.query.trim().is_empty() {
+            return Err(ToolError::InvalidInput(
+                "query must not be empty".to_string(),
+            ));
+        }
+        // Nothing can leave the machine: explain instead of asking first.
+        let ready = ctx
+            .web
+            .is_some_and(|web| web.gateway.search_ready(web.incognito));
+        Ok(if ready {
+            vec![Effect::Network]
+        } else {
+            Vec::new()
+        })
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: WebSearchInput = parse_input(&input)?;
+        let Some(web) = ctx.web else {
+            return Ok(reported_failure(&format!(
+                "Web access is not available in this session. {NO_SEARCH_INDEX}"
+            )));
+        };
+        let request = WebSearchRequest {
+            query: input.query,
+            max_results: input.max_results,
+            tool: self.name().to_string(),
+            interactivity: ctx.interactivity,
+            trusted: ctx.trusted,
+        };
+        let results = match web.gateway.search(request, web).await {
+            Ok(results) => results,
+            Err(refusal) => return Ok(reported_failure(refusal.message())),
+        };
+        if results.leads.is_empty() {
+            return Ok(reported_failure(&format!(
+                "The search ({}) returned no result links.",
+                results.backends.join(", ")
+            )));
+        }
+        let mut text = format!(
+            "Search result links from {} — untrusted leads: read a page with fetch \
+             before relying on it.\n",
+            results.backends.join(", ")
+        );
+        for (index, lead) in results.leads.iter().enumerate() {
+            text.push_str(&format!("{}. {lead}\n", index + 1));
+        }
+        Ok(cap(text))
     }
 }
 

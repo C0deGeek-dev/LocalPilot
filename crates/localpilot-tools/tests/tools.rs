@@ -371,7 +371,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 25);
+    assert_eq!(registry.names().len(), 26);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -2061,6 +2061,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
 /// A host gateway that answers from a fixed page and remembers what it was asked.
 struct CannedWeb {
     page: Result<localpilot_tools::WebPage, localpilot_tools::WebRefusal>,
+    search_ready: bool,
     seen: std::sync::Mutex<Vec<localpilot_tools::WebFetchRequest>>,
 }
 
@@ -2074,6 +2075,7 @@ impl CannedWeb {
                 body: body.to_string(),
                 truncated: false,
             }),
+            search_ready: false,
             seen: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -2088,6 +2090,18 @@ impl localpilot_tools::WebGateway for CannedWeb {
     ) -> Result<localpilot_tools::WebPage, localpilot_tools::WebRefusal> {
         self.seen.lock().unwrap().push(request);
         self.page.clone()
+    }
+    async fn search(
+        &self,
+        _request: localpilot_tools::WebSearchRequest,
+        _context: localpilot_tools::WebContext<'_>,
+    ) -> Result<localpilot_tools::WebSearchResults, localpilot_tools::WebRefusal> {
+        Err(localpilot_tools::WebRefusal::NoSearchBackend(
+            "none".to_string(),
+        ))
+    }
+    fn search_ready(&self, _incognito: bool) -> bool {
+        self.search_ready
     }
     fn reset_consent(&self) {}
 }
@@ -2286,6 +2300,60 @@ async fn fetch_approval_prompt_leaves_secrets_out_of_the_url() {
         .await;
     let seen = approver.seen();
     assert_eq!(seen[0].detail, "https://example.invalid/doc?token=redacted");
+}
+
+#[tokio::test]
+async fn web_search_without_web_access_explains_with_no_permission_question() {
+    let (_dir, ws) = workspace_with(&[]);
+    let approver = RecordingApprover::new();
+    let call = ToolCall::new(
+        ToolUseId::from("c1"),
+        "web_search",
+        json!({ "query": "rust" }),
+    );
+    let result = ToolRegistry::with_builtins()
+        .dispatch(
+            &call,
+            &ctx(&ws, Interactivity::Interactive, true),
+            &default_engine(),
+            &approver,
+        )
+        .await;
+    assert!(result.is_error());
+    assert!(
+        result.output.contains("No web search index"),
+        "{}",
+        result.output
+    );
+    assert!(result.output.contains("fetch"), "{}", result.output);
+    assert!(result.output.contains("/research"), "{}", result.output);
+    assert!(
+        approver.seen().is_empty(),
+        "nothing could leave, so nothing is asked"
+    );
+}
+
+#[tokio::test]
+async fn web_search_progress_text_leaves_the_query_out() {
+    let mut web = CannedWeb::page(200, "");
+    web.search_ready = true;
+    let (_dir, ws) = workspace_with(&[]);
+    let mut c = ctx(&ws, Interactivity::Interactive, true);
+    c.web = Some(localpilot_tools::WebContext {
+        gateway: &web,
+        incognito: false,
+    });
+    let approver = RecordingApprover::new();
+    let call = ToolCall::new(
+        ToolUseId::from("c1"),
+        "web_search",
+        json!({ "query": "private project codename" }),
+    );
+    let _ = ToolRegistry::with_builtins()
+        .dispatch(&call, &c, &default_engine(), &approver)
+        .await;
+    let seen = approver.seen();
+    assert_eq!(seen[0].detail, "a web search (24 characters)");
 }
 
 #[tokio::test]

@@ -1464,6 +1464,7 @@ mod tests {
                     target: format!("{tool}-target"),
                     risk_class: format!("{tool}-risk"),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             },

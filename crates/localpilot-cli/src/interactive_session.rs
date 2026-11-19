@@ -35,6 +35,9 @@ pub(crate) struct ApprovalRequest {
     /// this typed signal with its live incognito state to show the acknowledgement
     /// copy only for approvals raised by the incognito creation floor.
     pub(crate) may_create_files: bool,
+    /// A yes lasts for the rest of the session (web consent), so the prompt
+    /// must not call it a one-time answer.
+    pub(crate) lasting_grant: bool,
 }
 
 /// A pending approval handed from the runtime to an interactive host.
@@ -59,11 +62,17 @@ pub(crate) struct QuestionCall {
 pub(crate) struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalCall>,
     asks: Option<localpilot_rpc::AskRegistry>,
+    /// Every yes this approver collects lasts for the session.
+    lasting: bool,
 }
 
 impl TuiApprover {
     pub(crate) fn new(tx: mpsc::UnboundedSender<ApprovalCall>) -> Self {
-        Self { tx, asks: None }
+        Self {
+            tx,
+            asks: None,
+            lasting: false,
+        }
     }
 
     /// An approver that also opens every ask in `asks`.
@@ -74,6 +83,7 @@ impl TuiApprover {
         Self {
             tx,
             asks: Some(asks),
+            lasting: false,
         }
     }
 }
@@ -84,8 +94,10 @@ impl Approver for TuiApprover {
         request: &'a PermissionRequest,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let (reply, answer) = oneshot::channel();
+        let mut described = describe(request);
+        described.lasting_grant = self.lasting;
         let sent = self.tx.send(ApprovalCall {
-            request: describe(request),
+            request: described,
             reply,
         });
         let Some(asks) = &self.asks else {
@@ -954,7 +966,11 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
 /// registry other devices answer from, and a closed or abandoned prompt is a
 /// refusal.
 fn web_consent_approver(tx: mpsc::UnboundedSender<ApprovalCall>) -> TuiApprover {
-    TuiApprover::new(tx)
+    TuiApprover {
+        tx,
+        asks: None,
+        lasting: true,
+    }
 }
 
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
@@ -974,6 +990,7 @@ fn describe(request: &PermissionRequest) -> ApprovalRequest {
         target,
         risk_class: risk_class.to_string(),
         may_create_files: request.effect.may_create_files(),
+        lasting_grant: false,
     }
 }
 
@@ -1786,6 +1803,7 @@ mod tests {
                     target: "A".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -2230,6 +2248,10 @@ mod tests {
             call = approvals.recv() => call.expect("asked on the local prompt"),
             answer = &mut consent => panic!("answered before the person did: {answer}"),
         };
+        assert!(
+            call.request.lasting_grant,
+            "the prompt must say a yes lasts for the session"
+        );
         // The prompt goes away unanswered (cancelled, or the screen closed).
         drop(call);
         assert!(!consent.await);

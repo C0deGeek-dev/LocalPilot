@@ -1058,6 +1058,14 @@ difference:
   proxy, bounded in time and size, and recorded first in the research egress
   audit log with secrets stripped from the URL. A `fetch` of this machine
   (`localhost`, loopback) stays local and needs no consent.
+- **The builtin `web_search` tool** sends a redacted, length-bounded query to
+  the search tools designated under `[research.mcp]`, under the same chat web
+  setting, host restriction and incognito refusal. Consent is asked once per
+  search server per session and says later queries go there without another
+  question; the server process is started only after that consent. The audit
+  log records the server, the decision and the result count, never the query.
+  A designated server is a local program with its own network access, so the
+  web deny list and address checks do not govern what it contacts.
 - **MCP tool servers** are gated as `Effect::Network` when invoked, but a stdio
   MCP server is a local process that can do anything its own code does — the gate
   covers *invoking the tool*, not what the server then reaches. Trust an MCP

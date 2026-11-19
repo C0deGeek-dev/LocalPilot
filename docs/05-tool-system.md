@@ -544,6 +544,39 @@ Rules:
 - a non-2xx response is returned with its body as a reported failure
 - output is redacted like every other tool result
 
+### `web_search`
+
+Searches the web through the search tools the user designated under
+`[research.mcp]` and returns result links (URLs only) as untrusted leads to read
+with `fetch`.
+
+Rules:
+
+- with no web gateway, with web access off, in an incognito session, or with no
+  designated search tool, nothing can leave the machine: the tool declares no
+  network effect (so no permission question comes first) and explains that no
+  search index is set up, how to designate one, that `fetch` retrieves a known
+  address, and that `/research <topic>` exists
+- otherwise it declares a network effect, and the gateway asks once per search
+  server per session (naming the server, the tool and the query, and saying
+  later queries go there without another question), on the same local-only
+  consent prompt as `fetch`
+- the query has secrets removed and is length-bounded before it is sent; the
+  generic permission question and progress line show only its length, and the
+  words appear only on the local consent prompt
+- once the requested number of links is reached, later search servers are
+  neither started nor sent the query
+- the server is started only after consent, once per session, and again after
+  a broken connection or a new session; the ordinary MCP tool servers are
+  unaffected
+- an audit line (server and decision; result count afterwards; never the query)
+  is written before anything starts or is sent, and a failed write stops the
+  search
+- leads keep backend order, drop duplicates and anything that is not an http or
+  https address without credentials, and are capped
+- the configured server is a local program with its own network access; the
+  web deny list does not apply to what it contacts
+
 ### `run_shell`
 
 Runs a shell command.

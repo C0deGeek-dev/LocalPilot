@@ -36,6 +36,16 @@ impl WebGateway for Observing {
         self.incognito_seen.lock().unwrap().push(context.incognito);
         Err(WebRefusal::Declined("not in this test".to_string()))
     }
+    async fn search(
+        &self,
+        _request: localpilot_tools::WebSearchRequest,
+        _context: WebContext<'_>,
+    ) -> Result<localpilot_tools::WebSearchResults, WebRefusal> {
+        Err(WebRefusal::NoSearchBackend("not in this test".to_string()))
+    }
+    fn search_ready(&self, _incognito: bool) -> bool {
+        false
+    }
     fn reset_consent(&self) {
         self.resets.fetch_add(1, Ordering::SeqCst);
     }

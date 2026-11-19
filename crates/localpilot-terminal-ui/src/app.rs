@@ -1487,6 +1487,9 @@ pub enum DialogState {
         /// This approval was raised by the incognito file-creation floor. The
         /// renderer shows the durable-side-effect warning at the decision point.
         incognito_creation: bool,
+        /// A yes lasts for the rest of the session rather than this one
+        /// request (web consent). The renderer names that scope on the key.
+        lasting_grant: bool,
     },
     Question(QuestionDialog),
 }
@@ -5172,7 +5175,19 @@ impl AppModel {
         incognito_creation: bool,
     ) {
         let peer = self.active_pair_pane();
-        self.install_approval(peer, tool, target, risk_class, incognito_creation);
+        self.install_approval(peer, tool, target, risk_class, incognito_creation, false);
+    }
+
+    /// Open an approval whose yes lasts for the rest of the session (web
+    /// consent for one site or search server), so the key says so.
+    pub fn request_session_approval(
+        &mut self,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+    ) {
+        let peer = self.active_pair_pane();
+        self.install_approval(peer, tool, target, risk_class, false, true);
     }
 
     /// Opens an approval attributed to one named peer and makes that peer the
@@ -5186,13 +5201,37 @@ impl AppModel {
         target: impl Into<String>,
         risk_class: impl Into<String>,
     ) -> bool {
+        self.install_approval_for(peer, tool, target, risk_class, false)
+    }
+
+    /// As [`Self::request_approval_for`], for an approval whose yes lasts for
+    /// the rest of that peer's session (web consent).
+    #[must_use]
+    pub fn request_session_approval_for(
+        &mut self,
+        peer: PeerPane,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+    ) -> bool {
+        self.install_approval_for(peer, tool, target, risk_class, true)
+    }
+
+    fn install_approval_for(
+        &mut self,
+        peer: PeerPane,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+        lasting_grant: bool,
+    ) -> bool {
         if self.dialog.is_some() || self.projections.projection(peer).is_none() {
             return false;
         }
         if self.active_pair_pane() != Some(peer) && !self.select_pair_pane(peer) {
             return false;
         }
-        self.install_approval(Some(peer), tool, target, risk_class, false);
+        self.install_approval(Some(peer), tool, target, risk_class, false, lasting_grant);
         true
     }
 
@@ -5203,6 +5242,7 @@ impl AppModel {
         target: impl Into<String>,
         risk_class: impl Into<String>,
         incognito_creation: bool,
+        lasting_grant: bool,
     ) {
         self.claim_dialog_focus();
         self.dialog_peer = peer;
@@ -5211,6 +5251,7 @@ impl AppModel {
             target: sanitize_inline(&target.into()),
             risk_class: sanitize_inline(&risk_class.into()),
             incognito_creation,
+            lasting_grant,
         });
     }
 
@@ -10045,6 +10086,7 @@ mod tests {
                 target: "target".to_string(),
                 risk_class: "write".to_string(),
                 incognito_creation: false,
+                lasting_grant: false,
             })
         );
     }

@@ -41,6 +41,30 @@ pub struct WebFetchRequest {
     pub trusted: bool,
 }
 
+/// One web search a tool asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSearchRequest {
+    /// What to search for. The gateway removes secrets before sending it.
+    pub query: String,
+    /// The most leads wanted; the gateway applies its own ceiling.
+    pub max_results: Option<usize>,
+    /// The tool asking, named in the consent question.
+    pub tool: String,
+    /// Whether a person can be asked right now.
+    pub interactivity: Interactivity,
+    /// Whether the workspace is trusted.
+    pub trusted: bool,
+}
+
+/// What a web search found: addresses worth retrieving, not facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSearchResults {
+    /// The search backends that answered, in the order they were asked.
+    pub backends: Vec<String>,
+    /// Result addresses in backend order, without duplicates.
+    pub leads: Vec<String>,
+}
+
 /// A retrieved page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebPage {
@@ -73,6 +97,8 @@ pub enum WebRefusal {
     Blocked(String),
     /// The request was allowed but did not complete.
     Failed(String),
+    /// No search backend is set up, so there is nothing to search with.
+    NoSearchBackend(String),
 }
 
 impl WebRefusal {
@@ -85,7 +111,8 @@ impl WebRefusal {
             | Self::NobodyToAsk(message)
             | Self::Declined(message)
             | Self::Blocked(message)
-            | Self::Failed(message) => message,
+            | Self::Failed(message)
+            | Self::NoSearchBackend(message) => message,
         }
     }
 }
@@ -100,6 +127,19 @@ pub trait WebGateway: Send + Sync {
         request: WebFetchRequest,
         context: WebContext<'_>,
     ) -> Result<WebPage, WebRefusal>;
+
+    /// Search the web through the backends the user set up, asking for consent
+    /// and writing the audit record as the host's rules require.
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        context: WebContext<'_>,
+    ) -> Result<WebSearchResults, WebRefusal>;
+
+    /// Whether a search could leave this machine at all right now. When it
+    /// cannot (web access off, incognito, no backend set up) the search tool
+    /// explains instead, with no permission question first.
+    fn search_ready(&self, incognito: bool) -> bool;
 
     /// Forget every consent given in this session. Called when the session
     /// changes (a new session, entering or leaving incognito).

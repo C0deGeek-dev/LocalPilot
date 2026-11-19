@@ -404,12 +404,22 @@ impl PairTerminalAdapter {
         }
         match request {
             PairAskRequest::Approval(request) => {
-                if app.request_approval_for(
-                    pair_pane(peer),
-                    request.tool,
-                    request.target,
-                    request.risk_class,
-                ) {
+                let shown = if request.lasting_grant {
+                    app.request_session_approval_for(
+                        pair_pane(peer),
+                        request.tool,
+                        request.target,
+                        request.risk_class,
+                    )
+                } else {
+                    app.request_approval_for(
+                        pair_pane(peer),
+                        request.tool,
+                        request.target,
+                        request.risk_class,
+                    )
+                };
+                if shown {
                     self.dialog = Some(PairDialog::Approval { id });
                     PairHostAction::None
                 } else {
@@ -9751,13 +9761,21 @@ where
                     if let Some(text) = paste_burst.flush_pending() {
                         let _ = app.handle_input(InputAction::Paste(text), 1);
                     }
-                    let incognito_creation = app.incognito() && call.request.may_create_files;
-                    app.request_approval_with_incognito_creation(
-                        call.request.tool,
-                        call.request.target,
-                        call.request.risk_class,
-                        incognito_creation,
-                    );
+                    if call.request.lasting_grant {
+                        app.request_session_approval(
+                            call.request.tool,
+                            call.request.target,
+                            call.request.risk_class,
+                        );
+                    } else {
+                        let incognito_creation = app.incognito() && call.request.may_create_files;
+                        app.request_approval_with_incognito_creation(
+                            call.request.tool,
+                            call.request.target,
+                            call.request.risk_class,
+                            incognito_creation,
+                        );
+                    }
                     pending = Some(call.reply);
                     render_needed = true;
                 }
@@ -14032,6 +14050,42 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_web_consent_ask_keeps_its_session_scope_on_the_requesting_pane() {
+        for lasting_grant in [false, true] {
+            let mut app = pair_app();
+            let mut adapter = PairTerminalAdapter::new();
+            let install = adapter.apply_pump_event(
+                &mut app,
+                PairPumpEvent::Ask(PairAsk {
+                    id: PairAskId::fixture(9),
+                    peer: PairPeer::B,
+                    request: PairAskRequest::Approval(
+                        crate::interactive_session::ApprovalRequest {
+                            tool: "fetch".to_string(),
+                            target: "Allow web access to example.com?".to_string(),
+                            risk_class: "network".to_string(),
+                            may_create_files: false,
+                            lasting_grant,
+                        },
+                    ),
+                }),
+            );
+            assert!(matches!(install, PairHostAction::None));
+            assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+            assert_eq!(
+                app.dialog,
+                Some(localpilot_terminal_ui::DialogState::Approval {
+                    tool: "fetch".to_string(),
+                    target: "Allow web access to example.com?".to_string(),
+                    risk_class: "network".to_string(),
+                    incognito_creation: false,
+                    lasting_grant,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn pair_terminal_adapter_attributes_and_steps_one_exact_question_vector() {
         let mut app = pair_app();
         let mut adapter = PairTerminalAdapter::new();
@@ -17470,6 +17524,7 @@ mod tests {
                         target: "fixture".to_string(),
                         risk_class: "test".to_string(),
                         may_create_files: false,
+                        lasting_grant: false,
                     },
                     reply,
                 })
@@ -20067,6 +20122,7 @@ mod tests {
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -20117,6 +20173,7 @@ mod tests {
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -20167,6 +20224,7 @@ mod tests {
                 target: target.to_string(),
                 risk_class: "test".to_string(),
                 may_create_files: false,
+                lasting_grant: false,
             },
             reply,
         };
@@ -20315,6 +20373,7 @@ mod tests {
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -20716,6 +20775,7 @@ mod tests {
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -20762,6 +20822,7 @@ mod tests {
                     target: "fixture".to_string(),
                     risk_class: "test".to_string(),
                     may_create_files: false,
+                    lasting_grant: false,
                 },
                 reply,
             })
@@ -25587,6 +25648,7 @@ last_seen = "2026-08-10"
                 target: "target".to_string(),
                 risk_class: "test".to_string(),
                 incognito_creation: false,
+                lasting_grant: false,
             });
             assert!(!app.pairing_shown(), "held under the ask");
             let _ = crate::server_cmd::tests::exchange_with(&endpoint, &capability, &code).await;
@@ -26014,6 +26076,7 @@ last_seen = "2026-08-10"
                     target: "target".to_string(),
                     risk_class: "test".to_string(),
                     incognito_creation: false,
+                    lasting_grant: false,
                 });
             } else {
                 devices_press(&mut app, &host, KeyCode::Esc);
@@ -26575,6 +26638,7 @@ last_seen = "2026-08-10"
                 target: "fixture".to_string(),
                 risk_class: "test".to_string(),
                 may_create_files: false,
+                lasting_grant: false,
             },
             reply,
         }
@@ -27844,6 +27908,7 @@ last_seen = "2026-08-10"
             target: "target".to_string(),
             risk_class: "test".to_string(),
             incognito_creation: false,
+            lasting_grant: false,
         });
         assert!(!app.choice_shown(), "the ask wins");
         // The ask's own keys are not the choice's: the remote menu choice of
@@ -27897,6 +27962,7 @@ last_seen = "2026-08-10"
                 target: "target".to_string(),
                 risk_class: "test".to_string(),
                 incognito_creation: false,
+                lasting_grant: false,
             });
             let ended = if refusing {
                 "Could not start"
@@ -29434,6 +29500,7 @@ last_seen = "2026-08-10"
             target: "target".to_string(),
             risk_class: "test".to_string(),
             incognito_creation: false,
+            lasting_grant: false,
         });
         remote_host::idle_status_for_test(&mut app, &host);
         assert!(status_text(&app).contains("Work: Waiting for permission"));

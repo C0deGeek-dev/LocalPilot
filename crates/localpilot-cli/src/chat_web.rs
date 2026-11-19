@@ -10,17 +10,21 @@
 //! used, the download is bounded, and an audit line is written before each
 //! request leaves. The deny list and audit log are the ones web research uses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use localpilot_config::{ChatWebMode, Config};
+use localpilot_config::{ChatWebMode, Config, CredentialStore, McpServerConfig};
+use localpilot_mcp::{extract_candidate_urls, McpClient, McpError, SearchCallError, Transport};
 use localpilot_research::{host_matches, html_to_markdown};
 use localpilot_sandbox::{Approver, Effect, Interactivity, PermissionRequest};
-use localpilot_tools::{redact_url, WebContext, WebFetchRequest, WebGateway, WebPage, WebRefusal};
+use localpilot_tools::{
+    redact_url, WebContext, WebFetchRequest, WebGateway, WebPage, WebRefusal, WebSearchRequest,
+    WebSearchResults,
+};
 
 use crate::web_egress::{
     append_audit, audit_entry, bound_body, fetch_chain, is_html, ChainOutcome, HopPolicy,
@@ -35,6 +39,55 @@ const CHAT_MAX_DOWNLOAD_BYTES: usize = 2 * 1024 * 1024;
 /// What the audit line's question field says for a chat request: chat sends no
 /// research question, only the request itself.
 const CHAT_AUDIT_PURPOSE: &str = "chat";
+/// Default and ceiling for the number of search leads returned.
+const SEARCH_DEFAULT_RESULTS: usize = 8;
+const SEARCH_MAX_RESULTS: usize = 20;
+/// Longest query sent, in characters, and longest lead kept.
+const SEARCH_MAX_QUERY_CHARS: usize = 400;
+const SEARCH_MAX_LEAD_CHARS: usize = 2048;
+/// Bound on starting a search server and on one search call.
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// One search tool the user designated under `[research.mcp]`.
+#[derive(Clone)]
+struct SearchBackend {
+    server: String,
+    tool: String,
+    config: McpServerConfig,
+}
+
+impl SearchBackend {
+    fn label(&self) -> String {
+        format!("{}.{}", self.server, self.tool)
+    }
+}
+
+/// How a search server is started. Production spawns the configured command
+/// and completes the MCP handshake; tests substitute a scripted transport.
+type Launcher = Arc<
+    dyn Fn(
+            McpServerConfig,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Arc<dyn Transport>, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+fn spawn_launcher() -> Launcher {
+    Arc::new(|config: McpServerConfig| {
+        Box::pin(async move {
+            let (transport, _environment) =
+                crate::mcp_env::spawn_server(&config, &CredentialStore::user())
+                    .map_err(|error| error.to_string())?;
+            let client = McpClient::new(Arc::clone(&transport));
+            match tokio::time::timeout(SEARCH_TIMEOUT, client.initialize()).await {
+                Ok(Ok(_)) => Ok(transport),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("the server did not finish starting in time".to_string()),
+            }
+        })
+    })
+}
 
 /// How a host name is turned into addresses. Production asks the system
 /// resolver; tests substitute a fixed table.
@@ -106,6 +159,11 @@ pub(crate) struct ChatWeb {
     /// Who answers web consent: the person at this host, on a channel that is
     /// not shared with other devices or automation.
     consent: Arc<dyn Approver>,
+    /// The designated search tools whose server is configured, in order.
+    backends: Vec<SearchBackend>,
+    launcher: Launcher,
+    /// Search servers started for this session, by server key.
+    started: Mutex<HashMap<String, Arc<dyn Transport>>>,
 }
 
 impl ChatWeb {
@@ -115,7 +173,14 @@ impl ChatWeb {
         config: &Config,
         consent: Arc<dyn Approver>,
     ) -> anyhow::Result<Self> {
-        Self::build(root, config, consent, system_lookup(), false)
+        Self::build(
+            root,
+            config,
+            consent,
+            system_lookup(),
+            false,
+            spawn_launcher(),
+        )
     }
 
     fn build(
@@ -124,6 +189,7 @@ impl ChatWeb {
         consent: Arc<dyn Approver>,
         lookup: Lookup,
         allow_loopback: bool,
+        launcher: Launcher,
     ) -> anyhow::Result<Self> {
         let web = &config.research.web;
         let audit_log = web.audit_log.clone().map_or_else(
@@ -156,6 +222,25 @@ impl ChatWeb {
             client,
             allow_loopback,
             consent,
+            backends: config
+                .research
+                .mcp
+                .tools
+                .iter()
+                .filter_map(|pair| {
+                    config
+                        .mcp
+                        .servers
+                        .get(&pair.server)
+                        .map(|server| SearchBackend {
+                            server: pair.server.clone(),
+                            tool: pair.tool.clone(),
+                            config: server.clone(),
+                        })
+                })
+                .collect(),
+            launcher,
+            started: Mutex::new(HashMap::new()),
         })
     }
 
@@ -250,6 +335,186 @@ impl ChatWeb {
         }
     }
 
+    /// The refusal for a session where web access is off or incognito, if any.
+    fn refusal_for(&self, incognito: bool) -> Option<WebRefusal> {
+        if matches!(self.mode, ChatWebMode::Off) || !self.research_web_enabled {
+            return Some(WebRefusal::Disabled(
+                "Web access from chat is turned off ([tools] web = \"off\", or \
+                 [research.web] enabled = false). Set [tools] web = \"ask\" to be asked \
+                 per site, or use /research <topic> where web research is enabled."
+                    .to_string(),
+            ));
+        }
+        if incognito {
+            return Some(WebRefusal::Incognito(
+                "Web access is not available while the session is incognito: every web \
+                 request is recorded in an audit log, and incognito writes nothing."
+                    .to_string(),
+            ));
+        }
+        None
+    }
+
+    fn search_audit(&self, backend: &SearchBackend, decision: &str, detail: &str) -> bool {
+        // Backend, decision and counts only: the query itself is not kept.
+        append_audit(
+            &self.audit_log,
+            &audit_entry(
+                &format!("mcp://{}", backend.label()),
+                &backend.server,
+                decision,
+                detail,
+            ),
+        )
+        .is_ok()
+    }
+
+    /// Make sure the user agreed to send searches to `backend`'s server for
+    /// this session, asking if not.
+    async fn ensure_search_consent(
+        &self,
+        backend: &SearchBackend,
+        query: &str,
+        request: &WebSearchRequest,
+    ) -> Result<(), WebRefusal> {
+        let key = format!("mcp:{}", backend.server);
+        if self.granted(&key) {
+            return Ok(());
+        }
+        if request.interactivity == Interactivity::NonInteractive {
+            return Err(WebRefusal::NobodyToAsk(format!(
+                "Searching with {} needs your agreement, and nobody can be asked in this \
+                 session, so nothing was sent.",
+                backend.server
+            )));
+        }
+        let question = PermissionRequest {
+            tool: request.tool.clone(),
+            effect: Effect::Network,
+            interactivity: request.interactivity,
+            trusted: request.trusted,
+            detail: format!(
+                "Allow web searches through the MCP server {} (tool {}) for the rest of this \
+                 session? This search sends: \"{query}\". Later searches in this session go \
+                 to the same server without asking again. The server is a program on your \
+                 computer that makes its own network requests; the web deny list does not \
+                 apply to what it contacts. Each search is recorded (server and result \
+                 count, not the words) in {}.",
+                backend.server,
+                backend.tool,
+                self.audit_log.display()
+            ),
+        };
+        if self.consent.approve(&question).await {
+            if let Ok(mut grants) = self.grants.lock() {
+                grants.insert(key);
+            }
+            self.search_audit(backend, "chat-search-consent-given", "");
+            Ok(())
+        } else {
+            self.search_audit(backend, "chat-search-consent-declined", "");
+            Err(WebRefusal::Declined(format!(
+                "The user did not allow web searches through {}; nothing was sent.",
+                backend.server
+            )))
+        }
+    }
+
+    /// The running transport for `backend`'s server, starting it if needed.
+    async fn transport_for(&self, backend: &SearchBackend) -> Result<Arc<dyn Transport>, String> {
+        if let Some(transport) = self
+            .started
+            .lock()
+            .ok()
+            .and_then(|started| started.get(&backend.server).cloned())
+        {
+            return Ok(transport);
+        }
+        let transport =
+            tokio::time::timeout(SEARCH_TIMEOUT, (self.launcher)(backend.config.clone()))
+                .await
+                .map_err(|_| "the server did not start in time".to_string())??;
+        if let Ok(mut started) = self.started.lock() {
+            started.insert(backend.server.clone(), Arc::clone(&transport));
+        }
+        Ok(transport)
+    }
+
+    fn forget_transport(&self, server: &str) {
+        if let Ok(mut started) = self.started.lock() {
+            started.remove(server);
+        }
+    }
+
+    /// Ask one backend; `Ok` carries its leads, `Err` a short reason.
+    async fn search_one(
+        &self,
+        backend: &SearchBackend,
+        query: &str,
+    ) -> Result<Vec<String>, WebRefusal> {
+        // Recorded before anything starts or is sent; no record, no search.
+        if !self.search_audit(backend, "chat-search", "") {
+            return Err(WebRefusal::Failed(
+                "The egress audit record could not be written, so the search was not sent."
+                    .to_string(),
+            ));
+        }
+        let transport = match self.transport_for(backend).await {
+            Ok(transport) => transport,
+            Err(reason) => {
+                // The reason can carry the configured command or the server's
+                // own output, so neither the model nor the log gets it.
+                let _ = reason;
+                tracing::warn!(server = %backend.server, "search server did not start");
+                self.search_audit(backend, "chat-search-start-failed", "");
+                return Err(WebRefusal::Failed(format!(
+                    "The search server {} could not be started.",
+                    backend.server
+                )));
+            }
+        };
+        let client = McpClient::new(Arc::clone(&transport));
+        let call = client.call_tool_raw(&backend.tool, serde_json::json!({ "query": query }));
+        let outcome = tokio::time::timeout(SEARCH_TIMEOUT, call).await;
+        let (decision, result) = match outcome {
+            Ok(Ok(value)) => {
+                let proposals = extract_candidate_urls(&value);
+                match proposals.error {
+                    None => ("chat-search-ok", Ok(proposals.urls)),
+                    Some(SearchCallError::RateLimited(_)) => (
+                        "chat-search-rate-limited",
+                        Err(format!("{} is rate limiting searches", backend.server)),
+                    ),
+                    Some(SearchCallError::Failed(_)) => (
+                        "chat-search-error",
+                        Err(format!("{} reported an error", backend.server)),
+                    ),
+                }
+            }
+            Ok(Err(error)) => {
+                // A dead or broken server is started afresh next time.
+                if matches!(error, McpError::Transport(_)) {
+                    self.forget_transport(&backend.server);
+                }
+                (
+                    "chat-search-error",
+                    Err(format!("{} could not be reached", backend.server)),
+                )
+            }
+            Err(_) => {
+                // A call abandoned mid-way can leave the connection out of step.
+                self.forget_transport(&backend.server);
+                (
+                    "chat-search-timeout",
+                    Err(format!("{} did not answer in time", backend.server)),
+                )
+            }
+        };
+        let count = result.as_ref().map_or(0, Vec::len);
+        self.search_audit(backend, decision, &format!("results={count}"));
+        result.map_err(WebRefusal::Failed)
+    }
+
     fn granted(&self, host: &str) -> bool {
         self.grants
             .lock()
@@ -311,20 +576,8 @@ impl WebGateway for ChatWeb {
         request: WebFetchRequest,
         context: WebContext<'_>,
     ) -> Result<WebPage, WebRefusal> {
-        if matches!(self.mode, ChatWebMode::Off) || !self.research_web_enabled {
-            return Err(WebRefusal::Disabled(
-                "Web access from chat is turned off ([tools] web = \"off\", or \
-                 [research.web] enabled = false). Set [tools] web = \"ask\" to be asked \
-                 per site, or use /research <topic> where web research is enabled."
-                    .to_string(),
-            ));
-        }
-        if context.incognito {
-            return Err(WebRefusal::Incognito(
-                "Web access is not available while the session is incognito: every web \
-                 request is recorded in an audit log, and incognito writes nothing."
-                    .to_string(),
-            ));
+        if let Some(refusal) = self.refusal_for(context.incognito) {
+            return Err(refusal);
         }
         let url = reqwest::Url::parse(&request.url).map_err(|_| {
             WebRefusal::Blocked("That is not a valid http or https address.".to_string())
@@ -400,7 +653,80 @@ impl WebGateway for ChatWeb {
         if let Ok(mut grants) = self.grants.lock() {
             grants.clear();
         }
+        // A new session starts its search servers again, after consent.
+        if let Ok(mut started) = self.started.lock() {
+            started.clear();
+        }
     }
+
+    fn search_ready(&self, incognito: bool) -> bool {
+        self.refusal_for(incognito).is_none() && !self.backends.is_empty()
+    }
+
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        context: WebContext<'_>,
+    ) -> Result<WebSearchResults, WebRefusal> {
+        if let Some(refusal) = self.refusal_for(context.incognito) {
+            return Err(refusal);
+        }
+        if self.backends.is_empty() {
+            return Err(WebRefusal::NoSearchBackend(
+                localpilot_tools::NO_SEARCH_INDEX.to_string(),
+            ));
+        }
+        let query: String = localpilot_config::redact::redact(request.query.trim())
+            .chars()
+            .take(SEARCH_MAX_QUERY_CHARS)
+            .collect();
+        let limit = request
+            .max_results
+            .unwrap_or(SEARCH_DEFAULT_RESULTS)
+            .clamp(1, SEARCH_MAX_RESULTS);
+        let mut backends = Vec::new();
+        let mut leads: Vec<String> = Vec::new();
+        let mut last_refusal = None;
+        for backend in &self.backends {
+            // Enough links: later servers are neither started nor sent the query.
+            if leads.len() >= limit {
+                break;
+            }
+            if let Err(refusal) = self.ensure_search_consent(backend, &query, &request).await {
+                last_refusal = Some(refusal);
+                continue;
+            }
+            match self.search_one(backend, &query).await {
+                Ok(found) => {
+                    backends.push(backend.label());
+                    for lead in found.into_iter().filter_map(|url| usable_lead(&url)) {
+                        if leads.len() < limit && !leads.contains(&lead) {
+                            leads.push(lead);
+                        }
+                    }
+                }
+                Err(refusal) => last_refusal = Some(refusal),
+            }
+        }
+        if backends.is_empty() {
+            return Err(last_refusal
+                .unwrap_or_else(|| WebRefusal::Failed("No search backend answered.".to_string())));
+        }
+        Ok(WebSearchResults { backends, leads })
+    }
+}
+
+/// A result address worth handing on: an http or https URL without
+/// credentials, of reasonable length. Anything else from a search server is
+/// dropped.
+fn usable_lead(url: &str) -> Option<String> {
+    if url.len() > SEARCH_MAX_LEAD_CHARS {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let web = matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some();
+    let bare = parsed.username().is_empty() && parsed.password().is_none();
+    (web && bare).then(|| parsed.to_string())
 }
 
 /// One spelling for a host name everywhere it is compared: lower case, with
@@ -515,6 +841,11 @@ mod tests {
         })
     }
 
+    /// A launcher for tests that never designate a search backend.
+    fn no_launch() -> Launcher {
+        Arc::new(|_| Box::pin(async { Err("no search server in this test".to_string()) }))
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         audit: PathBuf,
@@ -528,14 +859,31 @@ mod tests {
         allow_loopback: bool,
         script: &[bool],
     ) -> Fixture {
+        fixture_with(edit, lookup, allow_loopback, script, no_launch())
+    }
+
+    fn fixture_with(
+        edit: impl FnOnce(&mut Config),
+        lookup: Lookup,
+        allow_loopback: bool,
+        script: &[bool],
+        launcher: Launcher,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let audit = dir.path().join("audit.log");
         let mut config = Config::default();
         config.research.web.audit_log = Some(audit.to_string_lossy().into_owned());
         edit(&mut config);
         let answers = Arc::new(Answers::new(script));
-        let web =
-            ChatWeb::build(dir.path(), &config, answers.clone(), lookup, allow_loopback).unwrap();
+        let web = ChatWeb::build(
+            dir.path(),
+            &config,
+            answers.clone(),
+            lookup,
+            allow_loopback,
+            launcher,
+        )
+        .unwrap();
         Fixture {
             _dir: dir,
             audit,
@@ -804,6 +1152,7 @@ mod tests {
             Arc::new(Answers::new(&[true])),
             table(&[]),
             true,
+            no_launch(),
         )
         .unwrap();
         let outcome = fetch(&web, false, request(&format!("{}/", server.uri()))).await;
@@ -921,6 +1270,379 @@ mod tests {
             1,
             "the consent question is still asked, on the host's own channel"
         );
+    }
+
+    /// A search server stand-in: records each call and whether the audit log
+    /// already held the pre-search line when the call arrived.
+    struct FakeSearch {
+        result: serde_json::Value,
+        audit: PathBuf,
+        queries: Mutex<Vec<String>>,
+        audited_first: Mutex<Vec<bool>>,
+    }
+
+    #[async_trait]
+    impl Transport for FakeSearch {
+        async fn call(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, McpError> {
+            if method == "tools/call" {
+                let query = params["arguments"]["query"].as_str().unwrap_or_default();
+                self.queries.lock().unwrap().push(query.to_string());
+                let audit = std::fs::read_to_string(&self.audit).unwrap_or_default();
+                let pre_search_line = audit.lines().any(|line| {
+                    line.split(|c: char| !(c.is_alphanumeric() || c == '-'))
+                        .any(|word| word == "chat-search")
+                });
+                self.audited_first.lock().unwrap().push(pre_search_line);
+            }
+            Ok(self.result.clone())
+        }
+    }
+
+    struct SearchFixture {
+        fixture: Fixture,
+        servers: Arc<Mutex<HashMap<String, Arc<FakeSearch>>>>,
+        starts: Arc<AtomicUsize>,
+    }
+
+    fn links(urls: &[&str]) -> serde_json::Value {
+        let text = urls
+            .iter()
+            .map(|url| format!("URL: {url}\n"))
+            .collect::<String>();
+        serde_json::json!({ "content": [{ "type": "text", "text": text }] })
+    }
+
+    fn search_fixture(backends: &[(&str, serde_json::Value)], script: &[bool]) -> SearchFixture {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let servers: Arc<Mutex<HashMap<String, Arc<FakeSearch>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let results: HashMap<String, serde_json::Value> = backends
+            .iter()
+            .map(|(name, result)| ((*name).to_string(), result.clone()))
+            .collect();
+        let audit_cell: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(PathBuf::new()));
+        let launcher: Launcher = {
+            let starts = Arc::clone(&starts);
+            let servers = Arc::clone(&servers);
+            let audit_cell = Arc::clone(&audit_cell);
+            Arc::new(move |config: McpServerConfig| {
+                starts.fetch_add(1, Ordering::SeqCst);
+                let name = config.command.clone();
+                let server = Arc::new(FakeSearch {
+                    result: results
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    audit: audit_cell.lock().unwrap().clone(),
+                    queries: Mutex::new(Vec::new()),
+                    audited_first: Mutex::new(Vec::new()),
+                });
+                servers.lock().unwrap().insert(name, Arc::clone(&server));
+                Box::pin(async move { Ok(server as Arc<dyn Transport>) })
+            })
+        };
+        let names: Vec<String> = backends
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+        let fixture = fixture_with(
+            |config| {
+                for name in &names {
+                    config.mcp.servers.insert(
+                        name.clone(),
+                        McpServerConfig {
+                            command: name.clone(),
+                            ..McpServerConfig::default()
+                        },
+                    );
+                    config
+                        .research
+                        .mcp
+                        .tools
+                        .push(localpilot_config::ResearchMcpTool {
+                            server: name.clone(),
+                            tool: "search".to_string(),
+                        });
+                }
+            },
+            table(&[]),
+            false,
+            script,
+            launcher,
+        );
+        *audit_cell.lock().unwrap() = fixture.audit.clone();
+        SearchFixture {
+            fixture,
+            servers,
+            starts,
+        }
+    }
+
+    fn search_request(query: &str) -> WebSearchRequest {
+        WebSearchRequest {
+            query: query.to_string(),
+            max_results: None,
+            tool: "web_search".to_string(),
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+        }
+    }
+
+    async fn search(
+        web: &ChatWeb,
+        incognito: bool,
+        request: WebSearchRequest,
+    ) -> Result<WebSearchResults, WebRefusal> {
+        web.search(
+            request,
+            WebContext {
+                gateway: web,
+                incognito,
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn with_no_backend_search_explains_and_starts_nothing() {
+        let f = local_fixture(&[true]);
+        assert!(!f.web.search_ready(false));
+        let outcome = search(&f.web, false, search_request("rust async")).await;
+        let Err(WebRefusal::NoSearchBackend(text)) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(text.contains("No web search index"), "{text}");
+        assert!(text.contains("[research.mcp]"), "{text}");
+        assert!(text.contains("fetch"), "{text}");
+        assert!(text.contains("/research"), "{text}");
+        assert_eq!(f.answers.asked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_consented_search_returns_leads_and_audits_before_sending() {
+        let s = search_fixture(
+            &[(
+                "ddg",
+                links(&["https://docs.rs/tokio", "https://tokio.rs/"]),
+            )],
+            &[true],
+        );
+        assert!(s.fixture.web.search_ready(false));
+        let found = search(&s.fixture.web, false, search_request("tokio runtime"))
+            .await
+            .unwrap();
+        assert_eq!(found.backends, vec!["ddg.search".to_string()]);
+        assert_eq!(
+            found.leads,
+            vec!["https://docs.rs/tokio", "https://tokio.rs/"]
+        );
+        let server = s.servers.lock().unwrap()["ddg"].clone();
+        assert_eq!(
+            *server.queries.lock().unwrap(),
+            vec!["tokio runtime".to_string()]
+        );
+        assert_eq!(*server.audited_first.lock().unwrap(), vec![true]);
+        let audit = audit_text(&s.fixture);
+        assert!(audit.contains("results=2"), "{audit}");
+        assert!(
+            !audit.contains("tokio runtime"),
+            "the query is not kept: {audit}"
+        );
+        let detail = s.fixture.answers.details.lock().unwrap()[0].clone();
+        assert!(detail.contains("ddg"), "{detail}");
+        assert!(detail.contains("tokio runtime"), "{detail}");
+        assert!(detail.contains("without asking again"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn one_consent_and_one_start_cover_the_session_until_reset() {
+        let s = search_fixture(&[("ddg", links(&["https://a.test/"]))], &[true, true]);
+        search(&s.fixture.web, false, search_request("one"))
+            .await
+            .unwrap();
+        search(&s.fixture.web, false, search_request("two"))
+            .await
+            .unwrap();
+        assert_eq!(s.fixture.answers.asked(), 1);
+        assert_eq!(s.starts.load(Ordering::SeqCst), 1);
+        s.fixture.web.reset_consent();
+        search(&s.fixture.web, false, search_request("three"))
+            .await
+            .unwrap();
+        assert_eq!(s.fixture.answers.asked(), 2);
+        assert_eq!(s.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn nothing_starts_without_consent() {
+        // Declined, nobody to ask, incognito, switched off.
+        let s = search_fixture(&[("ddg", links(&["https://a.test/"]))], &[false]);
+        let outcome = search(&s.fixture.web, false, search_request("q")).await;
+        assert!(
+            matches!(outcome, Err(WebRefusal::Declined(_))),
+            "{outcome:?}"
+        );
+        let mut piped = search_request("q");
+        piped.interactivity = Interactivity::NonInteractive;
+        let outcome = search(&s.fixture.web, false, piped).await;
+        assert!(
+            matches!(outcome, Err(WebRefusal::NobodyToAsk(_))),
+            "{outcome:?}"
+        );
+        let outcome = search(&s.fixture.web, true, search_request("q")).await;
+        assert!(
+            matches!(outcome, Err(WebRefusal::Incognito(_))),
+            "{outcome:?}"
+        );
+        assert!(!s.fixture.web.search_ready(true));
+        assert_eq!(s.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(s.fixture.answers.asked(), 1);
+        assert!(audit_text(&s.fixture).contains("chat-search-consent-declined"));
+    }
+
+    #[tokio::test]
+    async fn secrets_in_a_query_are_removed_before_it_is_sent() {
+        let s = search_fixture(&[("ddg", links(&["https://a.test/"]))], &[true]);
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        search(
+            &s.fixture.web,
+            false,
+            search_request(&format!("why does {secret} fail")),
+        )
+        .await
+        .unwrap();
+        let server = s.servers.lock().unwrap()["ddg"].clone();
+        let sent = server.queries.lock().unwrap()[0].clone();
+        assert!(!sent.contains(secret), "{sent}");
+        assert!(!s.fixture.answers.details.lock().unwrap()[0].contains(secret));
+        assert!(!audit_text(&s.fixture).contains(secret));
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_audit_log_stops_the_search_before_the_server_starts() {
+        let s = search_fixture(&[("ddg", links(&["https://a.test/"]))], &[true]);
+        // Consent first (its audit line is best effort), then break the log.
+        let _ = search(&s.fixture.web, false, search_request("warm")).await;
+        let starts = s.starts.load(Ordering::SeqCst);
+        s.fixture.web.reset_consent();
+        std::fs::remove_file(&s.fixture.audit).unwrap();
+        std::fs::create_dir(&s.fixture.audit).unwrap();
+        s.fixture.answers.script.lock().unwrap().push(true);
+        let outcome = search(&s.fixture.web, false, search_request("q")).await;
+        assert!(matches!(outcome, Err(WebRefusal::Failed(_))), "{outcome:?}");
+        assert_eq!(s.starts.load(Ordering::SeqCst), starts, "no new start");
+    }
+
+    #[tokio::test]
+    async fn a_failing_backend_does_not_hide_another_ones_leads() {
+        let limited = serde_json::json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": "rate limit exceeded, slow down" }]
+        });
+        let s = search_fixture(
+            &[
+                ("slow", limited.clone()),
+                ("ddg", links(&["https://b.test/x"])),
+            ],
+            &[true, true],
+        );
+        let found = search(&s.fixture.web, false, search_request("q"))
+            .await
+            .unwrap();
+        assert_eq!(found.backends, vec!["ddg.search".to_string()]);
+        assert_eq!(found.leads, vec!["https://b.test/x"]);
+        assert!(audit_text(&s.fixture).contains("chat-search-rate-limited"));
+
+        let only = search_fixture(&[("slow", limited)], &[true]);
+        let outcome = search(&only.fixture.web, false, search_request("q")).await;
+        assert!(matches!(outcome, Err(WebRefusal::Failed(_))), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_filled_result_budget_leaves_later_servers_untouched() {
+        let s = search_fixture(
+            &[
+                ("first", links(&["https://a.test/1", "https://a.test/2"])),
+                ("second", links(&["https://b.test/1"])),
+            ],
+            &[true, true],
+        );
+        let mut request = search_request("q");
+        request.max_results = Some(2);
+        let found = search(&s.fixture.web, false, request).await.unwrap();
+        assert_eq!(found.backends, vec!["first.search".to_string()]);
+        assert_eq!(s.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(s.fixture.answers.asked(), 1);
+    }
+
+    #[tokio::test]
+    async fn leads_are_web_addresses_only_deduplicated_and_capped() {
+        let s = search_fixture(
+            &[(
+                "ddg",
+                links(&[
+                    "https://a.test/1",
+                    "https://a.test/1",
+                    "ftp://files.test/x",
+                    "https://user:pw@c.test/",
+                    "javascript:alert(1)",
+                    "https://a.test/2",
+                    "https://a.test/3",
+                ]),
+            )],
+            &[true],
+        );
+        let mut request = search_request("q");
+        request.max_results = Some(2);
+        let found = search(&s.fixture.web, false, request).await.unwrap();
+        assert_eq!(found.leads, vec!["https://a.test/1", "https://a.test/2"]);
+    }
+
+    #[tokio::test]
+    async fn without_a_ready_search_the_tool_explains_with_no_permission_question() {
+        use localpilot_sandbox::{PermissionEngine, Profile, Workspace};
+        let f = local_fixture(&[]);
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let shared = Answers::new(&[]);
+        let context = localpilot_tools::ToolContext {
+            workspace: &workspace,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+            web: Some(WebContext {
+                gateway: &f.web,
+                incognito: false,
+            }),
+        };
+        let call = localpilot_core::ToolCall::new(
+            localpilot_core::ToolUseId::from("c1"),
+            "web_search",
+            serde_json::json!({ "query": "rust" }),
+        );
+        let result = localpilot_tools::ToolRegistry::with_builtins()
+            .dispatch(
+                &call,
+                &context,
+                &PermissionEngine::new(Profile::Default, Vec::new()),
+                &shared,
+            )
+            .await;
+        assert!(
+            result.output.contains("No web search index"),
+            "{}",
+            result.output
+        );
+        assert_eq!(shared.asked(), 0);
+        assert_eq!(f.answers.asked(), 0);
     }
 
     #[test]
