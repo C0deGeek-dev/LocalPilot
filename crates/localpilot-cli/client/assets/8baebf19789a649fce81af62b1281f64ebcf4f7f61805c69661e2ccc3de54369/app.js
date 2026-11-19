@@ -4,14 +4,10 @@ import { mountCompanion } from './companion-view.js';
 import { prepareOffline } from './offline.js';
 import { saveUpdateState, takeUpdateState } from './update-state.js';
 import { mountTheme } from './theme.js';
+import { destinationFromHash, pageTitle } from './accessibility.js';
 
 // Navigation is local. A network connection alone never enables session controls.
-const destinations = new Set(['sessions', 'attention', 'devices']);
-
-export function destinationFromHash(hash) {
-  const destination = hash.slice(1);
-  return destinations.has(destination) ? destination : 'sessions';
-}
+export { destinationFromHash };
 
 export function showDestination(document, hash, focus = false) {
   const destination = destinationFromHash(hash);
@@ -22,6 +18,9 @@ export function showDestination(document, hash, focus = false) {
     if (link.dataset.destination === destination) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  const view = document.getElementById?.('session-view');
+  const session = destination === 'sessions' && view && !view.hidden ? document.getElementById('session-name').textContent : '';
+  document.title = pageTitle(destination, session);
   if (focus) [...document.querySelectorAll(`[data-panel="${destination}"] h1, [data-panel="${destination}"] h2`)]
     .find((heading) => !heading.closest('[hidden]'))?.focus({ preventScroll: true });
 }
@@ -35,7 +34,9 @@ if (typeof document !== 'undefined') {
   const element = (id) => document.getElementById(id);
   void prepareOffline(window, (message) => {
     element('app-update').textContent = message;
-    element('app-update-label').textContent = message.startsWith('App update ready.') ? 'App update ready' : 'App status';
+    const ready = message.startsWith('App update ready.');
+    element('app-update-label').textContent = ready ? 'App update ready' : 'App status';
+    if (element('app-update-announce').textContent !== (ready ? message : '')) element('app-update-announce').textContent = ready ? message : '';
   }, () => saveUpdateState(window, sessions));
   const form = element('pair-form');
   const code = element('pair-code');
@@ -90,10 +91,22 @@ if (typeof document !== 'undefined') {
   });
   sessions.accessLost = () => void pairing.check();
   mountCompanion(document, window, sessions, async () => { await pairing.check(); return pairing.state === 'paired'; });
+  // Once paired the pairing card is hidden, so focus moves to where the reader
+  // continues: the open session, the workspace heading, or the session list.
+  function focusWorkspace() {
+    window.requestAnimationFrame(() => {
+      const visible = (node) => node && !node.closest('[hidden]') && node.getBoundingClientRect().width > 1;
+      ['session-name', 'workspace-title', 'session-browser-title'].map(element).find(visible)?.focus({ preventScroll: true });
+    });
+  }
   function focusPairing() {
+    if (pairing.state === 'paired') return focusWorkspace();
     (pairing.state === 'confirm' ? element('confirm-pair') : element('pair-title')).focus();
   }
-  function clearInputs() { code.value = ''; workspace.value = ''; }
+  const showCode = element('show-code');
+  function maskCode(masked) { code.type = masked ? 'password' : 'text'; showCode.setAttribute('aria-pressed', String(!masked)); }
+  showCode.addEventListener('click', () => maskCode(code.type === 'text'));
+  function clearInputs() { code.value = ''; workspace.value = ''; maskCode(true); }
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     camera.stop();
@@ -111,7 +124,9 @@ if (typeof document !== 'undefined') {
   element('cancel-pair').addEventListener('click', () => { pairing.cancel(); code.focus(); });
   element('check-connection').addEventListener('click', () => {
     camera.stop(); cameraPanel.hidden = true; cameraStatus.textContent = '';
-    clearInputs(); void pairing.check();
+    const card = element('pair-card');
+    const fromCard = !card.hidden && card.contains(document.activeElement);
+    clearInputs(); void pairing.check().then(() => { if (fromCard && pairing.state === 'paired') focusWorkspace(); });
   });
   element('scan-code').addEventListener('click', () => {
     if (!window.isSecureContext || window.location.protocol !== 'https:') { pairing.prepare(''); return; }

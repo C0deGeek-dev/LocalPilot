@@ -1,6 +1,6 @@
 import { Sessions } from './session.js';
 import { compatibilityMessages } from './compatibility.js';
-import { reconcile, replyAnnouncer, keyedItems } from './accessibility.js';
+import { reconcile, replyAnnouncer, keyedItems, destinationFromHash, pageTitle } from './accessibility.js';
 
 const phaseMessages = {
   unpaired: 'Pair this device to see your sessions.', choose: 'Choose a shared terminal session.',
@@ -54,12 +54,26 @@ export function mountSessions(document, window) {
   }, { passive: true });
   el('jump-latest').addEventListener('click', jumpLatest);
   // Phones: the session list opens as a sheet over the chat; closing it returns focus to the chat header.
-  el('open-sessions').addEventListener('click', () => { el('session-browser').open = true; el('session-browser-title').focus(); });
+  // While the sheet covers the chat, the chat is inert: neither Tab nor a
+  // screen reader can reach controls hidden under it.
+  function syncSheet() {
+    const sheet = !wideLayout.matches && model.authorized && !!model.selected && el('session-browser').open;
+    el('session-view').inert = sheet;
+    el('close-sessions').hidden = !sheet;
+  }
+  function closeSheet() { el('session-browser').open = false; syncSheet(); el('open-sessions').focus(); }
+  el('open-sessions').addEventListener('click', () => { el('session-browser').open = true; syncSheet(); el('session-browser-title').focus(); });
+  el('close-sessions').addEventListener('click', closeSheet);
   el('session-browser').addEventListener('toggle', () => {
-    if (!el('session-browser').open && model.selected && !wideLayout.matches && el('session-browser').contains(document.activeElement)) el('open-sessions').focus();
+    const leaving = el('session-browser').contains(document.activeElement) || document.activeElement === el('close-sessions');
+    syncSheet();
+    if (!el('session-browser').open && model.selected && !wideLayout.matches && leaving) el('open-sessions').focus();
   });
   el('session-browser').addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && model.selected && !wideLayout.matches && el('session-browser').open) { event.preventDefault(); el('session-browser').open = false; el('open-sessions').focus(); }
+    if (event.key === 'Escape' && model.selected && !wideLayout.matches && el('session-browser').open) { event.preventDefault(); closeSheet(); }
+  });
+  el('close-sessions').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); closeSheet(); }
   });
   // Grow the composer with its draft (CSS caps the height) and keep the latest-messages button above it.
   const draft = el('session-draft');
@@ -82,7 +96,7 @@ export function mountSessions(document, window) {
     else restoreNav = window.setTimeout(() => composing(false), 400);
   });
   panel.addEventListener('focusout', (event) => { if (!panel.contains(event.relatedTarget)) { window.clearTimeout(restoreNav); restoreNav = window.setTimeout(() => composing(false), 400); } });
-  wideLayout.addEventListener('change', () => { el('session-browser').open = wideLayout.matches || !model.selected; });
+  wideLayout.addEventListener('change', () => { el('session-browser').open = wideLayout.matches || !model.selected; syncSheet(); });
   const announceReply = replyAnnouncer(el('reply-announcement'));
   const model = new Sessions({
     origin: window.location.origin, fetch: window.fetch.bind(window), socket: (url) => new window.WebSocket(url),
@@ -224,7 +238,7 @@ export function mountSessions(document, window) {
             const metadata = label.slice(name.length).replace(/^ · /, '');
             if (button.children[1].textContent !== metadata) button.children[1].textContent = metadata;
             button.disabled = !item.live || phase !== 'ready' || !workspace.online;
-            button.setAttribute('aria-pressed', String(current));
+            if (current) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
             button.onclick = () => {
               model.openProjectSession(workspace.id, item.id);
               if (model.workspace?.id !== workspace.id || model.selected?.id !== item.id) return;
@@ -257,9 +271,12 @@ export function mountSessions(document, window) {
     const phaseMessage = model.phase === 'incompatible' ? compatibilityMessages[model.compatibility || 'invalid'] : phaseMessages[model.phase];
     setText('sessions-status', phaseMessage || 'Shared terminal connected.');
     renderProjects();
+    syncSheet();
+    if (destinationFromHash(window.location.hash) === 'sessions') document.title = pageTitle('sessions', viewing ? model.selected.name || 'Unnamed session' : '');
     if (!model.selected) return;
     setText('session-name', model.selected.name || 'Unnamed session');
     setText('session-project', model.projectLabel());
+    setText('session-full', `Session: ${model.selected.name || 'Unnamed session'} · Project: ${model.projectLabel()}`);
     setText('session-pc', `PC address: ${window.location.host}`);
     setText('stop-project', `Stop in ${model.projectLabel()} / ${model.selected.name || 'Unnamed session'}`);
     const status = model.ready ? model.turn === 'unknown' ? 'Turn state unknown · controls locked' : model.busy ? 'Working' : 'Ready' : phaseMessage;

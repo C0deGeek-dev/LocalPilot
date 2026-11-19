@@ -6,22 +6,23 @@
     <meta name="theme-color" content="#f4f7f6" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#070b0f" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="light dark">
-    <meta name="locallink-generation" content="888969d186be69f10b6ae5ef624a549ca01bd9260a5a3ddaac88f166055341e8">
-    <meta name="application-version" content="0.1.5">
+    <meta name="locallink-generation" content="8baebf19789a649fce81af62b1281f64ebcf4f7f61805c69661e2ccc3de54369">
+    <meta name="application-version" content="0.1.6">
     <meta name="referrer" content="no-referrer">
     <title>LocalLink</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/assets/888969d186be69f10b6ae5ef624a549ca01bd9260a5a3ddaac88f166055341e8/icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/888969d186be69f10b6ae5ef624a549ca01bd9260a5a3ddaac88f166055341e8/style.css">
-    <script type="module" src="/assets/888969d186be69f10b6ae5ef624a549ca01bd9260a5a3ddaac88f166055341e8/app.js"></script>
+    <link rel="icon" href="/assets/8baebf19789a649fce81af62b1281f64ebcf4f7f61805c69661e2ccc3de54369/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/8baebf19789a649fce81af62b1281f64ebcf4f7f61805c69661e2ccc3de54369/style.css">
+    <script type="module" src="/assets/8baebf19789a649fce81af62b1281f64ebcf4f7f61805c69661e2ccc3de54369/app.js"></script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
     <div class="shell">
       <header class="masthead">
-        <a class="brand" href="#sessions"><img src="/assets/888969d186be69f10b6ae5ef624a549ca01bd9260a5a3ddaac88f166055341e8/icon.svg" alt="" width="32" height="32"><span class="brand-name">LocalLink<span>YOUR PC, WITH YOU</span></span></a>
+        <a class="brand" href="#sessions"><img src="/assets/8baebf19789a649fce81af62b1281f64ebcf4f7f61805c69661e2ccc3de54369/icon.svg" alt="" width="32" height="32"><span class="brand-name">LocalLink<span>YOUR PC, WITH YOU</span></span></a>
         <div class="masthead-status">
-          <details id="app-status" class="app-status"><summary><span id="app-update-label" role="status">App status</span></summary><div class="app-status-panel"><p id="app-version" class="help">LocalLink 0.1.5</p><p id="app-update" class="help"></p></div></details>
+          <details id="app-status" class="app-status"><summary><span id="app-update-label">App status</span></summary><div class="app-status-panel"><p id="app-version" class="help">LocalLink 0.1.6</p><p id="app-update" class="help"></p></div></details>
+          <span id="app-update-announce" class="visually-hidden" role="status"></span>
           <span class="connection" id="connection">Not connected</span>
         </div>
       </header>
@@ -48,6 +49,7 @@
               <label for="pair-code">Pairing link or code</label>
               <p id="code-help" class="help">On your PC, open LocalPilot’s remote pairing screen. Keep it open while you pair.</p>
               <input id="pair-code" name="pairing" type="password" required maxlength="4096" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="code-help" data-pair-control>
+              <button id="show-code" type="button" class="secondary" aria-pressed="false" aria-controls="pair-code" data-pair-control>Show code</button>
               <label for="pair-workspace">Workspace ID <span class="help">(only for a code)</span></label>
               <input id="pair-workspace" name="workspace" type="text" maxlength="16" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="workspace-help" data-pair-control>
               <p id="workspace-help" class="help">A complete pairing link includes this. For a code, copy the 16-character workspace ID from your PC.</p>
@@ -61,6 +63,7 @@
             <button id="check-connection" type="button" class="secondary" data-pair-control>Check connection</button>
           </div>
           <p id="notification-lapsed" class="attention-banner" hidden><span id="notification-lapsed-text" role="status"></span> <a id="notification-lapsed-open" href="#devices">Open Devices</a></p>
+          <button id="close-sessions" type="button" class="secondary sheet-close" hidden>Close</button>
           <details id="session-browser" class="session-browser" open hidden>
             <summary id="session-browser-title">Choose a shared session</summary>
             <p class="help browser-help">Open a project to see its shared sessions. Your current session stays connected while you browse.</p>
@@ -76,7 +79,7 @@
               <h1 id="session-name" tabindex="-1"></h1>
               <p id="session-state" role="status"></p>
               <p id="session-project" class="eyebrow"></p>
-              <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-pc" class="help"></p><p id="last-sync" class="help"></p><p class="help">Tool activity covers the current turn. Messages from your PC appear with the next snapshot.</p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
+              <details class="connection-details"><summary id="session-access">Access scope unconfirmed</summary><p id="session-full" class="help"></p><p id="session-pc" class="help"></p><p id="last-sync" class="help"></p><p class="help">Tool activity covers the current turn. Messages from your PC appear with the next snapshot.</p><button id="session-check-access" type="button" class="secondary">Check access</button></details>
               <button id="reconnect-session" type="button" class="secondary" hidden>Reconnect</button>
               <button id="back-to-sessions" type="button" class="secondary" hidden>Back to sessions</button>
             </header>

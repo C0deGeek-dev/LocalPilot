@@ -76,7 +76,9 @@ export function mountCompanion(document, window, sessions, checkAccess) {
   el('refresh-device').addEventListener('click', () => void device.load());
   el('revoke-device').addEventListener('click', () => { el('revoke-confirm').hidden = false; el('confirm-revoke').focus(); });
   el('cancel-revoke').addEventListener('click', () => { el('revoke-confirm').hidden = true; el('revoke-device').focus(); });
-  el('confirm-revoke').addEventListener('click', () => { el('revoke-confirm').hidden = true; void device.revoke(); });
+  // The confirmation hides with focus inside it; the Devices heading keeps focus
+  // in place while the status line announces the outcome.
+  el('confirm-revoke').addEventListener('click', () => { el('revoke-confirm').hidden = true; el('devices-title').focus(); void device.revoke(); });
   el('notification-workspace').addEventListener('change', () => notifications.select(el('notification-workspace').value));
   el('enable-notifications').addEventListener('click', () => void notifications.enable());
   el('notification-lapsed-open').addEventListener('click', () => { const first = notifications.lapsed[0]; if (first) notifications.select(first.id); });

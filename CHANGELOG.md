@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Embed LocalLink 0.1.6: the companion app meets WCAG 2.2 AA from the
+  LocalHub#292 audit. On a phone the chat under the session list is no longer
+  reachable with a screen reader, focus no longer disappears after pairing or
+  revoking, component borders and focus outlines are easier to see, and the
+  page title names where you are.
+
 - A gateway started in the background stops itself once no workspace has been
   served for 5 minutes, so it ends after the last session and its background
   server. A server crash no longer keeps it running (LocalHub#293).

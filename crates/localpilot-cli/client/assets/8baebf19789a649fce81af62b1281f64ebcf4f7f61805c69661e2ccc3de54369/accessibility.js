@@ -1,3 +1,16 @@
+// Navigation destinations and the page title for each, shared by the router
+// and the session view so the title always says where the reader is.
+const destinationNames = { sessions: 'Sessions', attention: 'Attention', devices: 'Devices' };
+
+export function destinationFromHash(hash) {
+  const destination = hash.slice(1);
+  return Object.hasOwn(destinationNames, destination) ? destination : 'sessions';
+}
+
+export function pageTitle(destination, session = '') {
+  return `${session || destinationNames[destination] || destinationNames.sessions} – LocalLink`;
+}
+
 // Reconcile rendered conversation nodes so streaming never replaces the reader's
 // focused code block, expanded activity group, or earlier message.
 export function reconcile(parent, nodes) {
