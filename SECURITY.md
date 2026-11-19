@@ -92,3 +92,11 @@ Security-sensitive areas:
   A configured search server is a local program with its own network access.
   See [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) and
   ADR-0289.
+- Search backends LocalPilot sets up (`localpilot search setup`) live in your
+  user config only and never join the session's tools. They start only at a
+  search you allowed, and with nobody to ask only when you opted that backend
+  into unattended use (ADR-0291). A local SearXNG runs only on this computer's
+  own Docker (Engine 28.0.0 or later), published on `127.0.0.1` from a
+  digest-pinned image. LocalPilot changes, stops or removes only the container,
+  settings folder and config table it recorded as its own, and asks first
+  (ADR-0292).

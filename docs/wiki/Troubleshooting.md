@@ -22,10 +22,17 @@ Chat web access is on by default (`[tools] web = "ask"`), but searching needs a
 search tool. `localpilot doctor` shows a `chat web:` line: whether chat web is
 on, where requests are recorded, and the search tools `web_search` would use.
 With none set up, `fetch` still reads a page whose address you give it. To
-search, add a search-capable MCP server under `[mcp.servers]` and name its
-search tool in `[research.mcp] tools`. The `chat web:` line reads the
-configuration only and sends no search; the `mcp servers:` section shows whether
-that server starts.
+search, run `localpilot search setup`: it lists the backends it can set up here
+(a keyless one, a local SearXNG in Docker, or a search API with your own key)
+and sets up the one you pick. The fullscreen session also offers it when a
+search finds no backend. You can instead add a search-capable MCP server under
+`[mcp.servers]` and name its search tool in `[research.mcp] tools`. The
+`chat web:` line reads the configuration only and sends no search. The
+`managed search backends` lines show each backend set up for you, and the
+`mcp servers:` section shows whether a hand-added server starts.
+
+Without any search backend, `/research` makes no web search or page fetch. It
+reports a "local knowledge review" and says why.
 Only the fullscreen session can ask for web consent; a piped run has no web
 access.
 

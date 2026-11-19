@@ -282,8 +282,10 @@ Research is text-only — if you submit a prompt with an attached image while in
 research mode, it is declined with a notice and your draft and attachment are kept.
 In ordinary chat the agent can read a web page or search the web too, after
 asking you once per site or search server in that session; searching needs a
-search tool you set up (see [configuration](../configuration.md) `[tools] web`
-and [MCP](../mcp.md) "Research search tools"). Web research is on by default and disclosed; `[research.web] enabled = false` runs
+search backend. `localpilot search setup` sets one up (see
+[configuration](../configuration.md) `[search.managed.<id>]`), or you can name your
+own MCP search tool (see [MCP](../mcp.md) "Research search tools"). Without
+one, research reviews local knowledge only and says so. Web research is on by default and disclosed; `[research.web] enabled = false` runs
 local-only, and `[research] enabled = false` turns research off entirely (see
 [configuration.md](../configuration.md)). The headless equivalent is
 `localpilot research <topic>`.

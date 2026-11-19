@@ -995,6 +995,117 @@ pub(crate) fn shown(argv: &[String]) -> String {
 /// This computer.
 pub(crate) struct LocalHost;
 
+/// [`LocalHost`] with every command given a deadline, for diagnostics that
+/// must not hang on a stuck Docker CLI: past it the command is killed and
+/// reported as failed.
+pub(crate) struct BoundedHost(pub(crate) std::time::Duration);
+
+impl Host for BoundedHost {
+    fn run(&self, argv: &[String], bound: bool) -> Ran {
+        let Some((program, args)) = argv.split_first() else {
+            return Ran::default();
+        };
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if bound {
+            for variable in ENDPOINT_VARIABLES {
+                command.env_remove(variable);
+            }
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return Ran {
+                    ok: false,
+                    stdout: Vec::new(),
+                    stderr: error.to_string(),
+                }
+            }
+        };
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let deadline = std::time::Instant::now() + self.0;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // A command that exits while something it started still
+                    // holds its output is not waited for past the deadline.
+                    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+                    let (Ok(out), Ok(err)) =
+                        (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
+                    else {
+                        return Ran {
+                            ok: false,
+                            stdout: Vec::new(),
+                            stderr: format!(
+                                "its output did not close within {} seconds",
+                                self.0.as_secs()
+                            ),
+                        };
+                    };
+                    return Ran {
+                        ok: status.success(),
+                        stdout: out,
+                        stderr: decode(&err),
+                    };
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // The readers finish on their own: a grandchild may still
+                    // hold the pipes.
+                    return Ran {
+                        ok: false,
+                        stdout: Vec::new(),
+                        stderr: format!("it did not answer within {} seconds", self.0.as_secs()),
+                    };
+                }
+            }
+        }
+    }
+
+    fn get(&self, port: u16, path: &str) -> Option<(u16, String)> {
+        LocalHost.get(port, path)
+    }
+
+    fn port_free(&self, port: u16) -> bool {
+        LocalHost.port_free(port)
+    }
+
+    fn pause(&self) {
+        LocalHost.pause();
+    }
+
+    fn now(&self) -> std::time::Duration {
+        LocalHost.now()
+    }
+
+    fn windows(&self) -> bool {
+        LocalHost.windows()
+    }
+}
+
+/// Read a child's pipe to the end on its own thread; the bytes arrive on the
+/// returned channel once the pipe closes.
+fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        let _ = sender.send(buffer);
+    });
+    receiver
+}
+
 impl Host for LocalHost {
     fn run(&self, argv: &[String], bound: bool) -> Ran {
         let Some((program, args)) = argv.split_first() else {
@@ -1071,6 +1182,58 @@ impl Host for LocalHost {
 
     fn windows(&self) -> bool {
         cfg!(windows)
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    #[test]
+    fn a_bounded_command_is_stopped_at_its_deadline() {
+        let host = BoundedHost(std::time::Duration::from_millis(300));
+        let slow: Vec<String> = if cfg!(windows) {
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 20",
+            ]
+        } else {
+            ["sh", "-c", "sleep 20", ""]
+        }
+        .iter()
+        .filter(|word| !word.is_empty())
+        .map(ToString::to_string)
+        .collect();
+        let started = std::time::Instant::now();
+        let ran = host.run(&slow, false);
+        assert!(!ran.ok);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let quick: Vec<String> = if cfg!(windows) {
+            vec!["cmd".to_string(), "/C".to_string(), "echo hi".to_string()]
+        } else {
+            vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]
+        };
+        let ran = host.run(&quick, false);
+        assert!(ran.ok);
+        assert!(String::from_utf8_lossy(&ran.stdout).contains("hi"));
+        // The command exits at once but leaves a child holding its output for
+        // 8 s: the result comes at the deadline, well before the child ends.
+        let detached: Vec<String> = if cfg!(windows) {
+            vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                "start /B powershell -NoProfile -Command Start-Sleep -Seconds 8".to_string(),
+            ]
+        } else {
+            vec!["sh".to_string(), "-c".to_string(), "sleep 8 &".to_string()]
+        };
+        let started = std::time::Instant::now();
+        let ran = host.run(&detached, false);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!ran.ok);
+        assert!(ran.stderr.contains("did not close"), "{}", ran.stderr);
     }
 }
 

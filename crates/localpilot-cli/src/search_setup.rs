@@ -1750,6 +1750,16 @@ impl Probes for LocalProbes {
     }
 }
 
+/// Whether a configured command exists: a path is checked as given, a bare
+/// name in the absolute entries of `PATH`.
+pub(crate) fn command_present(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.components().count() > 1 || path.is_absolute() {
+        return path.is_file();
+    }
+    LocalProbes.find(command).is_some()
+}
+
 /// `program` in the absolute entries of `path_var`, trying each `pathext`
 /// extension on Windows. Relative and empty entries (the working directory by
 /// another name) are skipped.

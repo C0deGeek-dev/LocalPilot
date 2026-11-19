@@ -32,6 +32,10 @@ mod remote_status;
 #[allow(dead_code)]
 #[path = "../src/chat_web_status.rs"]
 mod chat_web_status;
+// `doctor` renders managed search readiness the caller collected.
+#[allow(dead_code)]
+#[path = "../src/search_readiness.rs"]
+mod search_readiness;
 // `doctor` now reads the trust store through `crate::trust`; include it too.
 #[allow(dead_code)]
 #[path = "../src/trust.rs"]
@@ -331,6 +335,7 @@ fn report() -> DoctorReport {
         },
         hygiene: None,
         remote: None,
+        managed_search: Vec::new(),
         permissions: None,
         skill_maintenance: doctor::SkillMaintenance::default(),
         mesh: doctor::MeshStatus {

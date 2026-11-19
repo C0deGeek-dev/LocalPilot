@@ -546,9 +546,12 @@ Rules:
 
 ### `web_search`
 
-Searches the web through the search tools the user designated under
-`[research.mcp]` and returns result links (URLs only) as untrusted leads to read
-with `fetch`.
+Searches the web and returns result links (URLs only) as untrusted leads to
+read with `fetch`. It uses, in this order, the search tools the user designated
+under `[research.mcp] tools`, then the search backends LocalPilot set up under
+`[search.managed.<id>]` (`localpilot search setup`, ADR-0291/ADR-0292). A
+managed backend starts at its first search, only while its recorded launch
+identity still matches.
 
 Rules:
 

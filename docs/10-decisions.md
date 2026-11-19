@@ -2,6 +2,75 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0292: LocalPilot Sets Up Search Backends And Manages Only The SearXNG It Created
+
+**Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0291 (managed
+search backends) and ADR-0290 (real search results only). Refs LocalPilot#11.
+
+**Context.** Without a search backend, chat `web_search` finds nothing and
+`/research` is only a local knowledge review (ADR-0290). Setting a backend up
+by hand meant finding an MCP search package, its runtime and a key, and writing
+the config. A self-hosted engine (SearXNG) also needs a container runtime, its
+own settings, a local port and someone to stop, update and remove it. A tool
+that touches containers can damage what it does not own, or publish a port to
+the local network.
+
+**Decision.**
+1. **Setup asks, shows and then writes.** `localpilot search setup` (and the
+   fullscreen session's offer when a search finds no backend) lists the
+   backends this computer can run, by tier: keyless, a local SearXNG, or an API
+   with the user's own key. Before anything runs, it shows the exact commands,
+   where queries go, the memory a container uses, and the TOML it will write.
+   Keys go to the credential store, never to the config file. One locked edit
+   writes the `[search.managed.<id>]` table (ADR-0291). Setup checks the result
+   in the effective config and starts the bridge once to verify its search
+   tool. Anything it made is removed if a step fails before the config is
+   written.
+2. **Only this computer's own Docker, bound to one endpoint.** SearXNG runs
+   only on a local Unix socket or local named pipe, never a TCP, SSH or remote
+   endpoint, and only with Docker Engine 28.0.0 or later, so a loopback publish
+   is not reachable from the local network. Every later command passes the
+   recorded endpoint with `--host` and drops the variables that could switch
+   daemons. The image is pinned by digest. The container is published on
+   `127.0.0.1` only, with `--restart no` and a LocalPilot label. Docker that
+   runs only inside WSL, and Podman, are reported but not used until their
+   loopback-only publishing is verified. The WSL route compiles only with the
+   non-default `unverified-search-routes` feature, for verification.
+3. **Ownership is a record, never a guess.** Setup records the container ID
+   before the start, the endpoint, the image, the port, the settings folder (with
+   a marker file), and the exact config table it wrote. Every later step acts
+   only on a container whose ID and label both match, and on a folder that
+   carries the marker. A command that changes the config table does so only
+   while the table is exactly the recorded one, and it checks again under the
+   config lock right before writing, so a hand edit is never overwritten or
+   removed. Every effect is recorded in the setup audit log before it happens;
+   if the record cannot be written, the effect does not happen.
+4. **Started on first search.** A stopped SearXNG is started by the first
+   search that uses it, after that search's consent (which names the container
+   and its memory), and only when the endpoint, ID and label still match.
+   Unattended research starts it only with the backend's `unattended` opt-in.
+5. **Lifecycle by command, at a terminal.** `localpilot search status` only
+   reads. `start`, `stop`, `update` and `remove` need a person at a terminal,
+   show the exact commands and ask first.
+   - `update` stages a new container on a free port, with its own copy of the
+     settings. The config switches only after the new container answers and
+     passes the bridge check, and the old container is removed only after the
+     switch.
+   - An interrupted update is finished or undone only as its own confirmed
+     step, and only when the config table proves which container is live.
+   - `remove` takes the table (if it is still the recorded one), the
+     containers, the settings folders and the record. It never removes the
+     image.
+6. **Doctor reads only.** `localpilot doctor` reports each managed backend:
+   the order it is tried in, launch identity, command presence, and for SearXNG
+   the container state and loopback liveness. It starts nothing and sends no
+   query, and it does not ask Docker inside WSL.
+
+**Consequences.** A user can get working web search with one command and keep
+it working without knowing Docker. LocalPilot never adopts, changes or removes
+a container, folder or config table it did not record as its own. The WSL and
+Podman routes stay off until a person verifies them on each platform.
+
 ## ADR-0291: Managed Search Backends Are Search-Only, User-Owned And Started On First Search
 
 **Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0289 (chat web

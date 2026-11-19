@@ -92,6 +92,7 @@ mod research;
 mod rpc_cmd;
 mod search_backend;
 mod search_lifecycle;
+mod search_readiness;
 mod search_setup;
 mod searxng;
 mod self_review_cmd;
@@ -2077,7 +2078,8 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let resolved = output::resolve_format(format, json, is_tty);
             let remote = remote_gateway::status().await;
             let mut stdout = io::stdout().lock();
-            doctor::run_with(&mut stdout, resolved, hygiene, Some(remote)).await?;
+            let search = search_lifecycle::doctor_readiness();
+            doctor::run_with(&mut stdout, resolved, hygiene, Some(remote), search).await?;
             stdout.flush()?;
         }
         Command::Models {
@@ -3402,7 +3404,12 @@ async fn run_default() -> anyhow::Result<std::process::ExitCode> {
     }
     let remote = remote_gateway::status().await;
     let mut stdout = io::stdout().lock();
-    doctor::run(&mut stdout, Some(remote)).await?;
+    doctor::run(
+        &mut stdout,
+        Some(remote),
+        search_lifecycle::doctor_readiness(),
+    )
+    .await?;
     stdout.flush()?;
     Ok(std::process::ExitCode::SUCCESS)
 }

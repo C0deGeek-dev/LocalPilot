@@ -753,6 +753,122 @@ async fn update(ctx: &Ctx<'_>) -> Result<(), String> {
 
 // ------------------------------------------------------------- production
 
+/// The managed search backends for `localpilot doctor`: each entry as
+/// configured, whether its command exists, and for the SearXNG LocalPilot set
+/// up, what its record, Docker and 127.0.0.1 say. Starts nothing; Docker inside
+/// WSL is not asked, because asking could start the distribution. Docker
+/// problems are reported in fixed words, never as command output.
+pub(crate) fn readiness(
+    config: &Config,
+    state_dir: Option<&std::path::Path>,
+    host: &dyn Host,
+) -> Vec<crate::search_readiness::SearchReadiness> {
+    let (specs, _) = crate::search_backend::search_specs(config);
+    config
+        .search
+        .managed
+        .iter()
+        .map(|(id, entry)| {
+            let research = config.research.web.enabled;
+            let order = research
+                .then(|| {
+                    specs
+                        .iter()
+                        .position(|spec| spec.managed.is_some() && spec.server == *id)
+                        .map(|index| index + 1)
+                })
+                .flatten();
+            let engine = (id == ID && entry.tier == localpilot_config::SearchTier::SelfHosted)
+                .then(|| engine_readiness(host, entry, state_dir));
+            crate::search_readiness::SearchReadiness {
+                id: id.clone(),
+                tier: entry.tier.as_str().to_string(),
+                tool: entry.tool.clone(),
+                order,
+                chat_web_search: research
+                    && config.tools.web == localpilot_config::ChatWebMode::Ask,
+                identity_valid: entry.identity_matches(),
+                command_present: crate::search_setup::command_present(&entry.command),
+                unattended: entry.unattended,
+                engine,
+            }
+        })
+        .collect()
+}
+
+/// How long one Docker command may take in `doctor`.
+const DOCTOR_DOCKER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`readiness`] for this computer: the effective config from the working
+/// directory and the real Docker, each command bounded. Empty when the config
+/// does not load.
+pub(crate) fn doctor_readiness() -> Vec<crate::search_readiness::SearchReadiness> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let Ok(config) = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(&cwd),
+        &localpilot_config::CliOverrides::default(),
+    ) else {
+        return Vec::new();
+    };
+    let state_dir = crate::search_setup::state_dir();
+    readiness(
+        &config,
+        state_dir.as_deref(),
+        &searxng::BoundedHost(DOCTOR_DOCKER_WAIT),
+    )
+}
+
+fn engine_readiness(
+    host: &dyn Host,
+    entry: &ManagedSearchBackend,
+    state_dir: Option<&std::path::Path>,
+) -> crate::search_readiness::EngineReadiness {
+    let unknown = |record| crate::search_readiness::EngineReadiness {
+        record,
+        port: None,
+        image_current: None,
+        table_matches_record: None,
+        update_unfinished: None,
+        container: None,
+        answering: None,
+    };
+    let owned = match state_dir.and_then(searxng::load_owned) {
+        None => return unknown("missing"),
+        Some(Err(_)) => return unknown("unreadable"),
+        Some(Ok(owned)) => owned,
+    };
+    let (container, running) = match &owned.route {
+        searxng::Route::Wsl { .. } => (
+            "not checked: Docker runs inside WSL, and checking could start the distribution",
+            false,
+        ),
+        searxng::Route::Path { .. } => match searxng::recorded_engine(host, &owned) {
+            Err(_) => (
+                "not checked: Docker did not answer, or now uses another endpoint than the recorded one",
+                false,
+            ),
+            Ok(engine) => match searxng::owned_container(host, &engine, &owned) {
+                Err(_) => ("missing, or not the one LocalPilot created", false),
+                Ok(seen) if seen.running => ("running", true),
+                Ok(_) => ("stopped", false),
+            },
+        },
+    };
+    crate::search_readiness::EngineReadiness {
+        record: "recorded",
+        port: Some(owned.port),
+        image_current: Some(owned.image == searxng::IMAGE),
+        table_matches_record: Some(owned.entry.as_ref() == Some(entry)),
+        update_unfinished: Some(owned.unfinished()),
+        container: Some(container.to_string()),
+        answering: running.then(
+            || matches!(host.get(owned.port, "/healthz"), Some((200, body)) if body.trim() == "OK"),
+        ),
+    }
+}
+
 /// `localpilot search <action>`.
 pub(crate) async fn run_command(action: Action) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
@@ -1011,6 +1127,159 @@ mod tests {
             .managed
             .get(ID)
             .and_then(entry_port)
+    }
+
+    #[test]
+    fn doctor_readiness_reads_without_starting_anything() {
+        let fixture = fixture(OLD_IMAGE);
+        let host = docker(&fixture.containers);
+        let config = effective(&fixture.config).unwrap();
+        let found = readiness(&config, Some(&fixture.state), &host);
+        assert_eq!(found.len(), 1);
+        let backend = &found[0];
+        assert_eq!(backend.id, ID);
+        assert_eq!(backend.order, Some(1));
+        assert!(backend.identity_valid);
+        let engine = backend.engine.as_ref().unwrap();
+        assert_eq!(engine.port, Some(8888));
+        assert_eq!(engine.container.as_deref(), Some("running"));
+        assert_eq!(engine.answering, Some(true));
+        assert_eq!(engine.image_current, Some(false));
+        assert_eq!(engine.table_matches_record, Some(true));
+        assert!(!host.commands().iter().any(|c| c.contains(" start ")
+            || c.contains(" stop ")
+            || c.contains(" rm ")
+            || c.contains(" create ")));
+        assert!(!fixture.state.join("setup-audit.log").exists());
+
+        // Stopped: reported, not started, and health is not asked.
+        for container in fixture.containers.borrow_mut().values_mut() {
+            container.1 = false;
+        }
+        let engine = readiness(&config, Some(&fixture.state), &host)[0]
+            .engine
+            .clone()
+            .unwrap();
+        assert_eq!(engine.container.as_deref(), Some("stopped"));
+        assert_eq!(engine.answering, None);
+        assert!(fixture
+            .containers
+            .borrow()
+            .values()
+            .all(|(_, running, _)| !running));
+
+        // Docker inside WSL is not asked at all.
+        let mut owned = searxng::load_owned(&fixture.state).unwrap().unwrap();
+        owned.route = searxng::Route::Wsl {
+            wsl: PathBuf::from("wsl.exe"),
+            distro: "Ubuntu".to_string(),
+        };
+        searxng::save_owned(&fixture.state, &owned).unwrap();
+        let quiet = FakeHost::new(|_| failed("must not run"));
+        let engine = readiness(&config, Some(&fixture.state), &quiet)[0]
+            .engine
+            .clone()
+            .unwrap();
+        assert!(engine.container.unwrap().contains("inside WSL"));
+        // The trap: no command at all, so wsl.exe never ran.
+        assert!(quiet.commands().is_empty());
+
+        // Docker that fails with endpoint details in its error: fixed words only.
+        let mut owned = searxng::load_owned(&fixture.state).unwrap().unwrap();
+        owned.route = searxng::Route::Path {
+            program: PathBuf::from("/usr/bin/docker"),
+        };
+        searxng::save_owned(&fixture.state, &owned).unwrap();
+        let leaky = FakeHost::new(|_| failed("tcp://user:hunter2@remote:2376 refused"));
+        let engine = readiness(&config, Some(&fixture.state), &leaky)[0]
+            .engine
+            .clone()
+            .unwrap();
+        let found = readiness(&config, Some(&fixture.state), &leaky);
+        let mut text = String::new();
+        crate::search_readiness::render(&mut text, &found);
+        let json = serde_json::to_string(&found).unwrap();
+        for shown in [format!("{engine:?}"), text, json] {
+            assert!(
+                !shown.contains("hunter2") && !shown.contains("tcp://"),
+                "{shown}"
+            );
+        }
+
+        // No record, then an unreadable one: said so, nothing claimed.
+        std::fs::remove_file(fixture.state.join("searxng").join("state.json")).unwrap();
+        let engine = readiness(&config, Some(&fixture.state), &quiet)[0]
+            .engine
+            .clone()
+            .unwrap();
+        assert_eq!(engine.record, "missing");
+        assert_eq!(engine.image_current, None);
+        std::fs::write(
+            fixture.state.join("searxng").join("state.json"),
+            "{ not json",
+        )
+        .unwrap();
+        let engine = readiness(&config, Some(&fixture.state), &quiet)[0]
+            .engine
+            .clone()
+            .unwrap();
+        assert_eq!(engine.record, "unreadable");
+        assert_eq!(engine.table_matches_record, None);
+    }
+
+    #[test]
+    fn doctor_readiness_order_follows_precedence_and_the_web_switch() {
+        let fixture = fixture(searxng::IMAGE);
+        let host = docker(&fixture.containers);
+        // A hand-designated search tool comes first.
+        let text = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            format!(
+                "{text}\n[mcp.servers.finder]\ncommand = \"finder\"\n\n[research.mcp]\ntools = [{{ server = \"finder\", tool = \"search\" }}]\n"
+            ),
+        )
+        .unwrap();
+        let config = effective(&fixture.config).unwrap();
+        let found = readiness(&config, Some(&fixture.state), &host);
+        assert_eq!(found[0].order, Some(2));
+        let mut rendered = String::new();
+        crate::search_readiness::render(&mut rendered, &found);
+        assert!(
+            rendered.contains("search candidate 2nd for /research and chat web_search"),
+            "{rendered}"
+        );
+        let json = serde_json::to_string(&found).unwrap();
+        assert!(json.contains(r#""order":2"#), "{json}");
+        // Chat web access off: still a /research candidate, not a chat one.
+        let mut chat_off = config.clone();
+        chat_off.tools.web = localpilot_config::ChatWebMode::Off;
+        let found = readiness(&chat_off, Some(&fixture.state), &host);
+        assert_eq!(found[0].order, Some(2));
+        assert!(!found[0].chat_web_search);
+        let mut rendered = String::new();
+        crate::search_readiness::render(&mut rendered, &found);
+        assert!(
+            rendered.contains("/research only (chat web access is off)"),
+            "{rendered}"
+        );
+        assert!(serde_json::to_string(&found)
+            .unwrap()
+            .contains(r#""chat_web_search":false"#));
+        // Web research off: not a candidate at all.
+        let mut off = config.clone();
+        off.research.web.enabled = false;
+        let found = readiness(&off, Some(&fixture.state), &host);
+        assert_eq!(found[0].order, None);
+        let mut rendered = String::new();
+        crate::search_readiness::render(&mut rendered, &found);
+        assert!(
+            rendered.contains("not a search candidate while web research is off"),
+            "{rendered}"
+        );
+        assert!(serde_json::to_string(&found)
+            .unwrap()
+            .contains(r#""order":null"#));
     }
 
     #[tokio::test]

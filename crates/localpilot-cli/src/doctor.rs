@@ -74,6 +74,10 @@ pub struct DoctorReport {
     /// it cannot be read). Absent (and omitted from JSON) when not collected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<crate::remote_status::RemoteStatus>,
+    /// Managed search backends, collected by the caller without starting
+    /// anything. Omitted from JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub managed_search: Vec<crate::search_readiness::SearchReadiness>,
     /// The configured permission profile and the user's exact command list;
     /// `None` when the configuration did not load.
     pub permissions: Option<PermissionsStatus>,
@@ -672,6 +676,7 @@ pub fn report() -> DoctorReport {
         workspace_trust_store,
         hygiene: None,
         remote: None,
+        managed_search: Vec::new(),
         permissions: config.as_ref().map(permissions_status),
     }
 }
@@ -831,8 +836,16 @@ fn capabilities() -> Vec<String> {
 pub async fn run(
     out: &mut dyn Write,
     remote: Option<crate::remote_status::RemoteStatus>,
+    search_backends: Vec<crate::search_readiness::SearchReadiness>,
 ) -> io::Result<()> {
-    run_with(out, crate::output::OutputFormat::Human, false, remote).await
+    run_with(
+        out,
+        crate::output::OutputFormat::Human,
+        false,
+        remote,
+        search_backends,
+    )
+    .await
 }
 
 /// Gather a report and write it in the requested format. The JSON form is the
@@ -846,9 +859,11 @@ pub async fn run_with(
     format: crate::output::OutputFormat,
     include_context: bool,
     remote: Option<crate::remote_status::RemoteStatus>,
+    search_backends: Vec<crate::search_readiness::SearchReadiness>,
 ) -> io::Result<()> {
     let mut report = report_with_mcp().await;
     report.remote = remote;
+    report.managed_search = search_backends;
     if include_context {
         report.hygiene = hygiene_report();
     }
@@ -894,7 +909,7 @@ fn render_chat_web(s: &mut String, web: &crate::chat_web_status::ChatWebStatus) 
     } else {
         let _ = writeln!(
             s,
-            "  web search: {} (configured; no search is sent here, see the mcp servers section for whether it starts)",
+            "  web search: {} (configured; no search is sent here; the mcp servers section probes [mcp.servers] tools)",
             web.search_backends.join(", ")
         );
     }
@@ -1105,6 +1120,7 @@ pub fn render(report: &DoctorReport) -> String {
     if let Some(web) = &report.chat_web {
         render_chat_web(&mut s, web);
     }
+    crate::search_readiness::render(&mut s, &report.managed_search);
     let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
     let _ = writeln!(s);
 
@@ -1894,6 +1910,7 @@ mod tests {
             },
             hygiene: None,
         remote: None,
+            managed_search: Vec::new(),
             mesh: MeshStatus {
                 writer: "native".into(),
                 config_error: None,
@@ -2545,7 +2562,7 @@ added_at = \"1\"
         web.unresolved.clear();
         let human = render(&report);
         assert!(
-            human.contains("web search: finder.search (configured; no search is sent here, see the mcp servers section for whether it starts)"),
+            human.contains("web search: finder.search (configured; no search is sent here; the mcp servers section probes [mcp.servers] tools)"),
             "{human}"
         );
         assert!(!human.contains("unresolved search tools"), "{human}");

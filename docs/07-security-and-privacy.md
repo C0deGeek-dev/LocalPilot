@@ -893,9 +893,10 @@ documented exception to the default-off rule of the ecosystem remote-egress
 policy (`policies/remote-egress.md`); the policy's other four rules hold by
 construction:
 
-- **Real search only** (ADR-0290). Candidate URLs come only from the search
-  tools designated in `[research.mcp] tools`; the model never proposes URLs.
-  With no search tool designated or reachable the run performs no web search or
+- **Real search only** (ADR-0290). Candidate URLs come only from real search
+  tools: first those designated in `[research.mcp] tools`, then the managed
+  backends LocalPilot set up under `[search.managed.<id>]`. The model never
+  proposes URLs. With no search tool designated or reachable the run performs no web search or
   page fetch — skill discovery's repository search included — and its report is
   titled a local knowledge review with the reason stated.
 - **Managed search backends** (ADR-0291). A backend LocalPilot set up is read
@@ -1129,7 +1130,8 @@ difference:
   audit log with secrets stripped from the URL. A `fetch` of this machine
   (`localhost`, loopback) stays local and needs no consent.
 - **The builtin `web_search` tool** sends a redacted, length-bounded query to
-  the search tools designated under `[research.mcp]`, under the same chat web
+  the search tools designated under `[research.mcp]` and then the managed
+  backends under `[search.managed.<id>]`, under the same chat web
   setting, host restriction and incognito refusal. Consent is asked once per
   search server per session and says later queries go there without another
   question; the server process is started only after that consent. The audit

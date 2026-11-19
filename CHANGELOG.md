@@ -40,6 +40,11 @@ is SemVer-stable; the configuration schema stability policy is in
   interrupted update is finished or undone only after you confirm it, and only
   when the config table is exactly one LocalPilot wrote. Config edits by
   `update` and `remove` leave a hand-edited table alone.
+- `localpilot doctor` lists each managed search backend: the order web search
+  tries it in, whether its launch identity is valid, whether its command exists,
+  and for the local SearXNG the container state and whether it answers on
+  `127.0.0.1`. It starts nothing and sends no query (`managed_search` in
+  `--json`).
 - The full-screen session offers that setup when a search finds no backend:
   after a chat turn whose `web_search` found none, and before `/research`. Only
   for a prompt typed at this terminal, never in incognito; keys stay in the
