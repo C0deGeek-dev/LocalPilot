@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Search setup: picking a backend that cannot be set up from where you are (a
+  SearXNG with no usable Docker, or a key backend from the full-screen session)
+  now says why and offers the choice again, instead of ending setup and running
+  `/research` as a local review.
+
 - Managed search backends (LocalPilot#11, ADR-0291). A new `[search.managed.<id>]`
   table in the user config holds search backends LocalPilot manages itself.
   They are search-only: never one of the session's MCP tools, never started at

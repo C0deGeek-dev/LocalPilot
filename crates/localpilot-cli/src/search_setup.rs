@@ -542,37 +542,39 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
             }
         })
         .collect();
-    let backend = match s
-        .console
-        .pick("Which backend should LocalPilot set up?", &options)
-    {
-        Pick::Option(index) => match Backend::ALL.get(index) {
-            Some(backend) => *backend,
-            None => return Outcome::Cancelled,
-        },
-        Pick::No => {
-            say("Nothing was set up.");
-            return Outcome::Declined;
+    // A choice that cannot be set up here says why and asks again, so the
+    // person can still pick one that can.
+    let backend = loop {
+        let backend = match s
+            .console
+            .pick("Which backend should LocalPilot set up?", &options)
+        {
+            Pick::Option(index) => match Backend::ALL.get(index) {
+                Some(backend) => *backend,
+                None => return Outcome::Cancelled,
+            },
+            Pick::No => {
+                say("Nothing was set up.");
+                return Outcome::Declined;
+            }
+            Pick::Cancel => {
+                say("Nothing was set up.");
+                return Outcome::Cancelled;
+            }
+        };
+        if !s.keys && backend.key_variable().is_some() {
+            say(&format!(
+                "{} needs your own key, and a key is entered only at a terminal: run localpilot search setup there. Pick another backend, or None of these.",
+                backend.title()
+            ));
+            continue;
         }
-        Pick::Cancel => {
-            say("Nothing was set up.");
-            return Outcome::Cancelled;
+        if let (Backend::SearXng, searxng::Found::Unavailable(reason)) = (backend, &containers) {
+            say(&format!("{reason} Pick another backend, or None of these."));
+            continue;
         }
+        break backend;
     };
-
-    if !s.keys && backend.key_variable().is_some() {
-        let reason = format!(
-            "{} needs your own key, and a key is entered only at a terminal: run localpilot search setup there",
-            backend.title()
-        );
-        say(&reason);
-        return Outcome::Stopped(reason);
-    }
-
-    if let (Backend::SearXng, searxng::Found::Unavailable(reason)) = (backend, &containers) {
-        say(reason);
-        return Outcome::Stopped(reason.clone());
-    }
 
     // 2. What it needs.
     let program = match (backend.needs(), found.launcher_for(backend)) {
@@ -2320,6 +2322,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_terminal_a_key_backend_is_sent_to_the_terminal_command() {
         let home = brave_home();
+        // Brave cannot be set up here: the reason, then the choice again.
         let console = Script::new(Pick::Option(2), &[Answer::Yes, Answer::No], Some("k"));
         let outcome = run_as(
             &home,
@@ -2331,14 +2334,21 @@ mod tests {
             &|| false,
         )
         .await;
-        assert!(
-            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("localpilot search setup")),
-            "{outcome:?}"
-        );
+        assert_eq!(outcome, Outcome::Cancelled);
         let said = console.said.borrow().join("\n");
         assert!(
             said.contains("Brave Search API, with your own key (set up in a terminal)"),
             "{said}"
+        );
+        assert!(
+            said.contains("run localpilot search setup there. Pick another backend"),
+            "{said}"
+        );
+        assert_eq!(
+            said.matches("Brave Search API, with your own key (set up in a terminal)")
+                .count(),
+            2,
+            "the choice is offered again: {said}"
         );
         assert!(!audit_path(&home.state).exists());
         assert!(home.credentials.generic_get(NEW_ALIAS).is_none());
@@ -2928,25 +2938,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn searxng_without_a_usable_docker_is_listed_with_the_reason_and_stops() {
-        let home = home("");
+    async fn searxng_without_a_usable_docker_says_why_and_asks_again() {
+        let first = home("");
         let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
         let outcome = run_with(
-            &home,
+            &first,
             &console,
             &EVERYTHING,
             working_launcher("x"),
             &real_write,
         )
         .await;
+        // The scripted person cancels at the second choice.
+        assert_eq!(outcome, Outcome::Cancelled);
+        let text = console.text();
+        assert!(text.contains("No Docker was found"), "{text}");
         assert!(
-            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("No Docker was found")),
-            "{outcome:?}"
+            text.contains("Pick another backend, or None of these."),
+            "{text}"
         );
-        assert!(console
-            .text()
-            .contains("SearXNG on this computer, in Docker (not available here)"));
-        assert!(!home.state.join("setup-audit.log").exists());
+        // Once in the tier list, then in each of the two choices.
+        assert_eq!(
+            text.matches("SearXNG on this computer, in Docker (not available here)")
+                .count(),
+            3,
+            "{text}"
+        );
+        assert!(!first.state.join("setup-audit.log").exists());
+
+        // Picking DuckDuckGo the second time sets it up.
+        let second = home("");
+        let console = Script::new(Pick::Option(1), &[Answer::Yes, Answer::No], None);
+        console.picks.borrow_mut().push_back(Pick::Option(0));
+        let outcome = run_with(
+            &second,
+            &console,
+            &EVERYTHING,
+            working_launcher("search"),
+            &real_write,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Configured("duckduckgo".to_string()));
     }
 
     #[test]
