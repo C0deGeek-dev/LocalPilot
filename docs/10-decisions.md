@@ -8595,8 +8595,7 @@ resumed sessions and offline scorecards retain effective-input truth while event
 logs written before prompt caching continue to deserialize with zero cache use.
 ## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
 
-Status: accepted. Extends the release process in
-[`docs/09-release-plan.md`](09-release-plan.md) and the installation guide in
+Status: accepted. Extends the pre-1.0 release process and the installation guide in
 [`docs/install.md`](install.md); bound by ADR-0007 (tri-platform tier-1). The
 ecosystem-wide rule lives in the hub's distribution policy.
 
@@ -12855,7 +12854,7 @@ SSE stream).
 Reason:
 
 - satisfies the Stable requirement of at least two provider implementations
-  ([`docs/09`](09-release-plan.md))
+  from the pre-1.0 release plan
 - proves the provider abstraction is not OpenAI-shaped by construction
 - adds a major hosted model family without coupling the core to it (ADR-0002)
 

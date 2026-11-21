@@ -15,8 +15,6 @@ metadata:
 
 Authoritative contract: [`docs/06-harness-spec.md`](../../../docs/06-harness-spec.md).
 This skill lists the invariants to honour; the spec owns the detail.
-(`docs/03-implementation-plan.md` is the historical pre-1.0 phase plan — background
-only, not a current task list.)
 
 ## Source of truth (ADR-0003)
 

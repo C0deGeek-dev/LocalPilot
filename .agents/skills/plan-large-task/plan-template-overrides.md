@@ -69,7 +69,7 @@ column. Transient build-sequencing choices stay in the plan's decision log.
   - `docs/05-tool-system.md` — tool system; `docs/mcp.md` — MCP integration
   - `docs/06-harness-spec.md` — harness runtime (`brief.md`/`PROGRESS.md` are runtime files, never plan files)
   - `docs/07-security-and-privacy.md` + `SECURITY.md` — security/privacy
-  - `docs/08-testing.md` — testing; `docs/09-release-plan.md` — release
+  - `docs/08-testing.md` — testing
   - `docs/10-decisions.md` — ADRs (durable decisions land here)
   - `docs/13-rust-best-practices.md` — engineering style; `docs/14-dev-tooling.md` — dev tooling
   - `docs/install.md`, `docs/configuration.md`, `docs/extending.md`, `docs/embedding.md`, `docs/localmind-integration.md` — task topics
