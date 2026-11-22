@@ -359,7 +359,10 @@ pub(crate) async fn run_benchmark(
         effect: Effect::RunCommand(CommandClass::ExternalWrite),
         interactivity: Interactivity::Interactive,
         trusted,
-        detail: format!("localbench findbest --model {}", entry.name),
+        detail: format!(
+            "localbench findbest --model {} --profile balanced",
+            entry.name
+        ),
     };
     if !terminal_effect_allowed(&engine, &permission) {
         return Ok(BenchmarkOutcome::Declined);
@@ -369,7 +372,13 @@ pub(crate) async fn run_benchmark(
         .map_err(|error| anyhow::anyhow!("could not create {}: {error}", log.display()))?;
     let err_file = file.try_clone()?;
     let mut child = tokio::process::Command::new(program)
-        .args(["findbest", "--model", entry.name.as_str()])
+        .args([
+            "findbest",
+            "--model",
+            entry.name.as_str(),
+            "--profile",
+            "balanced",
+        ])
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(err_file)
