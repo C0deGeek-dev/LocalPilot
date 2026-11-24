@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0293: The Native Mesh Participant Supports Strict Sign-Off And Review Snapshots
+
+**Status:** accepted · **Date:** 2026-11-24. Builds on ADR-0190 (the
+pair-mesh endpoint). Refs LocalHub#294, LocalHub#295.
+
+**Context.** The pair-programming reference moved to mailbox protocol 1.4.
+Sessions start with strict sign-off (feature `strict-signoff`), may name
+host instances such as `codex-sol` (`participant-instances`), and may
+require `review-snapshot`: a unit closes only on the bytes its agreement
+answered. The native participant implemented none of these, so the reference
+refused to start such a session with LocalPilot, and a free-text `AGREE but
+...` could close a native unit.
+
+**Decision.**
+1. **Strict sign-off is enforced on every close path.** `complete`,
+   `next-unit` and the engine's own close accept only a `VERDICT` whose
+   first line is a strict agreement token sequence. Legacy sessions keep the
+   prefix rule. A session record that claims strict sign-off in any other
+   shape, or names an unknown policy, is refused without change.
+2. **Participant names are checked.** Instance names need the
+   `participant-instances` feature and schema 2; anything else is refused.
+3. **Review snapshots are recorded and checked natively.** The owner's
+   `REVIEW_REQUEST` publishes a snapshot of every changed path's SHA-256
+   since the unit base, in every writable repository, with a digest computed
+   byte-for-byte as the reference does (sorted, compact, ASCII-escaped JSON).
+   Closing refuses when the agreement does not answer the current request
+   (`STALE`), when no request exists (`MISSING`) or when bytes changed
+   (`CHANGED`). Any git failure refuses rather than guessing.
+   `review-withdraw` retires the request; its state update applies only if
+   the session, unit and ownership epoch are unchanged, else it reports a
+   partial operation. A new unit and an accepted handoff start with no
+   current review.
+4. **As a reviewer**, the engine and the MCP verdict tool agree only to the
+   current published request while its bytes hold: a superseded or withdrawn
+   request is acknowledged, changed bytes get `REVISE`. In a snapshot
+   session the published paths are the review inventory, checked as exact
+   bytes; the legacy textual manifest (CRLF read as LF) is not checked again.
+   A published companion path is reported, not agreed to, because this
+   reviewer reads only the anchor. On Windows an absolute link target is
+   hashed in the verbatim form Python's `os.readlink` returns, so both sides
+   agree on links.
+5. **Conformance.** The mandatory suite passes unchanged. The optional
+   review-snapshot fixtures run through a copy of the vendored runner, and a
+   mixed test runs the reference against the native participant as owner and
+   as reviewer, including a non-ASCII and astral path, so both digests agree.
+
+**Consequences.** The reference's start refusal for LocalPilot snapshot
+sessions can be lifted upstream. Until it is, the snapshot path is exercised
+only by the tests above.
+
 ## ADR-0292: LocalPilot Sets Up Search Backends And Manages Only The SearXNG It Created
 
 **Status:** accepted · **Date:** 2026-11-19. Builds on ADR-0291 (managed

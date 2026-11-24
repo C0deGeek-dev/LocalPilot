@@ -55,4 +55,9 @@ pub const PROTOCOL: &str = "1.4";
 
 /// Features this crate implements that a record may name in `requires`
 /// (spec V-8). Sessions opt into quota transitions explicitly.
-pub const FEATURES: &[&str] = &["quota-takeover", "strict-signoff", "participant-instances"];
+pub const FEATURES: &[&str] = &[
+    "quota-takeover",
+    "strict-signoff",
+    "participant-instances",
+    "review-snapshot",
+];

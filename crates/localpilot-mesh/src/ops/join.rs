@@ -273,6 +273,9 @@ impl Mesh {
             str_of(&s, "driver").unwrap_or_default(),
             str_of(&s, "owner").unwrap_or_default()
         ));
+        if let Some(l) = super::review::status_line(&s) {
+            line(l);
+        }
         if self.no_vcs(&s)? {
             line(format!(
                 "VCS none base={}",

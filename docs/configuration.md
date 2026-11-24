@@ -436,8 +436,9 @@ of finding the mail on its next look:
 
 #### Sign-off and participant instances
 
-The native participant implements mailbox protocol 1.4 and its required
-`strict-signoff` and `participant-instances` features. The reference starts
+The native participant implements mailbox protocol 1.4, its required
+`strict-signoff` and `participant-instances` features, and the optional
+`review-snapshot` feature (see "Review snapshots" below). The reference starts
 every session with strict sign-off unless `--signoff legacy` is given: such a
 session is schema 2 even for the Claude Code and Codex pair, and a unit closes
 (`complete`, `next-unit`, or the engine's own close as owner) only on a
@@ -455,6 +456,31 @@ A participant may be a host name with an instance suffix, such as `codex-sol`
 beside `codex`, when its session requires `participant-instances`. Instance
 names are 1 to 32 lowercase ASCII letters or digits after the host and a
 hyphen; any other participant name is refused.
+
+#### Review snapshots
+
+A session started with `--review-snapshot` (strict sign-off only) closes a
+unit only on the exact bytes its `AGREE` answered. When the unit's owner posts
+a `REVIEW_REQUEST`, the native participant records every path changed since
+the unit's base, with the SHA-256 of its working-tree bytes (`gone` for a
+deleted path), in every repository the session may write, and publishes the
+digest on the request. `complete`, `next-unit` and the engine's own close
+refuse unless the agreeing `VERDICT` replies to the current request and the
+bytes are unchanged: `REVIEW_SNAPSHOT_CHANGED paths=...` names what moved.
+Committing the reviewed bytes is not a change. After an edit, post a new
+`REVIEW_REQUEST` (it supersedes the old one) or withdraw the request:
+
+```powershell
+localpilot mesh review-withdraw --role localpilot --reason "more to do"
+```
+
+As a reviewer, the native participant agrees only to the current request, and
+only while the published bytes still hold; a superseded or withdrawn request is
+acknowledged and left, and changed bytes get a `REVISE`. It reviews the paths
+the request published, as exact bytes, and does not agree to a path in a
+companion repository, which it cannot read. `status` shows
+`REVIEW_SNAPSHOT on` with the current request and digest; `guard-write` and
+`post` print `REVIEW_PENDING` and `UNRESOLVED_STEER` reminders on stderr.
 
 #### Artifacts, usage, quota takeover, and advisory context
 

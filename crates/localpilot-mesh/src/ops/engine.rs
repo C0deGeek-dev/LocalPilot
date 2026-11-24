@@ -175,7 +175,25 @@ impl Mesh {
                 return Ok(ack("not a required reviewer"));
             }
             let round = self.verdicts_in_unit(s, role)? + 1;
-            return Ok(match self.check_manifest(s, &body)? {
+            // In a snapshot session only the published request can be agreed
+            // to, and only on the bytes it published (spec RS-2, RS-4).
+            if super::review::snapshot_on(s) {
+                let wait = super::after_append_wait();
+                if self.review_publication(role, &msg_id, wait)?
+                    == super::review::Publication::Superseded
+                {
+                    return Ok(ack("superseded or withdrawn review request"));
+                }
+                let problems = self.snapshot_review_problems(role, &msg_id, wait)?;
+                if !problems.is_empty() {
+                    return Ok(Step::Post {
+                        args: revise_for(&problems, round, &msg_id),
+                        expect: expect(true),
+                        ack: msg_id,
+                    });
+                }
+            }
+            return Ok(match self.review_inventory(s, role, &msg_id, &body)? {
                 Err(problems) => Step::Post {
                     args: revise_for(&problems, round, &msg_id),
                     expect: expect(true),
@@ -276,10 +294,12 @@ impl Mesh {
         request: &Request,
     ) -> Result<Option<PostArgs>, MeshError> {
         let s = self.require(role, true)?;
-        Ok(match self.check_manifest(&s, &request.body)? {
-            Ok(_) => None,
-            Err(problems) => Some(revise_for(&problems, request.round, &request.msg_id)),
-        })
+        let mut problems =
+            self.snapshot_review_problems(role, &request.msg_id, std::time::Duration::ZERO)?;
+        if let Err(more) = self.review_inventory(&s, role, &request.msg_id, &request.body)? {
+            problems.extend(more);
+        }
+        Ok((!problems.is_empty()).then(|| revise_for(&problems, request.round, &request.msg_id)))
     }
 
     /// The review `role` is asked for by `msg_id`, as the engine would see
@@ -333,8 +353,15 @@ impl Mesh {
         if self.replied(role, msg_id)? {
             return Ok(Err(format!("{role} has already replied to {msg_id}")));
         }
+        let snapshot = self.snapshot_review_problems(role, msg_id, std::time::Duration::ZERO)?;
+        if !snapshot.is_empty() {
+            return Ok(Err(format!(
+                "the request's review snapshot does not hold: {}",
+                snapshot.join("; ")
+            )));
+        }
         let body = str_of(&m, "body").unwrap_or_default().to_owned();
-        let files = match self.check_manifest(&s, &body)? {
+        let files = match self.review_inventory(&s, role, msg_id, &body)? {
             Ok(files) => files,
             Err(problems) => {
                 return Ok(Err(format!(
@@ -401,6 +428,23 @@ impl Mesh {
             .filter(|r| str_of(r, "kind") == Some("VERDICT") && str_of(r, "unit_id") == unit)
             .count();
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// The files a review request asks about, or every problem found. In a
+    /// snapshot session that is the published snapshot, whose bytes are
+    /// checked exactly (spec RS-4); the request's textual manifest, read with
+    /// CRLF as LF, is not checked again there. Elsewhere it is the manifest.
+    fn review_inventory(
+        &self,
+        s: &Obj,
+        role: &str,
+        msg_id: &str,
+        body: &str,
+    ) -> Result<Result<Vec<String>, Vec<String>>, MeshError> {
+        match self.snapshot_inventory(role, msg_id)? {
+            Some(inventory) => Ok(inventory),
+            None => self.check_manifest(s, body),
+        }
     }
 
     /// The manifest of a review request, verified against the tree: the

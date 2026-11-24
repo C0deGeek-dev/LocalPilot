@@ -194,6 +194,13 @@ enum Op {
         #[arg(long, value_parser = ["human"])]
         actor: Option<String>,
     },
+    /// Withdraw the owner's current review request (review snapshots).
+    ReviewWithdraw {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     HandoffWithdraw {
         #[arg(long)]
         role: String,
@@ -516,6 +523,7 @@ fn dispatch(mesh: &Mesh, op: Op) -> Result<u8, MeshError> {
         Op::HandoffAccept { role, actor } => mesh.handoff_accept_as(&role, actor.as_deref())?,
         Op::HandoffDecline { role, actor } => mesh.handoff_decline(&role, actor.as_deref())?,
         Op::HandoffWithdraw { role, actor } => mesh.handoff_withdraw(&role, actor.as_deref())?,
+        Op::ReviewWithdraw { role, reason } => mesh.review_withdraw(&role, reason.as_deref())?,
         Op::Complete { role } => mesh.complete(&role)?,
         Op::Endpoint {
             role,

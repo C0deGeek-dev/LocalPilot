@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use super::post::{Expect, PostArgs};
 use super::read::num_at;
+use super::review;
 use super::signoff::{agreement_problem, decision_text, STRICT_SIGNOFF};
 use super::{
     authority, participants, refused, schema, seq_of, settle_status, sid, str_of, strings,
@@ -367,8 +368,8 @@ impl Mesh {
     }
 
     /// Required reviewer `r`'s standing decision on the current unit (U-3b):
-    /// `Ok(())` for a standing AGREE, else why not.
-    fn reviewer_standing(&self, s: &Obj, r: &str) -> Result<Result<(), String>, MeshError> {
+    /// the standing AGREE, else why not.
+    fn reviewer_standing(&self, s: &Obj, r: &str) -> Result<Result<Obj, String>, MeshError> {
         let o = str_of(s, "owner").unwrap_or_default();
         let unit = s.get("unit_id");
         let floor = s
@@ -424,7 +425,7 @@ impl Mesh {
                 seq_of(&best)
             )));
         }
-        Ok(Ok(()))
+        Ok(Ok(best))
     }
 
     /// Refuse unless the unit's reviewers agree (U-3a for one, U-3b for more).
@@ -432,9 +433,11 @@ impl Mesh {
         if participants(s).iter().filter(|x| *x != role).count() > 1 {
             let (_, required, _) = authority(s);
             let mut blocks = Vec::new();
+            let mut agrees = Vec::new();
             for r in &required {
-                if let Err(why) = self.reviewer_standing(s, r)? {
-                    blocks.push(why);
+                match self.reviewer_standing(s, r)? {
+                    Ok(m) => agrees.push(m),
+                    Err(why) => blocks.push(why),
                 }
             }
             if !blocks.is_empty() {
@@ -447,6 +450,9 @@ impl Mesh {
                     "not every required reviewer agrees: {}{need}",
                     blocks.join("; ")
                 )));
+            }
+            if review::snapshot_on(s) {
+                self.snapshot_close_check(s, &agrees)?;
             }
             return Ok(());
         }
@@ -483,6 +489,9 @@ impl Mesh {
         if seq_of(&d) <= floor {
             return Err(refused("peer's AGREE predates the last unit boundary or resume; the review was invalidated and a new verdict is required"));
         }
+        if review::snapshot_on(s) {
+            self.snapshot_close_check(s, std::slice::from_ref(&d))?;
+        }
         Ok(())
     }
 
@@ -500,6 +509,19 @@ impl Mesh {
                 stderr: format!("{line}\n"),
             });
         }
+        let mut out = self.guard_scope(&s, path)?;
+        // An owner editing over a current review is warned, never stopped
+        // (spec RS-5).
+        if review::snapshot_on(&s) {
+            if let Some(line) = review::review_pending_line(&s) {
+                out.stderr = format!("{line}\n{}", out.stderr);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The scope half of `guard-write`: may the owner write at `path`?
+    fn guard_scope(&self, s: &Obj, path: Option<&Path>) -> Result<Out, MeshError> {
         let Some(p) = path else {
             return Ok(Out::code(0));
         };
@@ -517,7 +539,7 @@ impl Mesh {
         }
         // The session's frozen companion list, never the declaration file:
         // editing `.pair-companion.json` mid-session cannot widen the scope.
-        for c in companions(&s) {
+        for c in companions(s) {
             let root = resolve_lexically(Path::new(str_of(&c, "root").unwrap_or_default()));
             let Ok(inner) = q.strip_prefix(&root) else {
                 continue;
@@ -711,6 +733,8 @@ impl Mesh {
             s.insert("ownership_epoch".into(), epoch.clone());
             s.insert("handoff".into(), Value::Null);
             s.insert("waiting".into(), Value::Null);
+            // A new owner's unit has no current review (spec RS-3).
+            s.remove("review");
             settle_status(&mut s);
             s.insert("updated_at".into(), json!(utc_now()));
             self.save(&s)?;
@@ -995,6 +1019,8 @@ impl Mesh {
         }
         s.insert("phase".into(), json!("huddle"));
         s.insert("waiting".into(), Value::Null);
+        // The new unit starts with no current review (spec RS-3).
+        s.remove("review");
         settle_status(&mut s);
         s.insert("updated_at".into(), json!(utc_now()));
         self.save(&s)?;

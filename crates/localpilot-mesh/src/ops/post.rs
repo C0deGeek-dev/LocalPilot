@@ -13,6 +13,8 @@ use crate::lock::Lock;
 use crate::timefmt::utc_now;
 use crate::PROTOCOL;
 
+use super::review;
+
 /// What `post` was asked to send.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostArgs {
@@ -351,6 +353,17 @@ impl Mesh {
                 "message too large; reference a repo artifact instead",
             ));
         }
+        // The owner's review request carries the bytes it asks about: the
+        // snapshot is taken before the append and published only after it
+        // (spec RS-2).
+        let trees = if kind == "REVIEW_REQUEST"
+            && review::snapshot_on(&s)
+            && str_of(&s, "owner") == Some(role)
+        {
+            Some(self.review_snapshot(&s)?)
+        } else {
+            None
+        };
         // A post is proof of life: it clears the poster's own recorded pause,
         // provided nobody replaced that pause since this command read it.
         let entry_pause = pauses(&s).get(role).cloned();
@@ -417,6 +430,9 @@ impl Mesh {
                     m.insert(k.clone(), v.clone());
                 }
             }
+            if let Some(t) = &trees {
+                m.insert("review_snapshot".into(), json!(review::digest(t)));
+            }
             jsonl::append(&jp, &m)?;
             // In the journal now, so owed its wakes even if a later step
             // fails (P-3). Only queued here: the caller dials once the
@@ -428,8 +444,15 @@ impl Mesh {
                 .map_err(|e| incomplete(&m, role, "the latest record could not be written", &e))?;
             m
         };
-        self.after_post(&s, role, &m, entry_pause.is_some(), a.expect_reply)
-            .map_err(|e| incomplete(&m, role, "the session update did not complete", &e))?;
+        self.after_post(
+            &s,
+            role,
+            &m,
+            entry_pause.is_some(),
+            a.expect_reply,
+            trees.as_ref(),
+        )
+        .map_err(|e| incomplete(&m, role, "the session update did not complete", &e))?;
         Ok(m)
     }
 
@@ -442,6 +465,7 @@ impl Mesh {
         m: &Obj,
         had_pause: bool,
         expect: bool,
+        trees: Option<&review::Trees>,
     ) -> Result<(), MeshError> {
         let _g = self.state_lock_after_append()?;
         let Some(mut fresh) = self.active()? else {
@@ -515,6 +539,13 @@ impl Mesh {
                     },
                 );
             }
+            if let Some(t) = trees {
+                if str_of(&fresh, "owner") == Some(role) {
+                    let mid =
+                        str_of(m, "msg_id").map_or_else(|| format!("{role}:{seq}"), str::to_owned);
+                    review::publish_review(&mut fresh, role, seq, &mid, t);
+                }
+            }
         }
         fresh.insert("updated_at".into(), json!(utc_now()));
         self.save(&fresh)
@@ -558,6 +589,33 @@ impl Mesh {
         }
         self.post_message(role, a, None, false, None)?;
         let mut out = Out::code(0);
+        let mut warn = String::new();
+        if let Some(s) = self.active()? {
+            if review::snapshot_on(&s) && str_of(&s, "owner") == Some(role) {
+                if a.kind == "REVIEW_REQUEST" {
+                    let published = review::current_review(&s)
+                        .map(|rv| review::trees_from(rv.get("trees")))
+                        .unwrap_or_default();
+                    let bad = review::problems(&s, &published);
+                    if !bad.is_empty() {
+                        warn.push_str(&format!(
+                            "REVIEW_SNAPSHOT_UNSUPPORTED paths={} (a close will refuse until they are regular files, links or gone)\n",
+                            bad.join(",")
+                        ));
+                    }
+                    let steers = self.unresolved_steers(&s, role)?;
+                    if !steers.is_empty() {
+                        warn.push_str(&format!(
+                            "UNRESOLVED_STEER {} (name each in a post: --reply-to it, or its id in the body)\n",
+                            steers.join(",")
+                        ));
+                    }
+                } else if let Some(line) = review::review_pending_line(&s) {
+                    warn.push_str(&line);
+                    warn.push('\n');
+                }
+            }
+        }
         if let Some(s) = self.active()? {
             if schema(&s) == 1 {
                 if let Some((x, y)) = self.unacked_range(&s, role)? {
@@ -579,6 +637,7 @@ impl Mesh {
                 }
             }
         }
+        out.stderr = warn + &out.stderr;
         Ok(out)
     }
 }

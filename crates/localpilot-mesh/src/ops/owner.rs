@@ -337,25 +337,34 @@ impl Mesh {
         summary: &str,
     ) -> Result<Result<PostArgs, String>, MeshError> {
         let s = self.require(role, true)?;
-        let changed = self.changed_in_unit(&s)?;
-        if changed.is_empty() {
-            return Ok(Err(
-                "nothing changed in the unit; there is nothing to review".into(),
-            ));
-        }
-        let mut manifest = String::new();
-        for path in &changed {
-            match fingerprint_of(self.repo(), path) {
-                Ok(Some(fp)) => manifest.push_str(&format!("{path}={fp}\n")),
-                Ok(None) => manifest.push_str(&format!("{path}=deleted\n")),
-                Err(why) => return Ok(Err(format!("{path} cannot be fingerprinted: {why}"))),
+        // In a snapshot session the request lists exactly what it will
+        // publish: exact bytes, links unfollowed, companions included.
+        let (manifest, count) = if let Some(listed) = self.snapshot_manifest(&s)? {
+            match listed {
+                Ok(listed) => listed,
+                Err(why) => return Ok(Err(why)),
             }
-        }
+        } else {
+            let changed = self.changed_in_unit(&s)?;
+            if changed.is_empty() {
+                return Ok(Err(
+                    "nothing changed in the unit; there is nothing to review".into(),
+                ));
+            }
+            let mut manifest = String::new();
+            for path in &changed {
+                match fingerprint_of(self.repo(), path) {
+                    Ok(Some(fp)) => manifest.push_str(&format!("{path}={fp}\n")),
+                    Ok(None) => manifest.push_str(&format!("{path}=deleted\n")),
+                    Err(why) => return Ok(Err(format!("{path} cannot be fingerprinted: {why}"))),
+                }
+            }
+            (manifest, changed.len())
+        };
         let body = format!("{}\n\nFingerprints:\n{manifest}", summary.trim());
         if body.chars().count() > MAX_BODY {
             return Ok(Err(format!(
-                "the request would exceed {MAX_BODY} characters ({} changed paths); split the work",
-                changed.len()
+                "the request would exceed {MAX_BODY} characters ({count} changed paths); split the work"
             )));
         }
         let (_, required, _) = authority(&s);
