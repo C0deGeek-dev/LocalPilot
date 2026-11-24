@@ -3,13 +3,13 @@
 //! Session server discovery, designated research search, and `doctor` each used
 //! to call `StdioTransport::spawn` themselves; chat web search launches through
 //! the same seam (its launcher lives in `search_backend.rs`, shared with managed
-//! search backends). Three copies of a launch policy
-//! is how they drift: a change to what an entry form means, or to what a missing
+//! search backends). Separate copies of a launch policy
+//! are how they drift: a change to what an entry form means, or to what a missing
 //! credential does, lands in one and silently misses the others — which is the
 //! defect this seam exists to prevent, not merely a tidiness preference.
 //!
-//! Source-text checks, because the alternative is standing up three live MCP
-//! servers to prove a structural property.
+//! Source-text checks, because the alternative is standing up a live MCP
+//! server per launch path to prove a structural property.
 
 const MCP_SRC: &str = include_str!("../src/mcp.rs");
 const RESEARCH_SRC: &str = include_str!("../src/research.rs");

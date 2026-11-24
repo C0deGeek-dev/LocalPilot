@@ -73,8 +73,9 @@ fn random_token() -> Result<String, DeviceError> {
     random_hex(SECRET_BYTES)
 }
 
-fn sha256_hex(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+/// Lowercase hex SHA-256 of `data`.
+pub(crate) fn sha256_hex(data: impl AsRef<[u8]>) -> String {
+    format!("{:x}", Sha256::digest(data.as_ref()))
 }
 
 /// Compare two digests without timing that depends on where they differ
@@ -1572,7 +1573,7 @@ impl Pairings {
         }
         let receipt_sha256 = sha256_hex(request.receipt);
         let name: String = request.name.trim().chars().take(64).collect();
-        let grant_sha256 = sha256_hex(&format!(
+        let grant_sha256 = sha256_hex(format!(
             "{name}\u{0}{:?}\u{0}{}",
             request.scope, request.this_workspace_only
         ));

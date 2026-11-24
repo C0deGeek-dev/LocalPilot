@@ -30,7 +30,6 @@ thiserror = { workspace = true }
 localpilot-core = { path = "../localpilot-core" }
 
 [dev-dependencies]
-insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

@@ -775,14 +775,6 @@ pub(crate) fn settings_yml(secret: &str) -> String {
     )
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 /// What preparing the settings folder did, so a rollback undoes only that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Prepared {
@@ -816,14 +808,17 @@ pub(crate) fn prepare_settings(
         }
     } else if let Ok(current) = std::fs::read(&settings) {
         let written = std::fs::read_to_string(&marker).unwrap_or_default();
-        if sha256_hex(&current) != written.trim() && !replace_edited() {
+        if crate::server_devices::sha256_hex(&current) != written.trim() && !replace_edited() {
             return Ok(Prepared { made_dir });
         }
     }
     let text = settings_yml(secret);
     let write = || -> std::io::Result<()> {
         std::fs::write(&settings, &text)?;
-        std::fs::write(&marker, format!("{}\n", sha256_hex(text.as_bytes())))
+        std::fs::write(
+            &marker,
+            format!("{}\n", crate::server_devices::sha256_hex(text)),
+        )
     };
     write().map_err(|error| format!("the settings could not be written ({error})"))?;
     Ok(Prepared { made_dir })
