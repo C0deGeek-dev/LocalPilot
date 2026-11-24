@@ -14,8 +14,9 @@
 //! the assertion prints them. `localpilot mesh` is not wrapped: a second
 //! process per command pushed the suite past the per-test ceiling on Windows.
 //!
-//! The mandatory list runs in shards, one test each, so no test nears the
-//! five-minute ceiling on a slow runner and nextest runs them side by side.
+//! The mandatory list runs in eight shards, one test each, of about 40 s
+//! alone, so none nears the five-minute ceiling under a full parallel run;
+//! `.config/nextest.toml` lets at most two run at a time.
 //! The shards partition the list by position; a separate test checks that
 //! the vendored fixtures are exactly the mandatory list, so none can fall
 //! between shards.
@@ -50,7 +51,7 @@ fn failed_commands(dir: &Path) -> String {
 }
 
 /// How many shards the mandatory list is run in.
-const SHARDS: usize = 4;
+const SHARDS: usize = 8;
 
 /// The vendored mandatory list, in its own order.
 fn mandatory() -> Vec<String> {
@@ -211,23 +212,43 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 #[test]
-fn shard_1_of_4() {
+fn shard_1_of_8() {
     run_shard(0);
 }
 
 #[test]
-fn shard_2_of_4() {
+fn shard_2_of_8() {
     run_shard(1);
 }
 
 #[test]
-fn shard_3_of_4() {
+fn shard_3_of_8() {
     run_shard(2);
 }
 
 #[test]
-fn shard_4_of_4() {
+fn shard_4_of_8() {
     run_shard(3);
+}
+
+#[test]
+fn shard_5_of_8() {
+    run_shard(4);
+}
+
+#[test]
+fn shard_6_of_8() {
+    run_shard(5);
+}
+
+#[test]
+fn shard_7_of_8() {
+    run_shard(6);
+}
+
+#[test]
+fn shard_8_of_8() {
+    run_shard(7);
 }
 
 /// Run every mandatory fixture whose position is `shard` modulo [`SHARDS`].
