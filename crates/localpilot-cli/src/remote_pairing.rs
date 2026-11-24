@@ -142,9 +142,21 @@ impl Issuer {
 
     /// The next request number; `None` once exhausted (never wrapped).
     fn take(&self) -> Option<u64> {
-        self.next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
-            .ok()
+        // An explicit compare-exchange loop rather than `fetch_update`, which
+        // newer toolchains deprecate in favour of a name absent from the MSRV.
+        let mut current = self.next.load(Ordering::SeqCst);
+        loop {
+            let advanced = current.checked_add(1)?;
+            match self.next.compare_exchange_weak(
+                current,
+                advanced,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(previous) => return Some(previous),
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
