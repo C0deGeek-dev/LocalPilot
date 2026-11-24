@@ -141,6 +141,16 @@ fn summarize(checks: &[Check]) -> String {
 
 // ---------------------------------------------------------------- V1: Rust CLI
 
+/// The host target triple, as `rustc -vV` reports it.
+fn host_target() -> String {
+    let output = Command::new("rustc").arg("-vV").output().unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(|host| host.trim().to_string())
+        .expect("rustc -vV names the host")
+}
+
 /// Grade the built `counter`: valid output, usage errors for invalid input,
 /// and held-out inputs that were never part of the fix.
 fn grade_counter(binary: &Path) -> Vec<Check> {
@@ -193,12 +203,20 @@ async fn the_rust_cli_workflow_builds_fixes_and_passes_an_independent_grader() {
     copy_project(&reference("rust-cli"), &project);
     let readme = sha256(&project.join("README.md"));
     let fixed = std::fs::read_to_string(reference("rust-cli.fix").join("src/main.rs")).unwrap();
-    let build = json!({"program": "cargo", "args": ["build", "--offline", "--quiet", "--target-dir", "target"]});
-    let binary = project.join("target").join("debug").join(if cfg!(windows) {
-        "counter.exe"
-    } else {
-        "counter"
-    });
+    // Name the host target explicitly, so the binary's path does not depend on
+    // a `build.target` in the user's cargo configuration (which moves output
+    // to `target/<triple>/debug`).
+    let host = host_target();
+    let build = json!({"program": "cargo", "args": ["build", "--offline", "--quiet", "--target-dir", "target", "--target", host]});
+    let binary = project
+        .join("target")
+        .join(&host)
+        .join("debug")
+        .join(if cfg!(windows) {
+            "counter.exe"
+        } else {
+            "counter"
+        });
     // The session also runs the built program itself, so the behaviour is
     // observed through the tools and not only by the grader.
     let invalid = json!({"program": binary.to_string_lossy(), "args": ["--count", "-1"]});

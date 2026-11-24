@@ -14,5 +14,8 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 proposal-validation = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = '(package(localpilot-selfimprove) and (test(execution::tests::) or test(promotion::tests::))) or (package(localpilot) and (test(explicit_execution_then_separate_) or test(selfimprove_validation_)))'
+filter = '(package(localpilot-selfimprove) and (test(execution::tests::) or test(promotion::tests::))) or (package(localpilot-patchgen) and test(validation::promotion::tests::process_crash_)) or (package(localpilot) and (test(explicit_execution_then_separate_) or test(selfimprove_validation_)))'
 test-group = 'proposal-validation'
+# These fixtures take about two minutes alone on a machine with many
+# toolchains installed, and longer under a full parallel run.
+slow-timeout = { period = "60s", terminate-after = 10 }

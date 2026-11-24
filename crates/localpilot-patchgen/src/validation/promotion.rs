@@ -539,7 +539,10 @@ mod tests {
             .stderr(log)
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A hang detector, not a performance bound: the worker hashes the
+        // installed toolchains, which takes well over a minute on a loaded
+        // machine with several of them.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
