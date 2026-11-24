@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Search setup: SearXNG now runs with Docker that is only inside WSL, when WSL
+  uses its default NAT networking with localhost forwarding (a `127.0.0.1`
+  publish then reaches only Windows' own loopback; other modes are refused with
+  the reason). The container joins its own labelled Docker network, and while
+  LocalPilot uses SearXNG it keeps the distribution from idling out; WSL stops
+  it about 30 seconds after LocalPilot is done, and the next search starts it
+  again. `localpilot search start` and a search refuse to start SearXNG onto a
+  port something else took. `search stop` and `remove` work whatever WSL's
+  networking is.
+
 - Search setup: picking a backend that cannot be set up from where you are (a
   SearXNG with no usable Docker, or a key backend from the full-screen session)
   now says why and offers the choice again, instead of ending setup and running

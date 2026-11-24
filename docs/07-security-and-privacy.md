@@ -942,8 +942,12 @@ construction:
   on a settings folder that carries LocalPilot's marker. The secret key in its
   settings is random per setup. Liveness and engine checks go to `127.0.0.1`
   only. The consent says that SearXNG forwards each query to its enabled engines
-  from your IP address and that a local instance is not anonymous. Podman, and
-  Docker that runs only inside WSL, are reported and not used until their
+  from your IP address and that a local instance is not anonymous. Docker that
+  runs only inside WSL is used only under WSL's NAT networking with localhost
+  forwarding on, where a `127.0.0.1` publish reaches only Windows' loopback;
+  any other WSL networking is refused before anything starts. The container
+  joins a labelled network LocalPilot created, and a network of that name it did
+  not create is refused. Podman is reported and not used until its
   loopback-only publishing has been checked. A search starts a stopped
   container only after its consent question (which names the container and its
   memory), only when Docker still uses the recorded endpoint and the container

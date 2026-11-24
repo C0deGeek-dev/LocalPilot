@@ -23,9 +23,6 @@ test = true
 # The interactive `chat` REPL links crossterm. It is opt-in so the default
 # binary (doctor/ask/print/harness/memory/export) links no terminal backend and
 # runs on every toolchain. Release and CI builds enable it.
-# Builds the SearXNG setup routes that are still being checked (Docker only
-# inside WSL), for checking them. Never enabled in release or CI builds.
-unverified-search-routes = []
 default = []
 tui = [
     "dep:crossterm",

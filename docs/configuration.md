@@ -1566,8 +1566,22 @@ and accepts only a local Unix socket or a local named pipe, with Docker Engine
 28.0.0 or later, on which a port published on `127.0.0.1` cannot be reached
 from the local network. Every later Docker command names that endpoint with
 `--host` and runs without the `DOCKER_HOST`, `DOCKER_CONTEXT`,
-`DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH` variables. Podman, and Docker that
-runs only inside WSL, are reported but not used yet. Setup writes the settings
+`DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH` variables. Docker that runs only inside WSL (Windows) is used under NAT
+networking with localhost forwarding on, the WSL defaults: then a port
+published on `127.0.0.1` in the distribution is forwarded only to Windows'
+own `127.0.0.1`. LocalPilot checks both before it starts anything there
+(`localhostForwarding=false` in `%USERPROFILE%\.wslconfig`, or a networking
+mode other than NAT as `wslinfo --networking-mode` reports it, is refused and
+the reason shown), and SearXNG must then answer on Windows' `127.0.0.1`.
+The container joins a Docker network LocalPilot creates and labels
+(`localpilot-searxng`), because the default bridge cannot resolve names on
+some WSL setups. WSL stops an idle distribution about 30 seconds after its
+last command, so while LocalPilot uses SearXNG it keeps one `wsl.exe`
+process waiting on its own input in the distribution; that process ends with
+LocalPilot, even when LocalPilot is killed. Stopping and removing do not need
+these checks. Podman is reported but not used yet.
+
+Setup writes the settings
 to `~/.localpilot/search/searxng/settings/` (JSON results on, a random secret
 key, rate limiter and public-instance mode off); a folder there that LocalPilot
 did not make is refused, and a `settings.yml` you edited is replaced only if you
@@ -1580,8 +1594,10 @@ free port once), waits up to 60 seconds for `/healthz`, and shows the engines
 the instance has enabled from its `/config`. A container with that name that
 LocalPilot did not create is never adopted or replaced. If anything fails before
 the config is written, setup removes the container and settings folder it
-created in that run, and only those. The container keeps running after setup
-(about 105 MB of memory).
+created in that run, and only those, including the `localpilot-searxng`
+network when this run created it. The container keeps running after setup
+(about 105 MB of memory); with Docker inside WSL it stops with the distribution
+about 30 seconds after LocalPilot stops using it.
 
 When the container is stopped, the first search that uses SearXNG starts it
 again, after the usual search consent (which mentions the container and its
@@ -1597,7 +1613,9 @@ SearXNG to answer.
   move it to a newer pinned image), the address, Docker, whether it runs and
   answers, its enabled engines, and whether the config uses it.
 - `start` and `stop` start or stop the recorded container (`stop` frees its
-  memory).
+  memory). `start` refuses when the recorded port is taken on this computer.
+- `remove` also removes the `localpilot-searxng` network when LocalPilot
+  created it and no container uses it.
 - `update` re-creates SearXNG from the image this version pins, on a free
   port, in stages: the settings folder is copied for the new container (the
   running one keeps its own), the new container is created, recorded, started,

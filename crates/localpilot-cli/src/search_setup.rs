@@ -892,8 +892,14 @@ pub(crate) async fn run(s: &Setup<'_>) -> Outcome {
     if let Some(made) = &made {
         if let Some(owned) = &made.owned {
             say(&format!(
-                "SearXNG is running on 127.0.0.1:{}. When it is stopped, LocalPilot starts it again at the next search; localpilot search stop frees its memory.",
-                owned.port
+                "SearXNG is running on 127.0.0.1:{}. {}",
+                owned.port,
+                match &owned.route {
+                    searxng::Route::Wsl { distro, .. } => format!(
+                        "Docker runs inside WSL ({distro}) here, so WSL stops it about 30 seconds after LocalPilot stops using it; LocalPilot starts it again at the next search."
+                    ),
+                    searxng::Route::Path { .. } => "When it is stopped, LocalPilot starts it again at the next search; localpilot search stop frees its memory.".to_string(),
+                }
             ));
         }
     }
@@ -961,6 +967,8 @@ struct Made {
     owned: Option<searxng::Owned>,
     made_dir: bool,
     dir: PathBuf,
+    /// The Docker network's ID when this run created it.
+    network: Option<String>,
 }
 
 /// Choose the runtime (asking when several WSL distributions qualify), refuse
@@ -1011,7 +1019,7 @@ fn plan_searxng(s: &Setup<'_>, engines: &[searxng::Engine]) -> Result<Planned, O
 fn preview_searxng(s: &Setup<'_>, planned: &Planned) {
     let say = |line: &str| s.console.say(line);
     let create = planned.engine.argv(
-        &searxng::create_args(planned.port, &planned.mount)
+        &searxng::create_args(planned.port, &planned.mount, searxng::NETWORK)
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
@@ -1036,11 +1044,12 @@ fn preview_searxng(s: &Setup<'_>, planned: &Planned) {
         searxng::GENERAL_ENGINES.join(", ")
     ));
     say(&format!(
-        "  It uses about 105 MB of memory while it runs{}. It keeps running after setup; when it is stopped, LocalPilot starts it again at the next search.",
-        if planned.engine.distro().is_some() {
-            ", plus the WSL distribution it runs in"
-        } else {
-            ""
+        "  It uses about 105 MB of memory while it runs{}",
+        match planned.engine.distro() {
+            Some(distro) => format!(
+                ", plus the WSL distribution {distro} it runs in. WSL stops it about 30 seconds after LocalPilot stops using it; LocalPilot starts it again at the next search."
+            ),
+            None => ". It keeps running after setup; when it is stopped, LocalPilot starts it again at the next search.".to_string(),
         }
     ));
 }
@@ -1055,11 +1064,27 @@ fn searxng_up(
     entry: &mut ManagedSearchBackend,
 ) -> Result<Made, Outcome> {
     let say = |line: &str| s.console.say(line);
+    // Only now, for the engine chosen: its WSL distribution is held from here
+    // to the end of setup's checks (listing the choices held nothing), and the
+    // route is checked again on the held distribution, since WSL may have
+    // stopped and come back differently while the preview was open.
+    let engine = searxng::resolve_route(s.host, &planned.engine.route, searxng::Purpose::Launch)
+        .map_err(|reason| stop(s, &reason))?;
+    if engine.endpoint != planned.engine.endpoint {
+        return Err(stop(
+            s,
+            &format!(
+                "Docker now uses {} instead of {}, which the preview showed; run setup again",
+                engine.endpoint, planned.engine.endpoint
+            ),
+        ));
+    }
     let mut made = Made {
-        engine: planned.engine.clone(),
+        engine,
         owned: None,
         made_dir: false,
         dir: planned.dir.clone(),
+        network: None,
     };
     if let Some(outcome) = halted(s, backend, None, None, "settings") {
         return Err(outcome);
@@ -1127,8 +1152,11 @@ fn searxng_up(
             ));
         }
         say("Downloading the SearXNG image and creating its container (the first time can take a few minutes)...");
-        let id = match searxng::create(s.host, &planned.engine, port, &planned.mount) {
-            Ok(id) => id,
+        let id = match searxng::create(s.host, &made.engine, port, &planned.mount) {
+            Ok(created) => {
+                made.network = made.network.take().or(created.network);
+                created.id
+            }
             Err(reason) => return Err(fail(&made, "create", &reason)),
         };
         let owned = searxng::Owned {
@@ -1184,7 +1212,11 @@ fn searxng_up(
             searxng::Started::Yes => break,
             searxng::Started::PortTaken if attempt == 0 => {
                 let next = searxng::free_port(s.host, port.saturating_add(1));
+                // The network stays for the retry; only a final failure
+                // removes it (when this run made it).
+                let network = made.network.take();
                 let undone = teardown_container(s, backend, &made);
+                made.network = network;
                 made.owned = None;
                 if !undone.is_empty() {
                     return Err(fail(
@@ -1257,6 +1289,10 @@ fn searxng_up(
 /// Remove the container this run created, if any; what is left behind.
 fn teardown_container(s: &Setup<'_>, backend: Backend, made: &Made) -> String {
     let Some(owned) = &made.owned else {
+        // No container (any more): only a network this run made is left.
+        if let Some(network) = &made.network {
+            searxng::remove_network_id(s.host, &made.engine, network);
+        }
         return String::new();
     };
     let id = &owned.container_id;
@@ -1291,6 +1327,10 @@ fn teardown_container(s: &Setup<'_>, backend: Backend, made: &Made) -> String {
                 if let Err(reason) = searxng::forget_owned(&s.state_dir) {
                     left.push_str(&format!("; {reason}"));
                 }
+            }
+            // The network too, only when this run created it.
+            if let Some(network) = &made.network {
+                searxng::remove_network_id(s.host, &made.engine, network);
             }
             left
         }
@@ -1800,6 +1840,7 @@ mod tests {
         secret: Option<String>,
         said: RefCell<Vec<String>>,
         on_secret: Option<Box<dyn Fn()>>,
+        on_ask: Option<Box<dyn Fn()>>,
     }
 
     impl Script {
@@ -1810,7 +1851,13 @@ mod tests {
                 secret: secret.map(str::to_string),
                 said: RefCell::new(Vec::new()),
                 on_secret: None,
+                on_ask: None,
             }
+        }
+        /// Runs at every question, before it is answered.
+        fn on_confirm(mut self, hook: impl Fn() + 'static) -> Self {
+            self.on_ask = Some(Box::new(hook));
+            self
         }
         fn text(&self) -> String {
             self.said.borrow().join("\n")
@@ -1826,6 +1873,9 @@ mod tests {
             self.picks.borrow_mut().pop_front().unwrap_or(Pick::Cancel)
         }
         fn ask(&self, _prompt: &str) -> Answer {
+            if let Some(hook) = &self.on_ask {
+                hook();
+            }
             self.answers
                 .borrow_mut()
                 .pop_front()
@@ -2609,18 +2659,44 @@ mod tests {
         }
     }
 
+    /// EVERYTHING, plus WSL and no Docker on PATH.
+    struct WithWsl;
+
+    impl Probes for WithWsl {
+        fn find(&self, program: &str) -> Option<PathBuf> {
+            match program {
+                "wsl" => Some(PathBuf::from("wsl.exe")),
+                "docker" | "podman" => None,
+                _ => EVERYTHING.find(program),
+            }
+        }
+        fn version(&self, program: &Path) -> Option<String> {
+            EVERYTHING.version(program)
+        }
+    }
+
     async fn run_searxng(
         home: &Home,
         console: &Script,
         host: &searxng::tests::FakeHost,
         launcher: Launcher,
     ) -> Outcome {
+        run_searxng_with(home, console, host, launcher, &WithDocker).await
+    }
+
+    async fn run_searxng_with(
+        home: &Home,
+        console: &Script,
+        host: &searxng::tests::FakeHost,
+        launcher: Launcher,
+        probes: &dyn Probes,
+    ) -> Outcome {
         let config = home.config.clone();
         let read = move || effective(&config);
         let suffix = || Some("0123456789abcdef".to_string());
         let setup = Setup {
             console,
-            probes: &WithDocker,
+            probes,
             credentials: &home.credentials,
             config_path: Some(home.config.clone()),
             state_dir: home.state.clone(),
@@ -2689,7 +2765,13 @@ mod tests {
             .unwrap();
         let start = commands.iter().position(|c| c.contains(" start ")).unwrap();
         assert!(create < start);
-        for command in commands.iter().skip(1) {
+        // Only asking Docker where it points is unbound: at listing, and
+        // again once SearXNG is the confirmed choice.
+        let (asks, bound): (Vec<&String>, Vec<&String>) = commands
+            .iter()
+            .partition(|c| c.contains(" context inspect "));
+        assert_eq!(asks.len(), 2, "{asks:?}");
+        for command in bound {
             assert!(
                 command.contains("--host unix:///var/run/docker.sock"),
                 "{command}"
@@ -2737,6 +2819,60 @@ mod tests {
             matches!(again, Outcome::Stopped(ref reason) if reason.contains("already set up")),
             "{again:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_port_retry_keeps_this_runs_network_until_a_final_failure_removes_it() {
+        use searxng::tests::{after_host, docker_reply, failed, ok, FakeHost, NET_ID};
+        let home = home("# mine\n");
+        let starts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&starts);
+        // Docker's network, as Docker would report it.
+        let exists = std::rc::Rc::new(std::cell::Cell::new(false));
+        let network = std::rc::Rc::clone(&exists);
+        let host = FakeHost::new(move |argv| match after_host(argv).as_slice() {
+            ["start", ..] => {
+                counted.set(counted.get() + 1);
+                if counted.get() == 1 {
+                    failed("Error response from daemon: Bind for 127.0.0.1:8888 failed: port is already allocated")
+                } else {
+                    docker_reply(argv)
+                }
+            }
+            ["network", "inspect", ..] if network.get() => {
+                ok(&format!("{NET_ID} {} 0", searxng::LABEL_VALUE))
+            }
+            ["network", "create", ..] => {
+                network.set(true);
+                docker_reply(argv)
+            }
+            ["network", "rm", _] => {
+                network.set(false);
+                docker_reply(argv)
+            }
+            _ => docker_reply(argv),
+        });
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(&home, &console, &host, failing_launcher()).await;
+        assert!(matches!(outcome, Outcome::Stopped(_)), "{outcome:?}");
+        assert_eq!(starts.get(), 2);
+        let commands = host.commands();
+        let made: Vec<usize> = (0..commands.len())
+            .filter(|at| commands[*at].contains("network create"))
+            .collect();
+        let removed: Vec<usize> = (0..commands.len())
+            .filter(|at| commands[*at].ends_with(&format!("network rm {NET_ID}")))
+            .collect();
+        let containers: Vec<usize> = (0..commands.len())
+            .filter(|at| commands[*at].contains(" rm --force "))
+            .collect();
+        // Made once, kept through the retry, removed once after the last
+        // container.
+        assert_eq!(made.len(), 1, "{commands:?}");
+        assert_eq!(removed.len(), 1, "{commands:?}");
+        assert_eq!(containers.len(), 2, "{commands:?}");
+        assert!(containers[1] < removed[0], "{commands:?}");
+        assert!(!exists.get());
     }
 
     #[tokio::test]
@@ -2796,6 +2932,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wsl_networking_is_checked_again_once_searxng_is_the_confirmed_choice() {
+        use searxng::tests::{after_host, docker_reply, ok, FakeHost};
+        // WSL used NAT while setup listed the choices, and mirrored networking
+        // by the time the choice was confirmed.
+        let home = home("# mine\n");
+        let mode = std::rc::Rc::new(std::cell::Cell::new("nat"));
+        let seen = std::rc::Rc::clone(&mode);
+        let mut host = FakeHost::new(move |argv| {
+            if argv.iter().any(|word| word == "wslinfo") {
+                return ok(seen.get());
+            }
+            if argv.iter().any(|word| word == "-l") {
+                return ok("Ubuntu\n");
+            }
+            if argv.iter().any(|word| word == "wslpath") {
+                return ok("/mnt/c/state");
+            }
+            if after_host(argv).is_empty() && argv.iter().any(|word| word == "context") {
+                return ok(r#"{"Host":"unix:///var/run/docker.sock"}"#);
+            }
+            docker_reply(argv)
+        });
+        host.windows = true;
+        let switch = std::rc::Rc::clone(&mode);
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None)
+            .on_confirm(move || switch.set("mirrored"));
+        let outcome = run_searxng_with(
+            &home,
+            &console,
+            &host,
+            working_launcher(searxng::BRIDGE_TOOL),
+            &WithWsl,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Stopped(ref reason) if reason.contains("mirrored")),
+            "{outcome:?}"
+        );
+        let commands = host.commands();
+        assert!(
+            commands
+                .iter()
+                .any(|c| c == "(held) wsl.exe -d Ubuntu --exec cat"),
+            "{commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| c.contains(" create ")),
+            "{commands:?}"
+        );
+        assert!(searxng::load_owned(&home.state).is_none());
+        assert!(!searxng::settings_dir(&home.state).exists());
+        assert_eq!(std::fs::read_to_string(&home.config).unwrap(), "# mine\n");
+    }
+
+    #[tokio::test]
     async fn a_failure_after_the_container_removes_what_this_run_made() {
         use searxng::tests::{docker_reply, FakeHost};
         // SearXNG never answers.
@@ -2830,6 +3021,37 @@ mod tests {
         assert!(!searxng::settings_dir(&second.state).exists());
         assert_eq!(std::fs::read_to_string(&second.config).unwrap(), "# mine\n");
         assert!(audit_text(&second).contains("event=searxng-removed "));
+        // The network this run created goes too, by its ID, after the container.
+        let commands = host.commands();
+        let removed = commands
+            .iter()
+            .position(|c| c.contains(" rm --force "))
+            .unwrap();
+        let network = commands
+            .iter()
+            .position(|c| c.ends_with(&format!("network rm {}", searxng::tests::NET_ID)))
+            .expect("the network this run made was removed by its ID");
+        assert!(removed < network, "{commands:?}");
+
+        // A LocalPilot network that was already there is left alone.
+        let third = home("# mine\n");
+        let host = FakeHost::new(|argv| match searxng::tests::after_host(argv).as_slice() {
+            ["network", "inspect", ..] => searxng::tests::ok(&format!(
+                "{} {} 0",
+                searxng::tests::NET_ID,
+                searxng::LABEL_VALUE
+            )),
+            _ => docker_reply(argv),
+        });
+        let console = Script::new(Pick::Option(1), &[Answer::Yes], None);
+        let outcome = run_searxng(&third, &console, &host, failing_launcher()).await;
+        assert!(matches!(outcome, Outcome::Stopped(_)), "{outcome:?}");
+        let commands = host.commands();
+        assert!(commands.iter().any(|c| c.contains(" rm --force ")));
+        assert!(
+            !commands.iter().any(|c| c.contains("network rm")),
+            "{commands:?}"
+        );
     }
 
     #[tokio::test]

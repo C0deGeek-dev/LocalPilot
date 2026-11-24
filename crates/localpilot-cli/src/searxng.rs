@@ -55,9 +55,11 @@ pub(crate) const ENDPOINT_VARIABLES: [&str; 4] = [
     "DOCKER_TLS_VERIFY",
     "DOCKER_CERT_PATH",
 ];
-/// Docker running only inside WSL is used only in a build made for checking
-/// that route; until then it is reported, not used.
-const WSL_ENABLED: bool = cfg!(feature = "unverified-search-routes");
+/// The Docker network LocalPilot creates for SearXNG. On a user-defined
+/// network Docker's own DNS resolves names through the daemon's resolver,
+/// which also works where the default bridge cannot reach it (Docker inside
+/// WSL, whose resolver is an address only the distribution itself reaches).
+pub(crate) const NETWORK: &str = "localpilot-searxng";
 
 /// What a command printed.
 #[derive(Debug, Clone, Default)]
@@ -117,7 +119,65 @@ pub(crate) trait Host {
     /// Time on a monotonic clock, for deadlines.
     fn now(&self) -> std::time::Duration;
     fn windows(&self) -> bool;
+    /// Start `argv` as a process that lives until the returned guard is
+    /// dropped; used to keep a WSL distribution up. `None` when it could not
+    /// start.
+    fn hold(&self, argv: &[String]) -> Option<Held> {
+        let _ = argv;
+        None
+    }
+    /// The text of the WSL settings file (`%USERPROFILE%\.wslconfig`):
+    /// `Ok(None)` when there is none.
+    fn wsl_config(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
+
+/// A process kept alive for as long as this value lives.
+pub(crate) struct Held(#[allow(dead_code)] Box<dyn std::any::Any + Send + Sync>);
+
+impl Held {
+    pub(crate) fn new(value: impl std::any::Any + Send + Sync) -> Self {
+        Self(Box::new(value))
+    }
+}
+
+/// What keeps the WSL distribution, and so its Docker and SearXNG, running
+/// while LocalPilot works with them: WSL stops an idle distribution about 30
+/// seconds after the last command it was given. Empty on every other route.
+/// Clones share one process; it ends when the last clone is dropped.
+#[derive(Clone, Default)]
+pub(crate) struct Keep(Option<std::sync::Arc<Held>>);
+
+impl Keep {
+    pub(crate) fn holds(&self) -> bool {
+        self.0.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holding(value: impl std::any::Any + Send + Sync) -> Self {
+        Self(Some(std::sync::Arc::new(Held::new(value))))
+    }
+}
+
+impl std::fmt::Debug for Keep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.holds() {
+            "Keep(held)"
+        } else {
+            "Keep(none)"
+        })
+    }
+}
+
+/// Two engines are the same engine whatever keeps their distribution up.
+impl PartialEq for Keep {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Keep {}
 
 /// How Docker is reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +196,8 @@ pub(crate) struct Engine {
     /// The daemon every command is bound to.
     pub(crate) endpoint: String,
     pub(crate) version: String,
+    /// Holds the WSL distribution up while this engine is in use.
+    pub(crate) keep: Keep,
 }
 
 impl Engine {
@@ -205,8 +267,8 @@ fn install_guidance() -> String {
 }
 
 /// Find the container runtime: Docker on PATH first, then (on Windows)
-/// Docker inside a WSL distribution. Podman, and Docker inside WSL until
-/// that route is checked, are reported and not used.
+/// Docker inside a WSL distribution under WSL's NAT networking. Podman is
+/// reported and not used.
 pub(crate) fn detect(host: &dyn Host, find: &dyn Fn(&str) -> Option<PathBuf>) -> Found {
     if let Some(docker) = find("docker") {
         return match resolve(
@@ -215,6 +277,7 @@ pub(crate) fn detect(host: &dyn Host, find: &dyn Fn(&str) -> Option<PathBuf>) ->
                 program: docker.clone(),
             },
             vec![docker.display().to_string()],
+            Purpose::Detect,
         ) {
             Ok(engine) => Found::Ready(vec![engine]),
             Err(reason) => Found::Unavailable(reason),
@@ -227,11 +290,6 @@ pub(crate) fn detect(host: &dyn Host, find: &dyn Fn(&str) -> Option<PathBuf>) ->
     }
     if host.windows() {
         if let Some(wsl) = find("wsl") {
-            if !WSL_ENABLED {
-                return Found::Unavailable(
-                    "No Docker on the Windows PATH, and Docker running only inside WSL is not enabled yet in this version (that its port stays on this computer is still being checked). To use SearXNG now, install Docker Desktop (https://docs.docker.com/desktop/), then run localpilot search setup again. LocalPilot never installs it.".to_string(),
-                );
-            }
             return wsl_engines(host, &wsl);
         }
     }
@@ -266,7 +324,7 @@ fn wsl_engines(host: &dyn Host, wsl: &Path) -> Found {
             wsl: wsl.to_path_buf(),
             distro: distro.to_string(),
         };
-        match resolve(host, route, prefix) {
+        match resolve(host, route, prefix, Purpose::Detect) {
             Ok(engine) => engines.push(engine),
             Err(reason) => reasons.push(format!("{distro}: {reason}")),
         }
@@ -285,10 +343,145 @@ fn wsl_engines(host: &dyn Host, wsl: &Path) -> Found {
     }
 }
 
+/// What an engine is resolved for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    /// Listing what setup could use: Docker inside WSL must be under WSL's NAT
+    /// networking, but nothing is kept running for a choice not yet made.
+    Detect,
+    /// Creating, starting or checking SearXNG: Docker inside WSL must be under
+    /// WSL's NAT networking, and its distribution is kept up while the engine
+    /// is in use (no holder, no launch).
+    Launch,
+    /// Stopping or removing what LocalPilot created: allowed whatever WSL's
+    /// networking is now, so cleanup is never blocked by the check that
+    /// protects starting.
+    Cleanup,
+}
+
+/// SearXNG is published only on 127.0.0.1 inside the distribution. Under
+/// WSL's NAT networking (its default) WSL forwards that to 127.0.0.1 on
+/// Windows only; other modes are not checked, so they are refused. The mode
+/// is read from WSL itself, because a changed .wslconfig takes effect only
+/// after WSL restarts and a NAT request can fall back to another mode.
+fn wsl_networking(host: &dyn Host, wsl: &Path, distro: &str) -> Result<(), String> {
+    const HINT: &str = "To use SearXNG, install Docker Desktop (https://docs.docker.com/desktop/), or use WSL's default NAT networking, then run localpilot search setup again.";
+    let config = host.wsl_config().map_err(|_| {
+        format!("WSL's settings file (.wslconfig) could not be read, so it is not known whether SearXNG's port would reach Windows. {HINT}")
+    })?;
+    if config.as_deref().is_some_and(forwarding_off) {
+        return Err(format!(
+            "localhostForwarding is off in .wslconfig, so SearXNG's port inside WSL would not reach Windows. {HINT}"
+        ));
+    }
+    let ran = host.run(
+        &[
+            wsl.display().to_string(),
+            "-d".to_string(),
+            distro.to_string(),
+            "--exec".to_string(),
+            "wslinfo".to_string(),
+            "--networking-mode".to_string(),
+        ],
+        false,
+    );
+    let mode: String = ran
+        .text()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .collect();
+    if !ran.ok || mode.is_empty() {
+        return Err(format!(
+            "WSL's networking mode in {distro} could not be read, so it is not known whether SearXNG's port would stay on this computer. {HINT}"
+        ));
+    }
+    if mode != "nat" {
+        return Err(format!(
+            "WSL in {distro} uses {mode} networking; SearXNG inside WSL is set up only under WSL's default NAT networking, where its port stays on this computer. {HINT}"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether .wslconfig turns localhost forwarding off (`[wsl2]`
+/// `localhostForwarding = false`).
+fn forwarding_off(text: &str) -> bool {
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            section = name.trim().to_ascii_lowercase();
+            continue;
+        }
+        if section != "wsl2" {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let value = value.split(['#', ';']).next().unwrap_or_default();
+            if key.trim().eq_ignore_ascii_case("localhostforwarding")
+                && value.trim().trim_matches('"').eq_ignore_ascii_case("false")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A process that only waits, run in the distribution to keep it up. It reads
+/// the stdin LocalPilot holds open, so it also ends when LocalPilot ends
+/// without cleaning up (a crash or a forced kill): the pipe closes and it sees
+/// the end of its input.
+pub(crate) fn keep_alive_argv(wsl: &Path, distro: &str) -> Vec<String> {
+    vec![
+        wsl.display().to_string(),
+        "-d".to_string(),
+        distro.to_string(),
+        "--exec".to_string(),
+        "cat".to_string(),
+    ]
+}
+
+/// What keeps `route`'s WSL distribution up; empty on any other route. An
+/// error when the holder cannot start: WSL would stop SearXNG mid-use.
+fn keep_up(host: &dyn Host, route: &Route) -> Result<Keep, String> {
+    let Route::Wsl { wsl, distro } = route else {
+        return Ok(Keep::default());
+    };
+    match host.hold(&keep_alive_argv(wsl, distro)) {
+        Some(held) => Ok(Keep(Some(std::sync::Arc::new(held)))),
+        None => Err(format!(
+            "LocalPilot could not keep the WSL distribution {distro} running (starting {} failed), so WSL would stop SearXNG while it is in use",
+            wsl.display()
+        )),
+    }
+}
+
 /// The endpoint Docker would use, as the Docker CLI itself resolves it
 /// (DOCKER_HOST, DOCKER_CONTEXT, the current context), accepted only when it
 /// is this computer's own daemon and new enough.
-fn resolve(host: &dyn Host, route: Route, prefix: Vec<String>) -> Result<Engine, String> {
+fn resolve(
+    host: &dyn Host,
+    route: Route,
+    prefix: Vec<String>,
+    purpose: Purpose,
+) -> Result<Engine, String> {
+    // For a launch the distribution is held first, so everything checked
+    // below is checked on the distribution that stays up.
+    let keep = match purpose {
+        Purpose::Launch => keep_up(host, &route)?,
+        Purpose::Detect | Purpose::Cleanup => Keep::default(),
+    };
+    if let (Route::Wsl { wsl, distro }, Purpose::Detect | Purpose::Launch) = (&route, purpose) {
+        wsl_networking(host, wsl, distro)?;
+    }
     let mut inspect = prefix;
     inspect.extend(
         [
@@ -323,6 +516,7 @@ fn resolve(host: &dyn Host, route: Route, prefix: Vec<String>) -> Result<Engine,
         route,
         endpoint: endpoint.host,
         version: String::new(),
+        keep,
     };
     let version = engine.run(host, &["version", "--format", "{{.Server.Version}}"]);
     if !version.ok {
@@ -346,10 +540,11 @@ fn resolve(host: &dyn Host, route: Route, prefix: Vec<String>) -> Result<Engine,
 }
 
 /// The engine on `route` as it resolves now, checked like at setup.
-pub(crate) fn resolve_route(host: &dyn Host, route: &Route) -> Result<Engine, String> {
-    if matches!(route, Route::Wsl { .. }) && !WSL_ENABLED {
-        return Err("Docker inside WSL is not enabled in this version of LocalPilot".to_string());
-    }
+pub(crate) fn resolve_route(
+    host: &dyn Host,
+    route: &Route,
+    purpose: Purpose,
+) -> Result<Engine, String> {
     let prefix = match route {
         Route::Path { program } => vec![program.display().to_string()],
         Route::Wsl { wsl, distro } => vec![
@@ -360,13 +555,17 @@ pub(crate) fn resolve_route(host: &dyn Host, route: &Route) -> Result<Engine, St
             "docker".to_string(),
         ],
     };
-    resolve(host, route.clone(), prefix)
+    resolve(host, route.clone(), prefix, purpose)
 }
 
 /// The recorded instance's engine, refused when Docker now points anywhere
 /// but the recorded endpoint.
-pub(crate) fn recorded_engine(host: &dyn Host, owned: &Owned) -> Result<Engine, String> {
-    let engine = resolve_route(host, &owned.route)?;
+pub(crate) fn recorded_engine(
+    host: &dyn Host,
+    owned: &Owned,
+    purpose: Purpose,
+) -> Result<Engine, String> {
+    let engine = resolve_route(host, &owned.route, purpose)?;
     if engine.endpoint != owned.endpoint {
         return Err(format!(
             "Docker now uses {}, not {} where SearXNG was set up; LocalPilot does not touch SearXNG there",
@@ -405,7 +604,7 @@ pub(crate) fn ensure_running(
     state_dir: &Path,
     port: u16,
     audit: &dyn Fn(&str, &str) -> bool,
-) -> Result<(), String> {
+) -> Result<Keep, String> {
     let _lock = lock(state_dir)?;
     let owned = load_owned(state_dir).ok_or_else(|| {
         "SearXNG's record is missing; run localpilot search setup again".to_string()
@@ -421,9 +620,17 @@ pub(crate) fn ensure_running(
             owned.port
         ));
     }
-    let engine = recorded_engine(host, &owned)?;
+    let engine = recorded_engine(host, &owned, Purpose::Launch)?;
     let seen = owned_container(host, &engine, &owned)?;
     if !seen.running {
+        // Docker inside WSL publishes into its own port space: after WSL has
+        // stopped, something on Windows can hold the port while Docker would
+        // still start, so the Windows side is asked first.
+        if !host.port_free(port) {
+            return Err(format!(
+                "SearXNG could not start: port {port} is taken by something else; run localpilot search update to move it to a free port"
+            ));
+        }
         if !audit(
             "searxng-start",
             &format!("container={} reason=search", owned.container_id),
@@ -456,7 +663,7 @@ pub(crate) fn ensure_running(
         }
     }
     if wait_live(host, port, LIVE_WAIT, &|| false) {
-        Ok(())
+        Ok(engine.keep)
     } else {
         Err(format!(
             "SearXNG did not answer on 127.0.0.1:{port} within {} seconds",
@@ -516,8 +723,10 @@ pub(crate) fn container_name(port: u16) -> String {
     )
 }
 
-/// `docker create` for the pinned image, published on loopback only.
-pub(crate) fn create_args(port: u16, mount: &str) -> Vec<String> {
+/// `docker create` for the pinned image, on LocalPilot's own network
+/// (`network`: its ID when creating, its name in a preview), published on
+/// loopback only.
+pub(crate) fn create_args(port: u16, mount: &str, network: &str) -> Vec<String> {
     vec![
         "create".to_string(),
         "--name".to_string(),
@@ -526,6 +735,8 @@ pub(crate) fn create_args(port: u16, mount: &str) -> Vec<String> {
         format!("{LABEL}={LABEL_VALUE}"),
         "--restart".to_string(),
         "no".to_string(),
+        "--network".to_string(),
+        network.to_string(),
         "-p".to_string(),
         format!("127.0.0.1:{port}:8080"),
         "-v".to_string(),
@@ -877,27 +1088,132 @@ pub(crate) fn remove_container(host: &dyn Host, engine: &Engine, id: &str) -> Re
     }
 }
 
-/// Create the container; its ID on success.
+/// The network named `NETWORK` as Docker reports it now; `None` when there
+/// is no such network.
+struct Network {
+    id: String,
+    label: String,
+    containers: String,
+}
+
+fn network_seen(host: &dyn Host, engine: &Engine) -> Option<Network> {
+    let format = format!("{{{{.Id}}}} {{{{index .Labels \"{LABEL}\"}}}} {{{{len .Containers}}}}");
+    let ran = engine.run(host, &["network", "inspect", "--format", &format, NETWORK]);
+    if !ran.ok {
+        return None;
+    }
+    let text = ran.text();
+    let mut words = text.split_whitespace();
+    let id = words.next()?.to_string();
+    let mut rest: Vec<&str> = words.collect();
+    let containers = rest.pop().unwrap_or_default().to_string();
+    Some(Network {
+        id,
+        label: rest.join(" "),
+        containers,
+    })
+}
+
+fn network_id(text: &str) -> Option<String> {
+    let id = text.trim();
+    (id.len() >= 12 && id.chars().all(|c| c.is_ascii_hexdigit())).then(|| id.to_string())
+}
+
+/// LocalPilot's network, created when it is not there; its ID, which is what
+/// the container is attached to, so a network swapped in under the same name
+/// afterwards is never used. A network of that name LocalPilot did not create
+/// is never used.
+/// Whether this call created it comes back too, so a failed setup removes
+/// only a network it made.
+pub(crate) fn ensure_network(host: &dyn Host, engine: &Engine) -> Result<(String, bool), String> {
+    match network_seen(host, engine) {
+        Some(seen) if seen.label == LABEL_VALUE => network_id(&seen.id)
+            .map(|id| (id, false))
+            .ok_or_else(|| "Docker did not report the network's ID".to_string()),
+        Some(_) => Err(format!(
+            "a Docker network named {NETWORK} exists that LocalPilot did not create; setup never uses it (remove or rename it, then run setup again)"
+        )),
+        None => {
+            let label = format!("{LABEL}={LABEL_VALUE}");
+            let ran = engine.run(host, &["network", "create", "--label", &label, NETWORK]);
+            if ran.ok {
+                network_id(&ran.text())
+                    .map(|id| (id, true))
+                    .ok_or_else(|| "Docker did not report the new network's ID".to_string())
+            } else {
+                Err(format!(
+                    "the Docker network {NETWORK} could not be created ({})",
+                    ran.why()
+                ))
+            }
+        }
+    }
+}
+
+/// Remove LocalPilot's network when it is LocalPilot's and nothing uses it.
+/// Whether it is gone (or was never there).
+pub(crate) fn remove_network(host: &dyn Host, engine: &Engine) -> bool {
+    match network_seen(host, engine) {
+        None => true,
+        // Removed by the ID that was checked, never by name again.
+        Some(seen) if seen.label == LABEL_VALUE && seen.containers == "0" => {
+            match network_id(&seen.id) {
+                Some(id) => remove_network_id(host, engine, &id),
+                None => false,
+            }
+        }
+        Some(_) => false,
+    }
+}
+
+/// What `create` made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Created {
+    /// The container's ID.
+    pub(crate) id: String,
+    /// The network's ID when this call created the network.
+    pub(crate) network: Option<String>,
+}
+
+/// Create the container on LocalPilot's network (made first when missing).
+/// A network made here is removed again when the container cannot be made.
 pub(crate) fn create(
     host: &dyn Host,
     engine: &Engine,
     port: u16,
     mount: &str,
-) -> Result<String, String> {
-    let args = create_args(port, mount);
+) -> Result<Created, String> {
+    let (network, made) = ensure_network(host, engine)?;
+    let args = create_args(port, mount, &network);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let ran = engine.run(host, &args);
     let id = ran.text();
-    if !ran.ok {
-        return Err(format!(
+    let failed = if !ran.ok {
+        Some(format!(
             "the container could not be created ({})",
             ran.why()
-        ));
+        ))
+    } else if id.len() < 12 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some("Docker did not report the new container's ID".to_string())
+    } else {
+        None
+    };
+    if let Some(reason) = failed {
+        if made {
+            remove_network_id(host, engine, &network);
+        }
+        return Err(reason);
     }
-    if id.len() < 12 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Docker did not report the new container's ID".to_string());
-    }
-    Ok(id)
+    Ok(Created {
+        id,
+        network: made.then_some(network),
+    })
+}
+
+/// Remove the network with this exact ID; Docker refuses while a container
+/// uses it. Whether it is gone.
+pub(crate) fn remove_network_id(host: &dyn Host, engine: &Engine, id: &str) -> bool {
+    engine.run(host, &["network", "rm", id]).ok
 }
 
 /// How starting a container went.
@@ -1183,6 +1499,43 @@ impl Host for LocalHost {
     fn windows(&self) -> bool {
         cfg!(windows)
     }
+
+    fn hold(&self, argv: &[String]) -> Option<Held> {
+        let (program, args) = argv.split_first()?;
+        // The child keeps the write end of its stdin: nothing is ever
+        // written, and the pipe closes when this process ends however it ends.
+        let child = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        Some(Held::new(Stopped(std::sync::Mutex::new(child))))
+    }
+
+    fn wsl_config(&self) -> Result<Option<String>, String> {
+        let Some(home) = std::env::var_os("USERPROFILE") else {
+            return Ok(None);
+        };
+        match std::fs::read_to_string(PathBuf::from(home).join(".wslconfig")) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+/// A child process ended when this is dropped.
+struct Stopped(std::sync::Mutex<std::process::Child>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        if let Ok(child) = self.0.get_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1256,6 +1609,10 @@ pub(crate) mod tests {
         pub(crate) taken: Vec<u16>,
         pub(crate) windows: bool,
         pub(crate) config: Option<String>,
+        /// What `wsl_config` returns.
+        pub(crate) wslconfig: Result<Option<String>, String>,
+        /// The WSL keep-alive cannot be started.
+        pub(crate) hold_fails: bool,
     }
 
     pub(crate) fn ok(text: &str) -> Ran {
@@ -1283,6 +1640,8 @@ pub(crate) mod tests {
                 clock: std::cell::Cell::new(std::time::Duration::ZERO),
                 taken: Vec::new(),
                 windows: false,
+                wslconfig: Ok(None),
+                hold_fails: false,
                 config: Some(
                     r#"{"engines":[{"name":"duckduckgo","enabled":true,"categories":["general","web"]},{"name":"wikipedia","enabled":true,"categories":["general"]},{"name":"bing","enabled":false,"categories":["general"]},{"name":"arxiv","enabled":true,"categories":["science"]}]}"#
                         .to_string(),
@@ -1336,6 +1695,15 @@ pub(crate) mod tests {
         fn windows(&self) -> bool {
             self.windows
         }
+        fn hold(&self, argv: &[String]) -> Option<Held> {
+            let mut held = vec!["(held)".to_string()];
+            held.extend(argv.iter().cloned());
+            self.calls.borrow_mut().push((held, false));
+            (!self.hold_fails).then(|| Held::new(()))
+        }
+        fn wsl_config(&self) -> Result<Option<String>, String> {
+            self.wslconfig.clone()
+        }
     }
 
     /// Words of a command after the binding (`--host <endpoint>`).
@@ -1347,6 +1715,8 @@ pub(crate) mod tests {
     }
 
     pub(crate) const ID: &str = "4f1c2b3a4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8";
+    pub(crate) const NET_ID: &str =
+        "5e1f0a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7";
 
     /// A local, current Docker that creates, starts and inspects one container.
     pub(crate) fn docker_reply(argv: &[String]) -> Ran {
@@ -1363,6 +1733,9 @@ pub(crate) mod tests {
             }
             ["container", "inspect", ..] => failed("Error: No such container"),
             ["rm", "--force", _] => ok(ID),
+            ["network", "inspect", ..] => failed("Error: network localpilot-searxng not found"),
+            ["network", "create", ..] => ok(NET_ID),
+            ["network", "rm", _] => ok(NETWORK),
             _ => failed("unexpected command"),
         }
     }
@@ -1500,22 +1873,6 @@ pub(crate) mod tests {
         assert!(host.calls.borrow().is_empty());
     }
 
-    #[cfg(not(feature = "unverified-search-routes"))]
-    #[test]
-    fn this_build_reports_docker_in_wsl_without_starting_it() {
-        let mut host = FakeHost::new(|_| failed("must not run"));
-        host.windows = true;
-        let wsl =
-            |name: &str| (name == "wsl").then(|| PathBuf::from("C:/Windows/System32/wsl.exe"));
-        let Found::Unavailable(reason) = detect(&host, &wsl) else {
-            panic!("the WSL route is not enabled in this build");
-        };
-        assert!(reason.contains("not enabled yet"), "{reason}");
-        // Not even listed: listing a distribution's Docker would start it.
-        assert!(host.calls.borrow().is_empty());
-    }
-
-    #[cfg(feature = "unverified-search-routes")]
     #[test]
     fn docker_in_wsl_is_bound_inside_the_distribution() {
         let mut host = FakeHost::new(|argv| {
@@ -1529,6 +1886,9 @@ pub(crate) mod tests {
                 };
             }
             let distro = argv.get(2).cloned().unwrap_or_default();
+            if argv.iter().any(|word| word == "wslinfo") {
+                return ok("nat\n");
+            }
             if argv.iter().any(|word| word == "context") {
                 return if distro == "Remote" {
                     ok(r#"{"Host":"tcp://10.0.0.2:2375"}"#)
@@ -1556,7 +1916,194 @@ pub(crate) mod tests {
             .into_iter()
             .filter(|command| command.contains(" Remote "))
             .collect();
-        assert_eq!(remote.len(), 1, "{remote:?}");
+        assert_eq!(remote.len(), 2, "{remote:?}");
+        // The networking mode was read from WSL itself. Listing the choices
+        // keeps nothing running; the chosen engine is kept up when used.
+        assert!(host
+            .commands()
+            .contains(&"wsl.exe -d Ubuntu --exec wslinfo --networking-mode".to_string()));
+        let held = "(held) wsl.exe -d Ubuntu --exec cat".to_string();
+        assert!(!engines[0].keep.holds());
+        assert!(!host.commands().contains(&held));
+        // Launching the chosen engine holds first, then checks again.
+        let before = host.commands().len();
+        let chosen = resolve_route(&host, &engines[0].route, Purpose::Launch).unwrap();
+        assert!(chosen.keep.holds());
+        let after = host.commands()[before..].to_vec();
+        assert_eq!(after.first(), Some(&held), "{after:?}");
+        assert!(after.iter().any(|c| c.contains("wslinfo")), "{after:?}");
+    }
+
+    #[test]
+    fn a_wsl_launch_without_its_keep_alive_is_refused() {
+        let route = Route::Wsl {
+            wsl: PathBuf::from("wsl.exe"),
+            distro: "Ubuntu".to_string(),
+        };
+        let engine = resolve_route(&wsl_host(Some("nat")), &route, Purpose::Launch).unwrap();
+        assert!(engine.keep.holds());
+        let mut failing = wsl_host(Some("nat"));
+        failing.hold_fails = true;
+        let error = resolve_route(&failing, &route, Purpose::Launch).unwrap_err();
+        assert!(
+            error.contains("could not keep the WSL distribution Ubuntu running"),
+            "{error}"
+        );
+        // Cleanup needs no keep-alive and starts none.
+        let engine = resolve_route(&failing, &route, Purpose::Cleanup).unwrap();
+        assert!(!engine.keep.holds());
+        // A local Docker needs none either.
+        let mut local = FakeHost::new(docker_reply);
+        local.hold_fails = true;
+        let docker = Route::Path {
+            program: PathBuf::from("docker"),
+        };
+        assert!(resolve_route(&local, &docker, Purpose::Launch).is_ok());
+    }
+
+    /// A WSL host whose one distribution runs Docker, answering wslinfo with
+    /// `mode`.
+    fn wsl_host(mode: Option<&'static str>) -> FakeHost {
+        let mut host = FakeHost::new(move |argv| {
+            if argv.iter().any(|word| word == "wslinfo") {
+                return mode.map_or_else(|| failed("wslinfo: not found"), ok);
+            }
+            if argv.iter().any(|word| word == "context") {
+                return ok(r#"{"Host":"unix:///var/run/docker.sock"}"#);
+            }
+            ok("29.6.0")
+        });
+        host.windows = true;
+        host
+    }
+
+    #[test]
+    fn docker_in_wsl_is_used_only_under_nat_with_forwarding_on() {
+        let route = Route::Wsl {
+            wsl: PathBuf::from("wsl.exe"),
+            distro: "Ubuntu".to_string(),
+        };
+        let ready = wsl_host(Some("nat"));
+        assert!(resolve_route(&ready, &route, Purpose::Launch).is_ok());
+        for (host, expected) in [
+            (wsl_host(Some("mirrored")), "uses mirrored networking"),
+            (wsl_host(Some("virtioproxy")), "uses virtioproxy networking"),
+            (wsl_host(None), "could not be read"),
+        ] {
+            let error = resolve_route(&host, &route, Purpose::Launch).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("Docker Desktop"), "{error}");
+            // Refused before Docker was asked anything; the holder taken
+            // first ends with the refusal.
+            assert!(
+                !host.commands().iter().any(|c| c.contains("docker")),
+                "{:?}",
+                host.commands()
+            );
+        }
+        let mut off = wsl_host(Some("nat"));
+        off.wslconfig = Ok(Some(
+            "[wsl2]\nmemory=8GB\nlocalhostForwarding = False # off\n".to_string(),
+        ));
+        let error = resolve_route(&off, &route, Purpose::Launch).unwrap_err();
+        assert!(error.contains("localhostForwarding is off"), "{error}");
+        let mut unreadable = wsl_host(Some("nat"));
+        unreadable.wslconfig = Err("access denied".to_string());
+        let error = resolve_route(&unreadable, &route, Purpose::Launch).unwrap_err();
+        assert!(error.contains("could not be read"), "{error}");
+        // Forwarding named in another section, or on, is not "off".
+        assert!(!forwarding_off(
+            "[experimental]\nlocalhostForwarding=false\n"
+        ));
+        assert!(!forwarding_off("[wsl2]\nlocalhostForwarding=true\n"));
+        assert!(forwarding_off("[WSL2]\nLocalhostForwarding=\"false\"\n"));
+        // Cleanup works whatever the networking: no check, nothing held.
+        let mirrored = wsl_host(Some("mirrored"));
+        let engine = resolve_route(&mirrored, &route, Purpose::Cleanup).unwrap();
+        assert!(!engine.keep.holds());
+        assert!(!mirrored.commands().iter().any(|c| c.contains("wslinfo")));
+    }
+
+    #[test]
+    fn the_container_joins_localpilots_own_network() {
+        let host = FakeHost::new(docker_reply);
+        let Found::Ready(engines) = detect(&host, &find_docker) else {
+            panic!("docker");
+        };
+        let engine = &engines[0];
+        assert!(!engine.keep.holds(), "only WSL is held");
+        let args = create_args(8888, "/s", NETWORK).join(" ");
+        assert!(
+            args.contains(&format!("--network {NETWORK} -p 127.0.0.1:8888:8080")),
+            "{args}"
+        );
+        create(&host, engine, 8888, "/s").unwrap();
+        let commands = host.commands();
+        // Attached by the ID Docker reported, not by name.
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains(" create --name ")
+                    && c.contains(&format!("--network {NET_ID} "))),
+            "{commands:?}"
+        );
+        let made = commands
+            .iter()
+            .position(|c| {
+                c.contains(&format!(
+                    "network create --label {LABEL}={LABEL_VALUE} {NETWORK}"
+                ))
+            })
+            .expect("network created");
+        let created = commands
+            .iter()
+            .position(|c| c.contains(" create --name "))
+            .unwrap();
+        assert!(made < created, "{commands:?}");
+
+        // A network of that name LocalPilot did not create: refused, unused.
+        let foreign = FakeHost::new(|argv| match after_host(argv).as_slice() {
+            ["network", "inspect", ..] => ok(&format!("{NET_ID} <no value> 3")),
+            _ => docker_reply(argv),
+        });
+        let error = create(&foreign, engine, 8888, "/s").unwrap_err();
+        assert!(error.contains("LocalPilot did not create"), "{error}");
+        assert!(!foreign
+            .commands()
+            .iter()
+            .any(|c| c.contains(" create --name ")));
+        assert!(!remove_network(&foreign, engine));
+
+        // Removed only when it is ours and empty.
+        let ours_busy = FakeHost::new(|argv| match after_host(argv).as_slice() {
+            ["network", "inspect", ..] => ok(&format!("{NET_ID} {LABEL_VALUE} 1")),
+            _ => docker_reply(argv),
+        });
+        assert!(!remove_network(&ours_busy, engine));
+        assert!(!ours_busy
+            .commands()
+            .iter()
+            .any(|c| c.contains("network rm")));
+        let ours_empty = FakeHost::new(|argv| match after_host(argv).as_slice() {
+            ["network", "inspect", ..] => ok(&format!("{NET_ID} {LABEL_VALUE} 0")),
+            _ => docker_reply(argv),
+        });
+        assert!(remove_network(&ours_empty, engine));
+        // Removed by the ID that was checked, never by name again.
+        assert!(ours_empty
+            .commands()
+            .iter()
+            .any(|c| c.ends_with(&format!("network rm {NET_ID}"))));
+        // An existing network of ours is used by its ID too.
+        let ours = FakeHost::new(|argv| match after_host(argv).as_slice() {
+            ["network", "inspect", ..] => ok(&format!("{NET_ID} {LABEL_VALUE} 0")),
+            _ => docker_reply(argv),
+        });
+        assert_eq!(
+            ensure_network(&ours, engine).unwrap(),
+            (NET_ID.to_string(), false)
+        );
+        assert!(!ours.commands().iter().any(|c| c.contains("network create")));
     }
 
     #[test]
@@ -1642,7 +2189,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_container_is_published_on_loopback_only_with_its_label() {
-        let args = create_args(8890, "/home/me/settings").join(" ");
+        let args = create_args(8890, "/home/me/settings", NETWORK).join(" ");
         assert!(args.contains("-p 127.0.0.1:8890:8080"), "{args}");
         assert!(args.contains(&format!("--label {LABEL}={LABEL_VALUE}")));
         assert!(args.contains("--restart no"));

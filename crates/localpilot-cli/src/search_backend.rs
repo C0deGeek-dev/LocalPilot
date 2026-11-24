@@ -190,11 +190,13 @@ pub(crate) async fn start_managed(
     if !audit("search-launch", &spec.launch_detail()) {
         return Err(ManagedStartError::AuditFailed);
     }
-    if ensure_engine && managed.tier == localpilot_config::SearchTier::SelfHosted {
+    let keep = if ensure_engine && managed.tier == localpilot_config::SearchTier::SelfHosted {
         ensure_engine_running(managed)
             .await
-            .map_err(ManagedStartError::EngineNotReady)?;
-    }
+            .map_err(ManagedStartError::EngineNotReady)?
+    } else {
+        crate::searxng::Keep::default()
+    };
     let handshake = Duration::from_secs(managed.handshake_timeout_secs);
     let transport = tokio::time::timeout(
         handshake + Duration::from_secs(1),
@@ -212,12 +214,46 @@ pub(crate) async fn start_managed(
     .map_err(|_| ManagedStartError::Incompatible("it did not list its tools in time".into()))?
     .map_err(|_| ManagedStartError::Incompatible("it did not list its tools".into()))?;
     check_search_schema(&advertised, &spec.tool).map_err(ManagedStartError::Incompatible)?;
+    if keep.holds() {
+        return Ok(Arc::new(Kept {
+            inner: transport,
+            _keep: keep,
+        }));
+    }
     Ok(transport)
+}
+
+/// A bridge whose SearXNG runs in Docker inside WSL: the distribution is kept
+/// up for exactly as long as the bridge lives.
+struct Kept {
+    inner: Arc<dyn Transport>,
+    _keep: crate::searxng::Keep,
+}
+
+#[async_trait::async_trait]
+impl Transport for Kept {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, localpilot_mcp::McpError> {
+        self.inner.call(method, params).await
+    }
+
+    async fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), localpilot_mcp::McpError> {
+        self.inner.notify(method, params).await
+    }
 }
 
 /// Before a self-hosted backend's bridge starts: its SearXNG container is
 /// verified as LocalPilot's and started if it is stopped.
-async fn ensure_engine_running(managed: &ManagedSearchBackend) -> Result<(), String> {
+async fn ensure_engine_running(
+    managed: &ManagedSearchBackend,
+) -> Result<crate::searxng::Keep, String> {
     let port = managed
         .env
         .get("SEARXNG_URL")
@@ -290,6 +326,39 @@ pub(crate) mod tests {
     use localpilot_config::SearchTier;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Echo;
+
+    #[async_trait::async_trait]
+    impl Transport for Echo {
+        async fn call(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, localpilot_mcp::McpError> {
+            Ok(json!({ "method": method, "params": params }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_bridge_answers_as_the_bridge_and_ends_the_keep_with_it() {
+        let held = Arc::new(());
+        let keep = crate::searxng::Keep::holding(Arc::clone(&held));
+        let kept = Kept {
+            inner: Arc::new(Echo),
+            _keep: keep,
+        };
+        assert_eq!(
+            kept.call("tools/list", json!({"a": 1})).await.unwrap(),
+            json!({ "method": "tools/list", "params": {"a": 1} })
+        );
+        kept.notify("notifications/initialized", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(Arc::strong_count(&held), 2);
+        drop(kept);
+        assert_eq!(Arc::strong_count(&held), 1, "the keep ends with the bridge");
+    }
 
     /// A managed backend whose recorded identity matches its launch.
     pub(crate) fn managed_backend(tool: &str) -> ManagedSearchBackend {

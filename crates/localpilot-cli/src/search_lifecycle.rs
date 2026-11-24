@@ -184,7 +184,7 @@ fn status(ctx: &Ctx<'_>) {
     if owned.unfinished() {
         ctx.say("  an update did not finish: localpilot search update finishes or undoes it");
     }
-    match searxng::recorded_engine(ctx.host, &owned) {
+    match searxng::recorded_engine(ctx.host, &owned, searxng::Purpose::Cleanup) {
         Err(reason) => ctx.say(&format!("  Docker: {reason}")),
         Ok(engine) => {
             ctx.say(&format!(
@@ -224,11 +224,17 @@ fn status(ctx: &Ctx<'_>) {
 
 /// The lock, the record and its verified engine: what every changing command
 /// starts from.
-fn begin(ctx: &Ctx<'_>) -> Result<(searxng::Lock, Owned, Engine), String> {
+/// `purpose`: starting or updating checks WSL's networking and keeps its
+/// distribution up while the engine lives; stopping and removing do not, so
+/// cleanup always works.
+fn begin(
+    ctx: &Ctx<'_>,
+    purpose: searxng::Purpose,
+) -> Result<(searxng::Lock, Owned, Engine), String> {
     let lock = searxng::lock(&ctx.state_dir)?;
     let owned = searxng::load_owned(&ctx.state_dir)
         .ok_or_else(|| "No SearXNG is set up. localpilot search setup sets one up".to_string())??;
-    let engine = searxng::recorded_engine(ctx.host, &owned)?;
+    let engine = searxng::recorded_engine(ctx.host, &owned, purpose)?;
     Ok((lock, owned, engine))
 }
 
@@ -237,7 +243,7 @@ fn shown(engine: &Engine, args: &[&str]) -> String {
 }
 
 fn start(ctx: &Ctx<'_>) -> Result<(), String> {
-    let (_lock, owned, engine) = begin(ctx)?;
+    let (_lock, owned, engine) = begin(ctx, searxng::Purpose::Launch)?;
     if owned.unfinished() {
         return Err("an update did not finish; run localpilot search update first".to_string());
     }
@@ -252,6 +258,14 @@ fn start(ctx: &Ctx<'_>) -> Result<(), String> {
         if !ctx.confirm("Start SearXNG now?") {
             ctx.say("Nothing was changed.");
             return Ok(());
+        }
+        // Docker inside WSL publishes into its own port space: something on
+        // Windows can hold the port while Docker would still start.
+        if !ctx.host.port_free(owned.port) {
+            return Err(format!(
+                "port {} is taken by another program; localpilot search update moves SearXNG to a free port",
+                owned.port
+            ));
         }
         ctx.gate(
             "searxng-start",
@@ -282,6 +296,11 @@ fn start(ctx: &Ctx<'_>) -> Result<(), String> {
             "SearXNG runs and answers on 127.0.0.1:{}.",
             owned.port
         ));
+        if let Some(distro) = engine.distro() {
+            ctx.say(&format!(
+                "Docker runs inside WSL ({distro}) here, so WSL stops it about 30 seconds after LocalPilot stops using it; the next search starts it again."
+            ));
+        }
         Ok(())
     } else {
         Err(format!(
@@ -293,7 +312,7 @@ fn start(ctx: &Ctx<'_>) -> Result<(), String> {
 }
 
 fn stop(ctx: &Ctx<'_>) -> Result<(), String> {
-    let (_lock, owned, engine) = begin(ctx)?;
+    let (_lock, owned, engine) = begin(ctx, searxng::Purpose::Cleanup)?;
     let seen = searxng::owned_container(ctx.host, &engine, &owned)?;
     if !seen.running {
         ctx.say("SearXNG is already stopped.");
@@ -336,7 +355,7 @@ fn remove_one(ctx: &Ctx<'_>, engine: &Engine, id: &str) -> Result<(), String> {
 }
 
 fn remove(ctx: &Ctx<'_>) -> Result<(), String> {
-    let (_lock, owned, engine) = begin(ctx)?;
+    let (_lock, owned, engine) = begin(ctx, searxng::Purpose::Cleanup)?;
     let staged: Vec<&Staged> = owned.pending.iter().chain(owned.retired.iter()).collect();
     let mut ids = vec![owned.container_id.clone()];
     ids.extend(staged.iter().map(|staged| staged.container_id.clone()));
@@ -373,6 +392,10 @@ fn remove(ctx: &Ctx<'_>) -> Result<(), String> {
             folder.display()
         ));
     }
+    ctx.say(&format!(
+        "  remove the Docker network {} (only if LocalPilot made it and nothing else uses it)",
+        searxng::NETWORK
+    ));
     ctx.say("  forget LocalPilot's record of it");
     ctx.say("Only a container whose ID and LocalPilot label both match the record is removed.");
     if !ctx.confirm("Remove SearXNG?") {
@@ -412,6 +435,12 @@ fn remove(ctx: &Ctx<'_>) -> Result<(), String> {
         }
     }
     searxng::forget_owned(&ctx.state_dir)?;
+    if !searxng::remove_network(ctx.host, &engine) {
+        ctx.say(&format!(
+            "Note: the Docker network {} was kept (something else uses it, or LocalPilot did not create it).",
+            searxng::NETWORK
+        ));
+    }
     ctx.note("searxng-removed-all", "");
     ctx.say("SearXNG was removed. The image stays in Docker; docker image rm removes it.");
     Ok(())
@@ -594,7 +623,7 @@ fn undo_staged(ctx: &Ctx<'_>, engine: &Engine, owned: &mut Owned, reason: String
 /// the bridge check before the config switches to it, and only then is the
 /// old one removed.
 async fn update(ctx: &Ctx<'_>) -> Result<(), String> {
-    let (_lock, mut owned, engine) = begin(ctx)?;
+    let (_lock, mut owned, engine) = begin(ctx, searxng::Purpose::Launch)?;
     if owned.unfinished() {
         return resolve_unfinished(ctx, &engine, owned);
     }
@@ -618,7 +647,7 @@ async fn update(ctx: &Ctx<'_>) -> Result<(), String> {
         ));
     }
     let mount = searxng::mount_path(ctx.host, &engine, &copy)?;
-    let create = searxng::create_args(port, &mount);
+    let create = searxng::create_args(port, &mount, searxng::NETWORK);
     let create: Vec<&str> = create.iter().map(String::as_str).collect();
     let next = moved(&entry, port);
     ctx.say("This will:");
@@ -650,7 +679,7 @@ async fn update(ctx: &Ctx<'_>) -> Result<(), String> {
     searxng::copy_settings(&owned.settings_dir, &copy)?;
     ctx.say("Creating the new container (downloading the image can take a few minutes)...");
     let id = match searxng::create(ctx.host, &engine, port, &mount) {
-        Ok(id) => id,
+        Ok(created) => created.id,
         Err(reason) => {
             return Err(match searxng::remove_settings(&copy) {
                 Ok(()) => reason,
@@ -844,7 +873,11 @@ fn engine_readiness(
             "not checked: Docker runs inside WSL, and checking could start the distribution",
             false,
         ),
-        searxng::Route::Path { .. } => match searxng::recorded_engine(host, &owned) {
+        searxng::Route::Path { .. } => match searxng::recorded_engine(
+            host,
+            &owned,
+            searxng::Purpose::Cleanup,
+        ) {
             Err(_) => (
                 "not checked: Docker did not answer, or now uses another endpoint than the recorded one",
                 false,
@@ -930,6 +963,12 @@ mod tests {
             let mut held = containers.borrow_mut();
             match words.as_slice() {
                 ["version", ..] => ok("29.6.0"),
+                ["network", "inspect", ..] => ok(&format!(
+                    "{} {} 0",
+                    crate::searxng::tests::NET_ID,
+                    searxng::LABEL_VALUE
+                )),
+                ["network", "rm", _] => ok(searxng::NETWORK),
                 ["create", ..] => {
                     let port = words
                         .iter()
@@ -1225,6 +1264,84 @@ mod tests {
             .unwrap();
         assert_eq!(engine.record, "unreadable");
         assert_eq!(engine.table_matches_record, None);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_searxng_is_not_started_onto_a_taken_windows_port() {
+        // Docker inside WSL publishes into its own port space, so after WSL
+        // stopped, a Windows program can hold the port while Docker would
+        // still start: the Windows side is asked first.
+        let fixture = fixture(searxng::IMAGE);
+        let mut host = docker(&fixture.containers);
+        for container in fixture.containers.borrow_mut().values_mut() {
+            container.1 = false;
+        }
+        host.taken = vec![8888];
+        let events = RefCell::new(Vec::new());
+        let error = searxng::ensure_running(&host, &fixture.state, 8888, &|event, _| {
+            events.borrow_mut().push(event.to_string());
+            true
+        })
+        .unwrap_err();
+        assert!(error.contains("port 8888 is taken"), "{error}");
+        assert!(
+            events.borrow().is_empty(),
+            "nothing recorded, nothing started"
+        );
+        let (result, _) = act(&fixture, &host, Action::Start, true, true).await;
+        assert!(result.unwrap_err().contains("taken by another program"));
+        assert!(!host.commands().iter().any(|c| c.contains(" start ")));
+        assert!(fixture
+            .containers
+            .borrow()
+            .values()
+            .all(|(_, running, _)| !running));
+    }
+
+    #[tokio::test]
+    async fn on_wsl_a_search_keeps_the_distribution_up_and_cleanup_needs_no_nat() {
+        let fixture = fixture(searxng::IMAGE);
+        let mut owned = searxng::load_owned(&fixture.state).unwrap().unwrap();
+        owned.route = searxng::Route::Wsl {
+            wsl: PathBuf::from("wsl.exe"),
+            distro: "Ubuntu".to_string(),
+        };
+        searxng::save_owned(&fixture.state, &owned).unwrap();
+        for container in fixture.containers.borrow_mut().values_mut() {
+            container.1 = false;
+        }
+        let mode = Rc::new(std::cell::Cell::new("nat"));
+        let inner = docker(&fixture.containers);
+        let seen = Rc::clone(&mode);
+        let host = FakeHost::new(move |argv| {
+            if argv.iter().any(|word| word == "wslinfo") {
+                ok(seen.get())
+            } else {
+                (inner.reply)(argv)
+            }
+        });
+        let keep = searxng::ensure_running(&host, &fixture.state, 8888, &|_, _| true).unwrap();
+        assert!(keep.holds());
+        assert!(host
+            .commands()
+            .contains(&"(held) wsl.exe -d Ubuntu --exec cat".to_string()));
+        let (result, said) = act(&fixture, &host, Action::Start, true, true).await;
+        result.unwrap();
+        assert!(said.contains("WSL stops it about 30 seconds"), "{said}");
+        // WSL switched away from NAT: no start, but stopping still works.
+        mode.set("mirrored");
+        assert!(
+            searxng::ensure_running(&host, &fixture.state, 8888, &|_, _| true)
+                .unwrap_err()
+                .contains("mirrored")
+        );
+        let (result, _) = act(&fixture, &host, Action::Stop, true, true).await;
+        result.unwrap();
+        assert!(fixture
+            .containers
+            .borrow()
+            .values()
+            .all(|(_, running, _)| !running));
     }
 
     #[test]

@@ -32,10 +32,9 @@ the local network.
    is not reachable from the local network. Every later command passes the
    recorded endpoint with `--host` and drops the variables that could switch
    daemons. The image is pinned by digest. The container is published on
-   `127.0.0.1` only, with `--restart no` and a LocalPilot label. Docker that
-   runs only inside WSL, and Podman, are reported but not used until their
-   loopback-only publishing is verified. The WSL route compiles only with the
-   non-default `unverified-search-routes` feature, for verification.
+   `127.0.0.1` only, with `--restart no` and a LocalPilot label. Podman is
+   reported but not used until its loopback-only publishing is verified. Docker
+   that runs only inside WSL is used as amended below.
 3. **Ownership is a record, never a guess.** Setup records the container ID
    before the start, the endpoint, the image, the port, the settings folder (with
    a marker file), and the exact config table it wrote. Every later step acts
@@ -68,8 +67,39 @@ the local network.
 
 **Consequences.** A user can get working web search with one command and keep
 it working without knowing Docker. LocalPilot never adopts, changes or removes
-a container, folder or config table it did not record as its own. The WSL and
-Podman routes stay off until a person verifies them on each platform.
+a container, folder or config table it did not record as its own. The Podman
+route stays off until a person verifies it.
+
+**Amendment (2026-11-24): Docker inside WSL.** Verified on Windows 11 with
+Docker Engine 29 in WSL 2:
+- Under WSL's NAT networking with localhost forwarding on (the defaults), a
+  port published on the distribution's `127.0.0.1` is forwarded to Windows'
+  `127.0.0.1` only, and is not reachable on the distribution's own address or
+  the computer's LAN address. Starting or updating SearXNG there first refuses
+  an unreadable `.wslconfig`, `localhostForwarding=false`, and any effective
+  networking mode other than NAT (`wslinfo --networking-mode`); the
+  Windows-side liveness check then proves the forward. Stop, status and remove
+  run without these checks, so a changed WSL setup never strands a container.
+- The container joins a network LocalPilot creates with its label
+  (`localpilot-searxng`), because the default bridge cannot resolve names on
+  some WSL setups. A network of that name without the label is refused. The
+  container is attached by the network ID Docker reported. A failed setup
+  removes the network only when that run created it; `remove` deletes it by
+  the ID it checked, only when it is LocalPilot's and unused, so a network
+  swapped in under the same name is never touched.
+- WSL stops an idle distribution about 30 seconds after its last command.
+  While setup (from the moment SearXNG is the confirmed choice, not while it
+  lists choices), an update, a start or a search bridge uses SearXNG,
+  LocalPilot holds one `wsl.exe ... cat` on a pipe it keeps open; dropping
+  it, or LocalPilot ending in any way, closes the pipe and ends it. The holder
+  is taken before the route is checked, and setup checks the chosen route
+  again (networking mode and Docker endpoint) once it holds it, since WSL may
+  restart differently while the preview is open. If that holder cannot start,
+  the launch is refused rather than left to idle out. Docker publishes inside WSL's own
+  port space, so a start first checks that the recorded port is still free on
+  Windows.
+- `doctor` still does not ask Docker inside WSL, because asking could start
+  the distribution.
 
 ## ADR-0291: Managed Search Backends Are Search-Only, User-Owned And Started On First Search
 
