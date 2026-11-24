@@ -43,14 +43,16 @@ refused to start such a session with LocalPilot, and a free-text `AGREE but
    reviewer reads only the anchor. On Windows an absolute link target is
    hashed in the verbatim form Python's `os.readlink` returns, so both sides
    agree on links.
-5. **Conformance.** The mandatory suite passes unchanged. The optional
-   review-snapshot fixtures run through a copy of the vendored runner, and a
-   mixed test runs the reference against the native participant as owner and
-   as reviewer, including a non-ASCII and astral path, so both digests agree.
+5. **Conformance.** The review-snapshot fixtures are part of the vendored
+   participant profile, two of them with the native participant owning the
+   unit, and `review-withdraw` is a participant operation. A mixed test runs
+   the pinned reference against the native participant as owner and as
+   reviewer, including a non-ASCII and astral path, so both digests agree.
 
-**Consequences.** The reference's start refusal for LocalPilot snapshot
-sessions can be lifted upstream. Until it is, the snapshot path is exercised
-only by the tests above.
+**Consequences.** The reference accepts `start --review-snapshot` with a
+LocalPilot participant as an explicit opt-in (pair-programming 3.3.0). A
+LocalPilot build without this support refuses such a session by name and
+changes nothing, so the reference needs no version check of its own.
 
 ## ADR-0292: LocalPilot Sets Up Search Backends And Manages Only The SearXNG It Created
 

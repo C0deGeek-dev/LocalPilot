@@ -1784,8 +1784,6 @@ def start(a):
     if pol not in SIGNOFFS: raise SystemExit(f"--signoff must be one of {', '.join(SIGNOFFS)}")
     snap=bool(getattr(a,"review_snapshot",False))
     if snap and pol!="strict": raise SystemExit("--review-snapshot needs strict sign-off; a --signoff legacy session cannot enforce it")
-    if snap and any(r=="localpilot" or r.startswith("localpilot-") for r in parts):
-        raise SystemExit("--review-snapshot is not supported with LocalPilot yet: its native participant does not implement it, so the session could not be enforced")
     with container_rollback(mb.base), Lock(mb.lock):
         # Inside the lock. Outside it, `start` could read info/exclude, see the
         # rule and skip, while a concurrent `purge` removed that same rule under

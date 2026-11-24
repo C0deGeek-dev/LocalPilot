@@ -1,13 +1,13 @@
 {
  "source_repo": "c0degeek-ai",
  "source_path": "skills/pair-programming/conformance",
- "source_commit": "14e78773c993fa69d48009ef66d1dbd820cdbd54",
+ "source_commit": "5fa5f9d3299fe6fb366d9c1215b5bed80a87500b",
  "files": {
-  "run.py": "7a496608cbc317ee7c9792eec29025d7ac8863bf2f0de761953ce7baaa3aaf7c",
+  "run.py": "b719000623b056ff43e1b2a5a8bb58e545601f13bf2f79d9af4861d34696bd56",
   "soak.py": "be2aad880da07f495a103e23c6a24f03f6051947a4a2e518062a5d05dcc66e2a",
   "scan_cases.py": "f6fe55f6b718cfe8b1c8f8016d18a7c51ea7193a66f65f9a1c40a41a56c86bf7",
-  "README.md": "21648b5aac14581fe822da857b66d3c608b09045e2ad1bae20338fcb4d3a0255",
-  "participant.json": "c6295838bee76fb4c444f0a822174c2430a5d3b2a3ba4e0b9c25055f5c62cf20",
+  "README.md": "311a1329be0a910e73416a7c5cde504051796c6175444b2adceeca765d931e25",
+  "participant.json": "8915f1628ee299fe9494561ea5422dd441e3a356d0bd1d729981da685f25723d",
   "fixtures/actor-claim-is-carried-and-changes-nothing.json": "fcd9fc6b47a87b60ed8a140ab27e20c9b05cb30c7a337327ebf6d547da955617",
   "fixtures/artifact-a-corrupt-store-is-refused-everywhere.json": "09aae082d8d38ca0f0fc15942830e6e5a6595a9d1807b48c3a9870a5901eb577",
   "fixtures/artifact-each-type-is-stored-listed-and-shown.json": "4c7c8bf11a6e823a39a6bc17eda77e813bf270f6936e55df191ec07569016c38",
@@ -95,7 +95,9 @@
   "fixtures/replay-survives-a-seq-it-cannot-use.json": "05c1a95eb753ae46dcb3a9860524678ae2873b52c9933ea23f49dc1ee86ec2ef",
   "fixtures/review-snapshot-agree-closes-on-the-reviewed-bytes.json": "5e4b79138927ee83ac997002808767bff7faa2d854e250959fd440dd4a0f9295",
   "fixtures/review-snapshot-changed-bytes-refuse-until-a-superseding-request-is-agreed.json": "f78fd7c3b6306f83ae1a66d85080393d583d01a8020d026a66eec7f60ecdb4d6",
-  "fixtures/review-snapshot-is-refused-where-it-cannot-be-enforced.json": "ecc3d8b64ff8a695dfb5eb05c5d53c9ebbd588bd2d33af552d5aecf86b2f9257",
+  "fixtures/review-snapshot-is-refused-where-it-cannot-be-enforced.json": "3a414ba4dfe5489d94ac0bca025e35cbb6428192659652d2b41586bd5e461903",
+  "fixtures/review-snapshot-localpilot-owner-closes-only-on-agreed-bytes.json": "77fbfced53de932b99abe13bca8651d25dd9d67ad9c0ccc2923267ca58ab2ea9",
+  "fixtures/review-snapshot-localpilot-owner-withdraws-its-request.json": "aa19967dd85beb682beb70758b47c8b4c5400ae16e80bf60ec2d908b5bd5a33c",
   "fixtures/review-snapshot-withdrawn-request-leaves-nothing-to-close-on.json": "079dae25ad7fb8ea3b66c9313e2b8f62fcc202d77e812ee456002533a7ebe692",
   "fixtures/session-events-record-park-and-resume.json": "a72c99a941aad5cb5e103806ccf368cac20a6741838b201bfb343652d45e9242",
   "fixtures/signoff-legacy-pair-accepts-a-prefix-agree.json": "692a948c6e66834640c9b18ff0f858e48b6bb1cbe5553919591628c66cd5a610",
@@ -128,6 +130,6 @@
   "fixtures/version-unknown-major-record-is-refused.json": "070fbd938daaec6f272b0088fa3e0a86f3009f133735790c4a000afa52a0da39",
   "fixtures/version-unknown-major-session-is-refused.json": "02d765efce33311f7e31b706747a28bab0de4a9b9e168e70b693aaec8bc164e9",
   "fixtures/version-unknown-required-feature-is-refused.json": "38135f989cc15f6ab5cc680c09ceb0a0362bea86f962449934218d03e46a06bc",
-  "reference/pair.py": "c276fb57c4766f35eb33b6bc6d1325d5a778973fee3401cba7c318e100f69658"
+  "reference/pair.py": "4a0f2adebfceea8603fc6e34fe123cde31873664d19b3082ca230dfb5c439db2"
  }
 }

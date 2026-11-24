@@ -236,10 +236,12 @@ python run.py --participant codex=<command> --participant localpilot=<command>
   from the selection rule and checked in, so a change to it is reviewed. A
   mandatory fixture that is skipped or not run fails the run
   (`MANDATORY_NOT_RUN <id>`).
-- A fixture that turns on an optional session feature at `start` (today
-  `--review-snapshot`) is not selected (`uses the optional feature ...`): a
-  participant that does not implement the feature refuses such a session by
-  design. It becomes mandatory once the participant claims the feature.
+- A fixture that turns on an optional session feature at `start` (listed in
+  the runner's `OPTIONAL_FEATURE_FLAGS`, empty today) is not selected (`uses
+  the optional feature ...`): a participant that does not implement the
+  feature refuses such a session by design. It becomes mandatory once the
+  participant claims the feature. `--review-snapshot` did so: its fixtures are
+  mandatory, two of them with LocalPilot as the unit's owner.
 - Checking uses the STATE layer plus **obs** instead of the full CLI layer:
   - the exit code of every step;
   - peer mail from `watch` and `peek`, compared as blocks;

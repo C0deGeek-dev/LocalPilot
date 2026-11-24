@@ -58,7 +58,8 @@ OBSERVER = "<observer>"
 PARTICIPANT_OPS = frozenset({"join", "post", "watch", "peek", "ack", "status", "transcript", "health",
                              "handoff-offer", "handoff-accept", "handoff-decline", "handoff-withdraw",
                              "next-unit", "complete", "guard-write", "endpoint", "accept", "record-push",
-                             "usage", "takeover-authorize", "takeover", "reviewer-transfer"})
+                             "usage", "takeover-authorize", "takeover", "reviewer-transfer",
+                             "review-withdraw"})
 MANDATORY_FILE = HERE / "participant.json"
 # Environment a step may set, from a value an earlier step printed. Nothing
 # else: in particular never PAIR_REPO.
@@ -841,7 +842,9 @@ def fixture_roles(fx: dict) -> set:
 
 # start flags that turn on a session feature a native participant need not
 # implement yet (the session then requires it, and such a participant refuses).
-OPTIONAL_FEATURE_FLAGS = {"--review-snapshot"}
+# Empty while every optional feature is part of the participant profile:
+# review-snapshot joined it once LocalPilot's native participant implemented it.
+OPTIONAL_FEATURE_FLAGS: frozenset = frozenset()
 
 
 def participant_selection(fx: dict, native: list) -> tuple:

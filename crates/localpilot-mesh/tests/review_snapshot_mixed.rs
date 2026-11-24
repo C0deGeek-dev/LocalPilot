@@ -3,10 +3,8 @@
 //! the reference as the owner with the native participant checking what it
 //! is asked to agree to.
 //!
-//! The vendored reference refuses `start --review-snapshot` with a LocalPilot
-//! participant until this support ships, so the test runs a copy of it with
-//! only that one guard removed. Needs Python 3.9+ and Git; without Python
-//! this is skipped, and fails under `CI=true`.
+//! The reference is the vendored, pinned copy. Needs Python 3.9+ and Git;
+//! without Python this is skipped, and fails under `CI=true`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -16,9 +14,6 @@ use std::time::Duration;
 use localpilot_mesh::ops::PostArgs;
 use localpilot_mesh::Mesh;
 use serde_json::Value;
-
-/// The one line of the reference that refuses a LocalPilot snapshot session.
-const GUARD: &str = "        raise SystemExit(\"--review-snapshot is not supported with LocalPilot yet: its native participant does not implement it, so the session could not be enforced\")\n";
 
 fn python() -> Option<Vec<String>> {
     let mut candidates: Vec<Vec<String>> = Vec::new();
@@ -59,22 +54,11 @@ impl Pair {
             return None;
         };
         let dir = tempfile::tempdir().unwrap();
-        let vendored = Path::new(env!("CARGO_MANIFEST_DIR"))
+        // The vendored reference itself, exactly as pinned.
+        let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("conformance")
             .join("reference")
             .join("pair.py");
-        let text = std::fs::read_to_string(&vendored).unwrap();
-        // The guard is the line after the `if` that names LocalPilot.
-        let at = text.find(GUARD).expect("the reference's LocalPilot guard");
-        let head = &text[..at];
-        let cond = head.rfind("\n    if ").expect("the guard's condition") + 1;
-        assert!(
-            head[cond..].contains("localpilot"),
-            "the guard's condition names LocalPilot"
-        );
-        let patched = format!("{}{}", &text[..cond], &text[at + GUARD.len()..]);
-        let reference = dir.path().join("pair.py");
-        std::fs::write(&reference, patched).unwrap();
         let anchor = dir.path().join("anchor");
         std::fs::create_dir(&anchor).unwrap();
         let no_hooks = dir.path().join("no-hooks");

@@ -26,28 +26,12 @@
    "stdout": "",
    "stderr": "--review-snapshot needs strict sign-off; a --signoff legacy session cannot enforce it [anchor=<REPO> source=flag]\n",
    "state": {}
-  },
-  {
-   "cmd": [
-    "start",
-    "--role",
-    "claude",
-    "--task",
-    "fixture task",
-    "--review-snapshot",
-    "--with",
-    "localpilot"
-   ],
-   "rc": 1,
-   "stdout": "",
-   "stderr": "--review-snapshot is not supported with LocalPilot yet: its native participant does not implement it, so the session could not be enforced [anchor=<REPO> source=flag]\n",
-   "state": {}
   }
  ],
  "final_state": {},
  "provenance": {
-  "build": "2a596568e512+dirty:pair.py",
-  "sha12": "0b0a2fac3a26",
+  "build": "8349330719c3+dirty:pair.py",
+  "sha12": "a87da41daba9",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  }
 }
