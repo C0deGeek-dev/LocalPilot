@@ -11,8 +11,8 @@
   "vcs": "git"
  },
  "provenance": {
-  "build": "92b142067941+dirty:pair.py",
-  "sha12": "8461b66f0533",
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "32822b62b1b2",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
@@ -29,22 +29,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -62,19 +80,17 @@
      "reason": null,
      "resume_at": null
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -87,9 +103,25 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -110,22 +142,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -153,7 +203,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -165,21 +228,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -195,9 +269,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -215,23 +305,27 @@
    "stdout": "PARKED session=<SID> work=fixture-task from=active\n",
    "stderr": "",
    "state": {
-    "active.json": {
-     "session_id": "<SID>",
-     "driver": "claude",
-     "status": "parked",
-     "updated_at": "<TS>"
-    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -259,7 +353,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -271,21 +378,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "parked",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -301,9 +419,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
      "parked_from": "active",
      "parked_at": "<TS>",
      "parked_tree": {
@@ -334,23 +468,27 @@
    "stdout": "NO_ACTIVE_SESSION\nPARKED <SID> work=fixture-task from=active parked_at=<TS>\nANCHOR=<REPO> source=flag\n",
    "stderr": "",
    "state": {
-    "active.json": {
-     "session_id": "<SID>",
-     "driver": "claude",
-     "status": "parked",
-     "updated_at": "<TS>"
-    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -378,7 +516,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -390,21 +541,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "parked",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -420,9 +582,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
      "parked_from": "active",
      "parked_at": "<TS>",
      "parked_tree": {
@@ -456,22 +634,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -499,7 +695,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -511,21 +720,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "implement",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -541,9 +761,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
      "park_reason": null,
      "events": [
       {
@@ -577,22 +813,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -620,7 +874,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -632,21 +899,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "implement",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -662,9 +940,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
      "park_reason": null,
      "events": [
       {
@@ -692,22 +986,40 @@
  ],
  "final_state": {
   "active.json": {
+   "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+  },
+  "active.v2.json": {
    "session_id": "<SID>",
    "driver": "claude",
    "status": "active",
-   "updated_at": "<TS>"
+   "updated_at": "<TS>",
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "schema": 2
   },
   "sessions/<SID>/cursor/claude.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null
+   "from": {
+    "codex": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/cursor/codex.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null
+   "from": {
+    "claude": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/health/claude.json": {
    "role": "claude",
@@ -735,7 +1047,20 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.2"
+    "owner": "claude",
+    "protocol": "1.4",
+    "msg_id": "codex:1",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "codex:1",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
    }
   ],
   "sessions/<SID>/latest/codex.json": {
@@ -747,21 +1072,32 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "joined; navigator ready",
-   "protocol": "1.2"
+   "owner": "claude",
+   "protocol": "1.4",
+   "msg_id": "codex:1",
+   "to": [
+    "claude"
+   ],
+   "reply_to": null,
+   "broadcast": true,
+   "thread_id": "codex:1",
+   "route_trace": [
+    "codex"
+   ],
+   "ttl": null,
+   "forward": false
   },
-  "sessions/<SID>/session.json": {
+  "sessions/<SID>/session.v2.json": {
    "session_id": "<SID>",
    "task": "fixture task",
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "driver": "claude",
-   "navigator": "codex",
    "owner": "claude",
    "ownership_epoch": 1,
    "status": "active",
    "phase": "implement",
    "waiting": null,
-   "pause": null,
    "handoff": null,
    "vcs": "git",
    "base_head": "<SHA>",
@@ -777,9 +1113,25 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.2",
+   "protocol": "1.4",
+   "signoff": "strict",
    "created_at": "<TS>",
    "updated_at": "<TS>",
+   "requires": [
+    "strict-signoff"
+   ],
+   "schema": 2,
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "codex"
+    ],
+    "advisers": []
+   },
+   "pauses": {},
    "park_reason": null,
    "events": [
     {

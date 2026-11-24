@@ -67,6 +67,35 @@ fn mandatory() -> Vec<String> {
     ids
 }
 
+/// The `start` flags that turn on an optional session feature, as the
+/// vendored runner lists them.
+const OPTIONAL_FEATURE_FLAGS: &[&str] = &["--review-snapshot"];
+
+/// Whether fixture `id` starts a session with an optional feature.
+fn uses_optional_feature(id: &str) -> bool {
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(suite().join("fixtures").join(format!("{id}.json")))
+            .expect("the fixture"),
+    )
+    .expect("the fixture is JSON");
+    fixture["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|step| {
+            let cmds: Vec<&serde_json::Value> = step.get("cmd").map_or_else(
+                || step["parallel"].as_array().into_iter().flatten().collect(),
+                |c| vec![c],
+            );
+            cmds.iter().any(|c| {
+                c.as_array().into_iter().flatten().any(|a| {
+                    a.as_str()
+                        .is_some_and(|a| OPTIONAL_FEATURE_FLAGS.contains(&a))
+                })
+            })
+        })
+}
+
 #[test]
 fn the_vendored_fixtures_are_exactly_the_mandatory_list() {
     let mut on_disk: Vec<String> = std::fs::read_dir(suite().join("fixtures"))
@@ -77,6 +106,10 @@ fn the_vendored_fixtures_are_exactly_the_mandatory_list() {
             name.strip_suffix(".json").map(str::to_owned)
         })
         .collect();
+    // A fixture that turns on an optional session feature at `start` is
+    // not on the mandatory list (the runner's selection rule); it is run
+    // through its own test once this participant claims the feature.
+    on_disk.retain(|id| !uses_optional_feature(id));
     on_disk.sort();
     let mut listed = mandatory();
     listed.sort();

@@ -1,6 +1,6 @@
 //! Usage, explicit quota transitions, and opt-in advisory context (T-1..T-3).
 use super::*;
-use crate::session::check_protocol;
+use crate::session::check_session;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -75,7 +75,11 @@ impl Mesh {
             let s = self
                 .read_obj(if v2.exists() { &v2 } else { &v1 })?
                 .ok_or_else(|| refused(format!("unknown session {id:?}")))?;
-            check_protocol(&s, &format!("session {id}"))?;
+            check_session(
+                &s,
+                &format!("session {id}"),
+                if v2.exists() { 2 } else { 1 },
+            )?;
             s
         } else {
             self.active()?.ok_or_else(|| refused("NO_ACTIVE_SESSION"))?

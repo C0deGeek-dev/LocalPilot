@@ -138,9 +138,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -273,7 +277,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -299,7 +303,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -340,9 +344,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -363,6 +371,14 @@
      "vcs": "git",
      "recorded_at": "<TS>"
     }
+   }
+  },
+  {
+   "raw": {
+    "op": "json_set",
+    "path": "sessions/<SID>/session.v2.json",
+    "key": "signoff",
+    "value": "legacy"
    }
   },
   {
@@ -481,7 +497,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -507,7 +523,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -548,9 +564,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "legacy",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "quota-takeover"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -565,10 +585,7 @@
        "localpilot"
       ]
      },
-     "pauses": {},
-     "requires": [
-      "quota-takeover"
-     ]
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -691,7 +708,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -717,7 +734,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -758,9 +775,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "legacy",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "quota-takeover"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -775,10 +796,7 @@
        "localpilot"
       ]
      },
-     "pauses": {},
-     "requires": [
-      "quota-takeover"
-     ]
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -891,7 +909,7 @@
     "expect_reply": false,
     "body": "joined; navigator ready",
     "owner": "claude",
-    "protocol": "1.2",
+    "protocol": "1.4",
     "msg_id": "codex:1",
     "to": [
      "claude",
@@ -917,7 +935,7 @@
    "expect_reply": false,
    "body": "joined; navigator ready",
    "owner": "claude",
-   "protocol": "1.2",
+   "protocol": "1.4",
    "msg_id": "codex:1",
    "to": [
     "claude",
@@ -958,9 +976,13 @@
     ]
    },
    "delivery": "print",
-   "protocol": "1.2",
+   "protocol": "1.4",
+   "signoff": "legacy",
    "created_at": "<TS>",
    "updated_at": "<TS>",
+   "requires": [
+    "quota-takeover"
+   ],
    "schema": 2,
    "participants": [
     "claude",
@@ -975,10 +997,7 @@
      "localpilot"
     ]
    },
-   "pauses": {},
-   "requires": [
-    "quota-takeover"
-   ]
+   "pauses": {}
   },
   "vcs.json": {
    "vcs": "git",
@@ -986,8 +1005,8 @@
   }
  },
  "provenance": {
-  "build": "5c2e6d260585:pair.py",
-  "sha12": "64246b9bb317",
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "34304542036d",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "legacy_build": "ee625a4:pair.py"

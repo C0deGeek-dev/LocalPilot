@@ -263,7 +263,16 @@ fn a_verdict_that_names_no_request_is_never_shown_as_its_answer() {
     let Some(t) = Tree::new() else {
         return;
     };
-    t.reference(&["start", "--role", "claude", "--task", "legacy pair"]);
+    // A legacy historic pair: only that is schema 1.
+    t.reference(&[
+        "start",
+        "--role",
+        "claude",
+        "--task",
+        "legacy pair",
+        "--signoff",
+        "legacy",
+    ]);
     t.reference(&["join", "--role", "codex", "--timeout", "1"]);
     t.reference(&[
         "post",

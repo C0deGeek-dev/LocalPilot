@@ -25,22 +25,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -58,19 +76,17 @@
      "reason": null,
      "resume_at": null
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -83,9 +99,25 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -106,22 +138,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -149,7 +199,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -161,21 +224,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -191,9 +265,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -214,26 +304,42 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -261,7 +367,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -273,21 +392,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -303,9 +433,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -373,10 +519,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
      "created_at": "<TS>",
@@ -398,20 +552,28 @@
      "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -439,7 +601,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -451,21 +626,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -481,9 +667,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -506,10 +708,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
      "created_at": "<TS>",
@@ -550,20 +760,28 @@
      "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -591,7 +809,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -603,21 +834,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -633,9 +875,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -659,48 +917,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
      "created_at": "<TS>",
@@ -730,21 +958,67 @@
     "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -772,7 +1046,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -784,21 +1071,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -814,9 +1112,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -841,70 +1155,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.csv",
-       "sha256": "<BLOB-b5a0cc4b23c7>",
-       "size": 39,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "csv",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
      "created_at": "<TS>",
@@ -934,21 +1196,89 @@
     "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.csv",
+       "sha256": "<BLOB-b5a0cc4b23c7>",
+       "size": 39,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "csv",
+      "rows": 2
      },
-     "delivered_seq": 1
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -976,7 +1306,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -988,21 +1331,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -1018,9 +1372,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -1045,10 +1415,46 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/notes.txt",
+       "sha256": "<BLOB-b65c1c0d1571>",
+       "size": 10,
+       "tree": "anchor"
+      },
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "document",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-b65c1c0d1571>": {
+     "$text": "free text\n"
     },
     "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
      "created_at": "<TS>",
@@ -1091,6 +1497,25 @@
     "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-03d3c8409ad2>": {
      "$text": "{\"a\":1}\n\n{\"a\":2}\n"
     },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
     "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
      "created_at": "<TS>",
      "created_by": "claude",
@@ -1113,68 +1538,29 @@
     "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
      "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
     },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/notes.txt",
-       "sha256": "<BLOB-b65c1c0d1571>",
-       "size": 10,
-       "tree": "anchor"
-      },
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "document",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-b65c1c0d1571>": {
-     "$text": "free text\n"
-    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -1202,7 +1588,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -1214,21 +1613,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -1244,9 +1654,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -1271,114 +1697,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.jsonl",
-       "sha256": "<BLOB-03d3c8409ad2>",
-       "size": 17,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "jsonl",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
-     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.csv",
-       "sha256": "<BLOB-b5a0cc4b23c7>",
-       "size": 39,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "csv",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.json",
-       "sha256": "<BLOB-67358ed8fd6c>",
-       "size": 10,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "json",
-      "rows": 3
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
-     "$text": "[1, 2, 3]\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
      "created_at": "<TS>",
@@ -1408,21 +1738,133 @@
     "sessions/<SID>/artifacts/<ART-5>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.json",
+       "sha256": "<BLOB-67358ed8fd6c>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "json",
+      "rows": 3
      },
-     "delivered_seq": 1
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
+     "$text": "[1, 2, 3]\n"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.jsonl",
+       "sha256": "<BLOB-03d3c8409ad2>",
+       "size": 17,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "jsonl",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
+     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.csv",
+       "sha256": "<BLOB-b5a0cc4b23c7>",
+       "size": 39,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "csv",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -1450,7 +1892,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -1462,21 +1917,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -1492,9 +1958,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -1508,118 +1990,22 @@
     "list"
    ],
    "rc": 0,
-   "stdout": "ARTIFACT <HEX64> type=design by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=document by=claude unit=1-<U> files=2 generated=0\nARTIFACT <HEX64> type=plan by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\n",
+   "stdout": "ARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=dataset by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=design by=claude unit=1-<U> files=1 generated=0\nARTIFACT <HEX64> type=document by=claude unit=1-<U> files=2 generated=0\nARTIFACT <HEX64> type=plan by=claude unit=1-<U> files=1 generated=0\n",
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.jsonl",
-       "sha256": "<BLOB-03d3c8409ad2>",
-       "size": 17,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "jsonl",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
-     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.csv",
-       "sha256": "<BLOB-b5a0cc4b23c7>",
-       "size": 39,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "csv",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.json",
-       "sha256": "<BLOB-67358ed8fd6c>",
-       "size": 10,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "json",
-      "rows": 3
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
-     "$text": "[1, 2, 3]\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
      "created_at": "<TS>",
@@ -1649,21 +2035,133 @@
     "sessions/<SID>/artifacts/<ART-5>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.json",
+       "sha256": "<BLOB-67358ed8fd6c>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "json",
+      "rows": 3
      },
-     "delivered_seq": 1
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
+     "$text": "[1, 2, 3]\n"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.jsonl",
+       "sha256": "<BLOB-03d3c8409ad2>",
+       "size": 17,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "jsonl",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
+     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.csv",
+       "sha256": "<BLOB-b5a0cc4b23c7>",
+       "size": 39,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "csv",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -1691,7 +2189,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -1703,21 +2214,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -1733,9 +2255,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -1755,114 +2293,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.jsonl",
-       "sha256": "<BLOB-03d3c8409ad2>",
-       "size": 17,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "jsonl",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
-     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.csv",
-       "sha256": "<BLOB-b5a0cc4b23c7>",
-       "size": 39,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "csv",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.json",
-       "sha256": "<BLOB-67358ed8fd6c>",
-       "size": 10,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "json",
-      "rows": 3
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
-     "$text": "[1, 2, 3]\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
      "created_at": "<TS>",
@@ -1892,21 +2334,133 @@
     "sessions/<SID>/artifacts/<ART-5>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.json",
+       "sha256": "<BLOB-67358ed8fd6c>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "json",
+      "rows": 3
      },
-     "delivered_seq": 1
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
+     "$text": "[1, 2, 3]\n"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.jsonl",
+       "sha256": "<BLOB-03d3c8409ad2>",
+       "size": 17,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "jsonl",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
+     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.csv",
+       "sha256": "<BLOB-b5a0cc4b23c7>",
+       "size": 39,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "csv",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -1934,7 +2488,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -1946,21 +2513,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -1976,9 +2554,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -1991,118 +2585,22 @@
     "status"
    ],
    "rc": 0,
-   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=#1..#1\nANCHOR=<REPO> source=flag\n",
+   "stdout": "SESSION <SID> status=active phase=huddle driver=claude owner=claude work=fixture-task#1\nclaude: ready updated=<TS> resume_at=-\ncodex: ready updated=<TS> resume_at=-\nDELIVERY mode=ack caps=claude:ack,codex:ack unacked claude=codex:1..codex:1\nANCHOR=<REPO> source=flag\n",
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/plan.md",
-       "sha256": "<BLOB-23a9db36a175>",
-       "size": 47,
-       "tree": "anchor"
-      }
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
      ],
-     "generated": [],
-     "meta": null,
-     "type": "plan",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
-     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.jsonl",
-       "sha256": "<BLOB-03d3c8409ad2>",
-       "size": 17,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "jsonl",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
-     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.csv",
-       "sha256": "<BLOB-b5a0cc4b23c7>",
-       "size": 39,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "csv",
-      "rows": 2
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "docs/design.md",
-       "sha256": "<BLOB-9283aab9b6b1>",
-       "size": 58,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": null,
-     "type": "design",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
-     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-     "created_at": "<TS>",
-     "created_by": "claude",
-     "files": [
-      {
-       "path": "data/rows.json",
-       "sha256": "<BLOB-67358ed8fd6c>",
-       "size": 10,
-       "tree": "anchor"
-      }
-     ],
-     "generated": [],
-     "meta": {
-      "format": "json",
-      "rows": 3
-     },
-     "type": "dataset",
-     "unit_id": "1-<U>"
-    },
-    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
-     "$text": "[1, 2, 3]\n"
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
      "created_at": "<TS>",
@@ -2132,21 +2630,133 @@
     "sessions/<SID>/artifacts/<ART-5>/files/<BLOB-b65c1c0d1571>": {
      "$text": "free text\n"
     },
-    "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+    "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/plan.md",
+       "sha256": "<BLOB-23a9db36a175>",
+       "size": 47,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "plan",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
+     "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.json",
+       "sha256": "<BLOB-67358ed8fd6c>",
+       "size": 10,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "json",
+      "rows": 3
      },
-     "delivered_seq": 1
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
+     "$text": "[1, 2, 3]\n"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.jsonl",
+       "sha256": "<BLOB-03d3c8409ad2>",
+       "size": 17,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "jsonl",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
+     "$text": "{\"a\":1}\n\n{\"a\":2}\n"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "docs/design.md",
+       "sha256": "<BLOB-9283aab9b6b1>",
+       "size": 58,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": null,
+     "type": "design",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
+     "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+     "created_at": "<TS>",
+     "created_by": "claude",
+     "files": [
+      {
+       "path": "data/rows.csv",
+       "sha256": "<BLOB-b5a0cc4b23c7>",
+       "size": 39,
+       "tree": "anchor"
+      }
+     ],
+     "generated": [],
+     "meta": {
+      "format": "csv",
+      "rows": 2
+     },
+     "type": "dataset",
+     "unit_id": "1-<U>"
+    },
+    "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+     "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -2174,7 +2784,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -2186,21 +2809,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -2216,9 +2850,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -2229,114 +2879,18 @@
  ],
  "final_state": {
   "active.json": {
+   "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+  },
+  "active.v2.json": {
    "session_id": "<SID>",
    "driver": "claude",
    "status": "active",
-   "updated_at": "<TS>"
-  },
-  "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
-   "created_at": "<TS>",
-   "created_by": "claude",
-   "files": [
-    {
-     "path": "docs/plan.md",
-     "sha256": "<BLOB-23a9db36a175>",
-     "size": 47,
-     "tree": "anchor"
-    }
+   "updated_at": "<TS>",
+   "participants": [
+    "claude",
+    "codex"
    ],
-   "generated": [],
-   "meta": null,
-   "type": "plan",
-   "unit_id": "1-<U>"
-  },
-  "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
-   "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
-  },
-  "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
-   "created_at": "<TS>",
-   "created_by": "claude",
-   "files": [
-    {
-     "path": "data/rows.jsonl",
-     "sha256": "<BLOB-03d3c8409ad2>",
-     "size": 17,
-     "tree": "anchor"
-    }
-   ],
-   "generated": [],
-   "meta": {
-    "format": "jsonl",
-    "rows": 2
-   },
-   "type": "dataset",
-   "unit_id": "1-<U>"
-  },
-  "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
-   "$text": "{\"a\":1}\n\n{\"a\":2}\n"
-  },
-  "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
-   "created_at": "<TS>",
-   "created_by": "claude",
-   "files": [
-    {
-     "path": "data/rows.csv",
-     "sha256": "<BLOB-b5a0cc4b23c7>",
-     "size": 39,
-     "tree": "anchor"
-    }
-   ],
-   "generated": [],
-   "meta": {
-    "format": "csv",
-    "rows": 2
-   },
-   "type": "dataset",
-   "unit_id": "1-<U>"
-  },
-  "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
-   "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
-  },
-  "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
-   "created_at": "<TS>",
-   "created_by": "claude",
-   "files": [
-    {
-     "path": "docs/design.md",
-     "sha256": "<BLOB-9283aab9b6b1>",
-     "size": 58,
-     "tree": "anchor"
-    }
-   ],
-   "generated": [],
-   "meta": null,
-   "type": "design",
-   "unit_id": "1-<U>"
-  },
-  "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
-   "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
-  },
-  "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
-   "created_at": "<TS>",
-   "created_by": "claude",
-   "files": [
-    {
-     "path": "data/rows.json",
-     "sha256": "<BLOB-67358ed8fd6c>",
-     "size": 10,
-     "tree": "anchor"
-    }
-   ],
-   "generated": [],
-   "meta": {
-    "format": "json",
-    "rows": 3
-   },
-   "type": "dataset",
-   "unit_id": "1-<U>"
-  },
-  "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
-   "$text": "[1, 2, 3]\n"
+   "schema": 2
   },
   "sessions/<SID>/artifacts/<ART-5>/artifact.json": {
    "created_at": "<TS>",
@@ -2366,21 +2920,133 @@
   "sessions/<SID>/artifacts/<ART-5>/files/<BLOB-b65c1c0d1571>": {
    "$text": "free text\n"
   },
-  "sessions/<SID>/cursor/claude.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null,
-   "delivered_counts": {
-    "1": 1
+  "sessions/<SID>/artifacts/<ART-6>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "docs/plan.md",
+     "sha256": "<BLOB-23a9db36a175>",
+     "size": 47,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [],
+   "meta": null,
+   "type": "plan",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-6>/files/<BLOB-23a9db36a175>": {
+   "$text": "# A plan\n\n## Goal\nShip it.\n\n## Steps\n1. Do it.\n"
+  },
+  "sessions/<SID>/artifacts/<ART-2>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "data/rows.json",
+     "sha256": "<BLOB-67358ed8fd6c>",
+     "size": 10,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [],
+   "meta": {
+    "format": "json",
+    "rows": 3
    },
-   "delivered_seq": 1
+   "type": "dataset",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-2>/files/<BLOB-67358ed8fd6c>": {
+   "$text": "[1, 2, 3]\n"
+  },
+  "sessions/<SID>/artifacts/<ART-3>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "data/rows.jsonl",
+     "sha256": "<BLOB-03d3c8409ad2>",
+     "size": 17,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [],
+   "meta": {
+    "format": "jsonl",
+    "rows": 2
+   },
+   "type": "dataset",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-3>/files/<BLOB-03d3c8409ad2>": {
+   "$text": "{\"a\":1}\n\n{\"a\":2}\n"
+  },
+  "sessions/<SID>/artifacts/<ART-4>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "docs/design.md",
+     "sha256": "<BLOB-9283aab9b6b1>",
+     "size": 58,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [],
+   "meta": null,
+   "type": "design",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-4>/files/<BLOB-9283aab9b6b1>": {
+   "$text": "# A design\n\n## Problem\nIt is slow.\n\n## Decision\nCache it.\n"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
+   "created_at": "<TS>",
+   "created_by": "claude",
+   "files": [
+    {
+     "path": "data/rows.csv",
+     "sha256": "<BLOB-b5a0cc4b23c7>",
+     "size": 39,
+     "tree": "anchor"
+    }
+   ],
+   "generated": [],
+   "meta": {
+    "format": "csv",
+    "rows": 2
+   },
+   "type": "dataset",
+   "unit_id": "1-<U>"
+  },
+  "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b5a0cc4b23c7>": {
+   "$text": "name,note\nalpha,\"two\nlines\"\nbeta,plain\n"
+  },
+  "sessions/<SID>/cursor/claude.json": {
+   "from": {
+    "codex": {
+     "peer_seq": 0,
+     "delivered_seq": 1,
+     "delivered_counts": {
+      "1": 1
+     }
+    }
+   },
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/cursor/codex.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null
+   "from": {
+    "claude": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/health/claude.json": {
    "role": "claude",
@@ -2408,7 +3074,20 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.2"
+    "owner": "claude",
+    "protocol": "1.4",
+    "msg_id": "codex:1",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "codex:1",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
    }
   ],
   "sessions/<SID>/latest/codex.json": {
@@ -2420,21 +3099,32 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "joined; navigator ready",
-   "protocol": "1.2"
+   "owner": "claude",
+   "protocol": "1.4",
+   "msg_id": "codex:1",
+   "to": [
+    "claude"
+   ],
+   "reply_to": null,
+   "broadcast": true,
+   "thread_id": "codex:1",
+   "route_trace": [
+    "codex"
+   ],
+   "ttl": null,
+   "forward": false
   },
-  "sessions/<SID>/session.json": {
+  "sessions/<SID>/session.v2.json": {
    "session_id": "<SID>",
    "task": "fixture task",
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "driver": "claude",
-   "navigator": "codex",
    "owner": "claude",
    "ownership_epoch": 1,
    "status": "active",
    "phase": "huddle",
    "waiting": null,
-   "pause": null,
    "handoff": null,
    "vcs": "git",
    "base_head": "<SHA>",
@@ -2450,9 +3140,25 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.2",
+   "protocol": "1.4",
+   "signoff": "strict",
    "created_at": "<TS>",
-   "updated_at": "<TS>"
+   "updated_at": "<TS>",
+   "requires": [
+    "strict-signoff"
+   ],
+   "schema": 2,
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "codex"
+    ],
+    "advisers": []
+   },
+   "pauses": {}
   },
   "vcs.json": {
    "vcs": "git",
@@ -2460,8 +3166,8 @@
   }
  },
  "provenance": {
-  "build": "ee625a451f4f+dirty:pair.py",
-  "sha12": "767e880593bc",
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "32822b62b1b2",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  }
 }

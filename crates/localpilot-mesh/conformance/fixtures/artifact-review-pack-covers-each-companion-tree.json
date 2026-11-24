@@ -39,22 +39,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -72,19 +90,17 @@
      "reason": null,
      "resume_at": null
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -111,9 +127,25 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -134,22 +166,40 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -177,7 +227,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -189,21 +252,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -233,9 +307,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -256,26 +346,42 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -303,7 +409,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -315,21 +434,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -359,9 +489,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -406,14 +552,22 @@
     "PACK": "ARTIFACT ([0-9a-f]{64})"
    },
    "rc": 0,
-   "stdout": "FRESH-EYES VERIFICATION REQUEST\n\nWorking tree: <REPO>\nWork unit: fixture-task#1   Review round: 1\nBase commit for this unit: <SHA>\n\nReproduce the change with either of these (both non-mutating):\n  git diff <SHA>..HEAD\n  git status --porcelain=v1 --untracked-files=all   # uncommitted work, if any\n\nYou were opened in a new session so that you carry none of the implementation\nnarrative. That absence is the whole value — do not reconstruct it, and do not go\nlooking for it. Read only the repositories and the change described below.\n\nRules, all hard:\n- Read-only end to end. Create, edit, or delete nothing — no commits, no branches,\n  no staging, not even an untracked or generated file. If a check below would write,\n  report it unrun and substitute a non-writing equivalent if one exists.\n- Do not look for, or read, any pairing mailbox, journal, transcript, or session\n  log, even if you find one. It would anchor you to the story this role exists to\n  be free of.\n- If what you find does not match what is described here, say so and stop rather\n  than improvising a scope.\n\nAcceptance criteria:\nrecords updated\n\nFiles under review (sha256 prefix — re-hash before judging; a mismatch means the\ntree moved under this request and you should say so rather than review stale bytes):\n  b58b263c9d49  README.md\n\n(That set is: everything committed since this unit's base, plus everything\ncurrently uncommitted — including files that were already dirty when the unit\nbegan, and including untracked scratch. It is deliberately over-broad rather\nthan a true delta. If something there is not work, the request should have\npinned the set explicitly; say so rather than reviewing it.)\n\nCompanion repository: plans\n  Root: <COMP:plans>\n  Declared for: the plan records this work updates\n  This session may write only: records/*.md\n  Base commit for this unit: <SHA>\n  Reproduce with: git -C \"<COMP:plans>\" diff <SHA>..HEAD\n  Files under review there (same digest recipe):\n    2e083f5f580c  records/a.md\n\n  Changed there but OUTSIDE that declared scope. This session was not permitted\n  to write these, so treat them as a finding rather than as work under review:\n    README.md\n\nReview pack: <HEX64>\n  An immutable copy of every file above as it is now, deletions marked, and\n  review.diff. Read it with: artifact show / artifact get --out <dir>.\n\nChecks to run (non-mutating):\n  (none named — inspect the diff and say what you could not verify without one)\n\nAnswer with a verdict whose first line is exactly one of:\n  AGREE round=<n> blocking=0 important=<n>\n  REVISE round=<n> blocking=<n> important=<n>\nusing round=1. Then list only actionable findings, one per line, as\n  path:line — problem — fix\nName the sha prefixes you formed the verdict against. Then stop.\n\nThis verdict is advisory. It goes back to the pair, who weigh it and issue their\nown review. Nothing you write here closes the work, so say what you actually\nfound rather than what would let it pass.\nARTIFACT <HEX64> type=review-pack files=2\n",
+   "stdout": "FRESH-EYES VERIFICATION REQUEST\n\nWorking tree: <REPO>\nWork unit: fixture-task#1   Review round: 1\nBase commit for this unit: <SHA>\n\nReproduce the change with either of these (both non-mutating):\n  git --no-optional-locks diff <SHA>..HEAD\n  git --no-optional-locks status --porcelain=v1 --untracked-files=all   # uncommitted work, if any\n\nYou were opened in a new session so that you carry none of the implementation\nnarrative. That absence is the whole value — do not reconstruct it, and do not go\nlooking for it. Read only the repositories and the change described below.\n\nRules, all hard:\n- Read-only end to end. Create, edit, or delete nothing — no commits, no branches,\n  no staging, not even an untracked or generated file. If a check below would write,\n  report it unrun and substitute a non-writing equivalent if one exists.\n- Do not look for, or read, any pairing mailbox, journal, transcript, or session\n  log, even if you find one. It would anchor you to the story this role exists to\n  be free of.\n- If what you find does not match what is described here, say so and stop rather\n  than improvising a scope.\n\nAcceptance criteria:\nrecords updated\n\nFiles under review (sha256 prefix — re-hash before judging; a mismatch means the\ntree moved under this request and you should say so rather than review stale bytes):\n  b58b263c9d49  README.md\n\n(That set is: everything committed since this unit's base, plus everything\ncurrently uncommitted — including files that were already dirty when the unit\nbegan, and including untracked scratch. It is deliberately over-broad rather\nthan a true delta. If something there is not work, the request should have\npinned the set explicitly; say so rather than reviewing it.)\n\nCompanion repository: plans\n  Root: <COMP:plans>\n  Declared for: the plan records this work updates\n  This session may write only: records/*.md\n  Base commit for this unit: <SHA>\n  Reproduce with: git -C \"<COMP:plans>\" --no-optional-locks diff <SHA>..HEAD\n  Files under review there (same digest recipe):\n    2e083f5f580c  records/a.md\n\n  Changed there but OUTSIDE that declared scope. This session was not permitted\n  to write these, so treat them as a finding rather than as work under review:\n    README.md\n\nReview pack: <HEX64>\n  An immutable copy of every file above as it is now, deletions marked, and\n  review.diff. Read it with: artifact show / artifact get --out <dir>.\n\nChecks to run (non-mutating):\n  (none named — inspect the diff and say what you could not verify without one)\n\nAnswer with a verdict whose first line is exactly one of:\n  AGREE round=<n> blocking=0 important=<n>\n  REVISE round=<n> blocking=<n> important=<n>\nusing round=1. Then list only actionable findings, one per line, as\n  path:line — problem — fix\nName the sha prefixes you formed the verdict against. Then stop.\n\nThis verdict is advisory. It goes back to the pair, who weigh it and issue their\nown review. Nothing you write here closes the work, so say what you actually\nfound rather than what would let it pass.\nARTIFACT <HEX64> type=review-pack files=2\n",
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
      "created_at": "<TS>",
@@ -465,27 +619,35 @@
     "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2e083f5f580c>": {
      "$text": "first record\nupdated\n"
     },
-    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
-     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
-    },
     "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
      "$text": "base\nchanged\n"
     },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
+    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -513,7 +675,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -525,21 +700,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -569,14 +755,35 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
      "recorded_at": "<TS>"
     }
+   },
+   "legacy": {
+    "rc": 0,
+    "stdout": "FRESH-EYES VERIFICATION REQUEST\n\nWorking tree: <REPO>\nWork unit: fixture-task#1   Review round: 1\nBase commit for this unit: <SHA>\n\nReproduce the change with either of these (both non-mutating):\n  git diff <SHA>..HEAD\n  git status --porcelain=v1 --untracked-files=all   # uncommitted work, if any\n\nYou were opened in a new session so that you carry none of the implementation\nnarrative. That absence is the whole value — do not reconstruct it, and do not go\nlooking for it. Read only the repositories and the change described below.\n\nRules, all hard:\n- Read-only end to end. Create, edit, or delete nothing — no commits, no branches,\n  no staging, not even an untracked or generated file. If a check below would write,\n  report it unrun and substitute a non-writing equivalent if one exists.\n- Do not look for, or read, any pairing mailbox, journal, transcript, or session\n  log, even if you find one. It would anchor you to the story this role exists to\n  be free of.\n- If what you find does not match what is described here, say so and stop rather\n  than improvising a scope.\n\nAcceptance criteria:\nrecords updated\n\nFiles under review (sha256 prefix — re-hash before judging; a mismatch means the\ntree moved under this request and you should say so rather than review stale bytes):\n  b58b263c9d49  README.md\n\n(That set is: everything committed since this unit's base, plus everything\ncurrently uncommitted — including files that were already dirty when the unit\nbegan, and including untracked scratch. It is deliberately over-broad rather\nthan a true delta. If something there is not work, the request should have\npinned the set explicitly; say so rather than reviewing it.)\n\nCompanion repository: plans\n  Root: <COMP:plans>\n  Declared for: the plan records this work updates\n  This session may write only: records/*.md\n  Base commit for this unit: <SHA>\n  Reproduce with: git -C \"<COMP:plans>\" diff <SHA>..HEAD\n  Files under review there (same digest recipe):\n    2e083f5f580c  records/a.md\n\n  Changed there but OUTSIDE that declared scope. This session was not permitted\n  to write these, so treat them as a finding rather than as work under review:\n    README.md\n\nReview pack: <HEX64>\n  An immutable copy of every file above as it is now, deletions marked, and\n  review.diff. Read it with: artifact show / artifact get --out <dir>.\n\nChecks to run (non-mutating):\n  (none named — inspect the diff and say what you could not verify without one)\n\nAnswer with a verdict whose first line is exactly one of:\n  AGREE round=<n> blocking=0 important=<n>\n  REVISE round=<n> blocking=<n> important=<n>\nusing round=1. Then list only actionable findings, one per line, as\n  path:line — problem — fix\nName the sha prefixes you formed the verdict against. Then stop.\n\nThis verdict is advisory. It goes back to the pair, who weigh it and issue their\nown review. Nothing you write here closes the work, so say what you actually\nfound rather than what would let it pass.\nARTIFACT <HEX64> type=review-pack files=2\n",
+    "stderr": ""
    }
   },
   {
@@ -590,10 +797,18 @@
    "stderr": "",
    "state": {
     "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
      "session_id": "<SID>",
      "driver": "claude",
      "status": "active",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
     },
     "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
      "created_at": "<TS>",
@@ -645,27 +860,35 @@
     "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2e083f5f580c>": {
      "$text": "first record\nupdated\n"
     },
-    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
-     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
-    },
     "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
      "$text": "base\nchanged\n"
     },
+    "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+     "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
+    },
     "sessions/<SID>/cursor/claude.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null,
-     "delivered_counts": {
-      "1": 1
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 1,
+       "delivered_counts": {
+        "1": 1
+       }
+      }
      },
-     "delivered_seq": 1
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/cursor/codex.json": {
-     "peer_seq": 0,
-     "peer_health_generation": 0,
-     "resume_seen": null,
-     "stale_wait_seq": null
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
     },
     "sessions/<SID>/health/claude.json": {
      "role": "claude",
@@ -693,7 +916,20 @@
       "unit_id": "1-<U>",
       "expect_reply": false,
       "body": "joined; navigator ready",
-      "protocol": "1.2"
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
      }
     ],
     "sessions/<SID>/latest/codex.json": {
@@ -705,21 +941,32 @@
      "unit_id": "1-<U>",
      "expect_reply": false,
      "body": "joined; navigator ready",
-     "protocol": "1.2"
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
     },
-    "sessions/<SID>/session.json": {
+    "sessions/<SID>/session.v2.json": {
      "session_id": "<SID>",
      "task": "fixture task",
      "work_unit": "fixture-task",
      "unit_id": "1-<U>",
      "driver": "claude",
-     "navigator": "codex",
      "owner": "claude",
      "ownership_epoch": 1,
      "status": "active",
      "phase": "huddle",
      "waiting": null,
-     "pause": null,
      "handoff": null,
      "vcs": "git",
      "base_head": "<SHA>",
@@ -749,9 +996,25 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
-     "updated_at": "<TS>"
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
     },
     "vcs.json": {
      "vcs": "git",
@@ -762,10 +1025,18 @@
  ],
  "final_state": {
   "active.json": {
+   "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+  },
+  "active.v2.json": {
    "session_id": "<SID>",
    "driver": "claude",
    "status": "active",
-   "updated_at": "<TS>"
+   "updated_at": "<TS>",
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "schema": 2
   },
   "sessions/<SID>/artifacts/<ART-1>/artifact.json": {
    "created_at": "<TS>",
@@ -817,27 +1088,35 @@
   "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-2e083f5f580c>": {
    "$text": "first record\nupdated\n"
   },
-  "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
-   "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
-  },
   "sessions/<SID>/artifacts/<ART-1>/files/<BLOB-b58b263c9d49>": {
    "$text": "base\nchanged\n"
   },
+  "sessions/<SID>/artifacts/<ART-1>/files/<GEN-review.diff>": {
+   "$text": "### tree anchor (git, base <SHA>)\ndiff --git a/README.md b/README.md\nindex df967b9..2ecd216 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n base\n+changed\n\n### tree plans (git, base <SHA>)\ndiff --git a/records/a.md b/records/a.md\nindex c7dc820..50ac824 100644\n--- a/records/a.md\n+++ b/records/a.md\n@@ -1 +1,2 @@\n first record\n+updated\n"
+  },
   "sessions/<SID>/cursor/claude.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null,
-   "delivered_counts": {
-    "1": 1
+   "from": {
+    "codex": {
+     "peer_seq": 0,
+     "delivered_seq": 1,
+     "delivered_counts": {
+      "1": 1
+     }
+    }
    },
-   "delivered_seq": 1
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/cursor/codex.json": {
-   "peer_seq": 0,
-   "peer_health_generation": 0,
-   "resume_seen": null,
-   "stale_wait_seq": null
+   "from": {
+    "claude": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
   },
   "sessions/<SID>/health/claude.json": {
    "role": "claude",
@@ -865,7 +1144,20 @@
     "unit_id": "1-<U>",
     "expect_reply": false,
     "body": "joined; navigator ready",
-    "protocol": "1.2"
+    "owner": "claude",
+    "protocol": "1.4",
+    "msg_id": "codex:1",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "codex:1",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
    }
   ],
   "sessions/<SID>/latest/codex.json": {
@@ -877,21 +1169,32 @@
    "unit_id": "1-<U>",
    "expect_reply": false,
    "body": "joined; navigator ready",
-   "protocol": "1.2"
+   "owner": "claude",
+   "protocol": "1.4",
+   "msg_id": "codex:1",
+   "to": [
+    "claude"
+   ],
+   "reply_to": null,
+   "broadcast": true,
+   "thread_id": "codex:1",
+   "route_trace": [
+    "codex"
+   ],
+   "ttl": null,
+   "forward": false
   },
-  "sessions/<SID>/session.json": {
+  "sessions/<SID>/session.v2.json": {
    "session_id": "<SID>",
    "task": "fixture task",
    "work_unit": "fixture-task",
    "unit_id": "1-<U>",
    "driver": "claude",
-   "navigator": "codex",
    "owner": "claude",
    "ownership_epoch": 1,
    "status": "active",
    "phase": "huddle",
    "waiting": null,
-   "pause": null,
    "handoff": null,
    "vcs": "git",
    "base_head": "<SHA>",
@@ -921,9 +1224,25 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.2",
+   "protocol": "1.4",
+   "signoff": "strict",
    "created_at": "<TS>",
-   "updated_at": "<TS>"
+   "updated_at": "<TS>",
+   "requires": [
+    "strict-signoff"
+   ],
+   "schema": 2,
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "codex"
+    ],
+    "advisers": []
+   },
+   "pauses": {}
   },
   "vcs.json": {
    "vcs": "git",
@@ -931,8 +1250,9 @@
   }
  },
  "provenance": {
-  "build": "ee625a451f4f+dirty:pair.py",
-  "sha12": "767e880593bc",
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "32822b62b1b2",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
- }
+ },
+ "legacy_build": "44abd65:pair.py"
 }

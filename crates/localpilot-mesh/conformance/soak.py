@@ -27,7 +27,7 @@ journals, unique receipts. The run ends with `SOAK ok ...` or
 """
 from __future__ import annotations
 
-import argparse, collections, json, os, random, re, shlex, shutil, subprocess, sys, threading, time
+import argparse, collections, json, os, random, re, shlex, subprocess, sys, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -371,7 +371,9 @@ class Soak:
                 self.fail("undelivered", f"{r} never saw {len(missing)} message(s), e.g. {missing[:3]}")
             cur = sd / "cursor" / f"{r}.json"
             c = json.loads(cur.read_text(encoding="utf-8")) if cur.exists() else {}
-            per = c.get("from") if schema2 else {s: c for s in parts if s != r}
+            # Per sender in any schema-2 session, a strict pair included; one
+            # top-level record in a schema-1 pair.
+            per = c.get("from") if (schema2 or "from" in c) else {s: c for s in parts if s != r}
             for s, st in (per or {}).items():
                 top = len(journals.get(s, []))
                 ack, dl = int(st.get("peer_seq", 0)), int(st.get("delivered_seq", 0))

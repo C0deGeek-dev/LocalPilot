@@ -11,8 +11,8 @@
   "vcs": "git"
  },
  "provenance": {
-  "build": "44892a1ba4f2:pair.py",
-  "sha12": "5e9cbc53fd91",
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "32822b62b1b2",
   "note": "captured from the reference and reviewed; never regenerate with a build under test"
  },
  "steps": [
@@ -140,9 +140,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -274,7 +278,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -300,7 +304,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -341,9 +345,13 @@
       ]
      },
      "delivery": "print",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -475,7 +483,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -502,7 +510,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -528,7 +536,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -553,7 +561,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "localpilot:1",
      "to": [
       "claude",
@@ -597,9 +605,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -736,7 +748,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -763,7 +775,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -790,7 +802,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -816,7 +828,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -841,7 +853,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "codex:1",
      "to": [
       "claude",
@@ -866,7 +878,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "localpilot:1",
      "to": [
       "claude",
@@ -921,9 +933,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -1059,7 +1075,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -1086,7 +1102,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -1136,7 +1152,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -1162,7 +1178,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -1210,7 +1226,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "localpilot:1",
      "to": [
       "claude",
@@ -1266,9 +1282,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -1298,7 +1318,7 @@
    ],
    "rc": 1,
    "stdout": "",
-   "stderr": "not every required reviewer agrees: localpilot: no verdict since the unit boundary or resume [anchor=<REPO> source=flag]\n",
+   "stderr": "not every required reviewer agrees: localpilot: no verdict since the unit boundary or resume; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
    "state": {
     "active.json": {
      "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
@@ -1398,7 +1418,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -1425,7 +1445,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -1475,7 +1495,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -1501,7 +1521,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -1549,7 +1569,7 @@
      "expect_reply": false,
      "body": "joined; navigator ready",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "localpilot:1",
      "to": [
       "claude",
@@ -1605,9 +1625,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -1743,7 +1767,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -1770,7 +1794,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -1820,7 +1844,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -1869,7 +1893,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -1959,9 +1983,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -2076,7 +2104,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -2103,7 +2131,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -2153,7 +2181,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -2202,7 +2230,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -2292,9 +2320,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -2407,7 +2439,7 @@
       "expect_reply": true,
       "body": "please review",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "claude:1",
       "to": [
        "codex",
@@ -2434,7 +2466,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "codex:1",
       "to": [
        "claude",
@@ -2484,7 +2516,7 @@
       "expect_reply": false,
       "body": "joined; navigator ready",
       "owner": "claude",
-      "protocol": "1.2",
+      "protocol": "1.4",
       "msg_id": "localpilot:1",
       "to": [
        "claude",
@@ -2533,7 +2565,7 @@
      "expect_reply": true,
      "body": "please review",
      "owner": "claude",
-     "protocol": "1.2",
+     "protocol": "1.4",
      "msg_id": "claude:1",
      "to": [
       "codex",
@@ -2623,9 +2655,13 @@
       ]
      },
      "delivery": "ack",
-     "protocol": "1.2",
+     "protocol": "1.4",
+     "signoff": "strict",
      "created_at": "<TS>",
      "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
      "schema": 2,
      "participants": [
       "claude",
@@ -2732,7 +2768,7 @@
     "expect_reply": true,
     "body": "please review",
     "owner": "claude",
-    "protocol": "1.2",
+    "protocol": "1.4",
     "msg_id": "claude:1",
     "to": [
      "codex",
@@ -2759,7 +2795,7 @@
     "expect_reply": false,
     "body": "joined; navigator ready",
     "owner": "claude",
-    "protocol": "1.2",
+    "protocol": "1.4",
     "msg_id": "codex:1",
     "to": [
      "claude",
@@ -2809,7 +2845,7 @@
     "expect_reply": false,
     "body": "joined; navigator ready",
     "owner": "claude",
-    "protocol": "1.2",
+    "protocol": "1.4",
     "msg_id": "localpilot:1",
     "to": [
      "claude",
@@ -2858,7 +2894,7 @@
    "expect_reply": true,
    "body": "please review",
    "owner": "claude",
-   "protocol": "1.2",
+   "protocol": "1.4",
    "msg_id": "claude:1",
    "to": [
     "codex",
@@ -2948,9 +2984,13 @@
     ]
    },
    "delivery": "ack",
-   "protocol": "1.2",
+   "protocol": "1.4",
+   "signoff": "strict",
    "created_at": "<TS>",
    "updated_at": "<TS>",
+   "requires": [
+    "strict-signoff"
+   ],
    "schema": 2,
    "participants": [
     "claude",

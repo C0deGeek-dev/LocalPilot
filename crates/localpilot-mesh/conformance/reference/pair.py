@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, contextlib, csv, hashlib, hmac, io, json, os, re, secrets, socket, stat, subprocess, sys, tempfile, threading, time, uuid
+import argparse, contextlib, csv, errno, functools, hashlib, hmac, io, json, os, re, secrets, signal, socket, stat, string, subprocess, sys, tempfile, threading, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -41,16 +41,30 @@ CAPS=["ack"]
 # The mailbox protocol this build speaks (references/spec.md), and the optional
 # features it implements. A record may name features it `requires`; an unknown
 # one, or another major version, is refused rather than guessed at.
-PROTOCOL="1.2"
-FEATURES=frozenset({"quota-takeover"})
-# Identities a session may be made of, and the historic pair. A session of
-# exactly the historic pair keeps schema 1 for its whole life: the legacy file
-# layout (JSON `active.json`, `session.json`) and never the schema-2 keys
-# (`schema`, `participants`). Newer builds may add keys older builds ignore.
-# Anything else is schema 2, which an older build must not be able to open
-# (see `MB.point`).
+PROTOCOL="1.4"
+FEATURES=frozenset({"quota-takeover","strict-signoff","participant-instances","review-snapshot"})
+# A clue for the waiting agent: silence has causes the harness cannot see (an
+# exhausted quota, a Codex turn that ended with no notifier, a closed terminal).
+STALE_HINT="hint=ask-user-to-check-peer"
+# How `complete` and `next-unit` read a VERDICT (spec M-6, M-6a). `start`
+# freezes one on the session record; a record without one predates 1.3 and is
+# legacy, so no existing session is ever reinterpreted.
+SIGNOFFS=("strict","legacy")
+# Identities a session may be made of, and the historic pair. A legacy-signoff
+# session of exactly the historic pair keeps schema 1 for its whole life: the
+# legacy file layout (JSON `active.json`, `session.json`) and never the
+# schema-2 keys (`schema`, `participants`). Newer builds may add keys older
+# builds ignore. Anything else, every strict session included, is schema 2,
+# which an older build must not be able to open (see `MB.point`).
 PARTICIPANTS=("claude","codex","localpilot")
 HISTORIC=("claude","codex")
+
+def participant(value):
+    """Host or bounded host-instance name; safe as a mailbox path segment."""
+    if not re.fullmatch(r"(?:claude|codex|localpilot)(?:-[a-z0-9]{1,32})?", value):
+        raise argparse.ArgumentTypeError("participant must be a host or host-instance (lowercase letters/digits, at most 32 suffix characters)")
+    return value
+
 SESSION_V1="session.json"
 SESSION_V2="session.v2.json"
 ACTIVE_V1="active.json"
@@ -131,6 +145,33 @@ def check_protocol(rec,where):
         raise SystemExit(f"{where} requires {', '.join(map(str,unknown))}, which this build does not support; nothing was changed")
     return rec
 
+def check_session(rec,where,envelope):
+    """check_protocol for a session record, then its sign-off policy.
+
+    `envelope` is the schema of the files the record was read through: the
+    pointer's, or 2 for `session.v2.json`. A strict record is shaped so that
+    the older builds that can refuse it do: a versioned build (44892a1 and
+    later) without the feature through `requires` (V-3), and a build from
+    before schema 2 (before 8ca173f) at the S-7 sentinel. Builds in between
+    read neither and are not stopped (spec V-4). A record that claims strict
+    sign-off any other way is refused, never read as legacy: a build that
+    skipped the claim would close on a prefix AGREE."""
+    check_protocol(rec,where)
+    if not isinstance(rec,dict): return rec
+    pol=rec.get("signoff"); req="strict-signoff" in (rec.get("requires") or [])
+    if pol is not None and pol not in SIGNOFFS:
+        raise SystemExit(f"{where} records sign-off policy {pol!r}, which this build does not know; nothing was changed")
+    if (pol=="strict" or req) and not (pol=="strict" and req and envelope==2 and schema(rec)==2):
+        raise SystemExit(f"{where} carries an inconsistent strict sign-off claim (signoff={pol}, requires strict-signoff="
+                         f"{'yes' if req else 'no'}, schema {schema(rec)}, read as schema {envelope}); a strict session records "
+                         "signoff=strict, requires strict-signoff and is schema 2, or an older build would close it on a prefix "
+                         "AGREE. It is refused; nothing was changed")
+    return rec
+
+def envelope_of(d):
+    """The schema of the session file a session directory holds (check_session)."""
+    return 2 if session_file(d).name==SESSION_V2 else 1
+
 def _record(line):
     """The JSON object on a journal line, or None for an invalid line. A record
     that needs a protocol this build lacks is refused, not skipped."""
@@ -171,7 +212,7 @@ def seal_torn_tail(p):
 
 def find_msg(mb,s,msg_id):
     """The message `<role>:<seq>` in this session, or None."""
-    m=re.fullmatch(r"([a-z]+):([1-9][0-9]*)",msg_id or "")
+    m=re.fullmatch(r"([a-z][a-z0-9-]*):([1-9][0-9]*)",msg_id or "")
     if not m or m.group(1) not in participants(s): return None
     p=mb.journal(s,m.group(1))
     if not p.exists(): return None
@@ -439,10 +480,23 @@ def find_mailbox(start):
     Git mode never needs this — `rev-parse --show-toplevel` answers from any
     subdirectory — but a no-VCS tree has no such oracle, and the two terminals
     still have to agree on one root no matter which directory each was opened
-    in. The mailbox is that anchor: `start` creates it once, at the root."""
+    in. The mailbox is that anchor: `start` creates it once, at the root.
+
+    A `.pair-programming/` with no entries at all is not a mailbox: it holds no
+    session and no backend marker, so it neither anchors nor decides the mode.
+    A command that waited out a purge can leave one behind (its state lock
+    creates the directory again), and read as a Git mailbox it refused every
+    later `start --no-vcs` there. One that cannot be listed still anchors, so
+    state that cannot be read is refused rather than ignored."""
     p=Path(start).resolve()
     for q in (p,*p.parents):
-        if (q/PAIR_DIR).is_dir(): return q
+        d=q/PAIR_DIR
+        if not d.is_dir(): continue
+        try:
+            with os.scandir(d) as entries:
+                if next(entries,None) is None: continue
+        except OSError: pass
+        return q
     return None
 
 def mailbox_vcs(repo):
@@ -454,9 +508,6 @@ def mailbox_vcs(repo):
     m=readj(Path(repo)/PAIR_DIR/VCS_FILE)
     return "none" if isinstance(m,dict) and m.get("vcs")=="none" else "git"
 
-def detect_vcs(p):
-    """Live detection, for a path with no mailbox of its own — a companion."""
-    return "git" if git(p,"rev-parse","--show-toplevel",check=False) else "none"
 
 def live_session_at(mb_root):
     """True when this mailbox still holds a session that is not finished with.
@@ -498,6 +549,17 @@ def root(path=None,no_vcs=False):
     if top: return Path(top).resolve()
     if mb: return mb
     raise SystemExit(f"pair-programming found no Git repository and no existing mailbox at {p}. Either point it at a working tree, or start the session with `--no-vcs` to anchor ownership to a content digest of this directory instead of Git HEAD")
+def retry_sharing_violation(fn):
+    """`fn()`, retried while it raises PermissionError: 40 tries 50 ms apart,
+    and the last one is raised (spec L-7, L-8). On Windows a replace or read
+    that meets another process's open handle fails that way, transiently;
+    anything else is not retried. The handler has no OS gate on purpose."""
+    for i in range(40):
+        try: return fn()
+        except PermissionError:
+            if i==39: raise
+            time.sleep(.05)
+
 def atomic(path,obj):
     path.parent.mkdir(parents=True,exist_ok=True)
     data=json.dumps(obj,ensure_ascii=False,separators=(",",":"))+"\n"
@@ -508,11 +570,7 @@ def atomic(path,obj):
         # Windows refuses a replace while another process has the target open
         # (a reader, or a concurrent replace): a transient sharing violation, not
         # a real permission failure. Retry briefly, then fail as before.
-        for i in range(40):
-            try: os.replace(tmp,path); break
-            except PermissionError:
-                if i==39: raise
-                time.sleep(.05)
+        retry_sharing_violation(lambda: os.replace(tmp,path))
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
@@ -523,11 +581,7 @@ def atomic_text(path,text):
     try:
         with os.fdopen(fd,"w",encoding="utf-8",newline="\n") as f:
             f.write(text); f.flush(); os.fsync(f.fileno())
-        for i in range(40):
-            try: os.replace(tmp,path); break
-            except PermissionError:
-                if i==39: raise
-                time.sleep(.05)
+        retry_sharing_violation(lambda: os.replace(tmp,path))
     finally:
         try: os.unlink(tmp)
         except FileNotFoundError: pass
@@ -537,12 +591,8 @@ def read_text_retry(path):
     violation exactly as `readj` does. The pointer is read raw (the schema-2
     sentinel is not JSON), and a raw read must not be the one place where a
     concurrent `atomic` replace fails the command."""
-    for i in range(40):
-        try: return path.read_text(encoding="utf-8")
-        except FileNotFoundError: return None
-        except PermissionError:
-            if i==39: raise
-            time.sleep(.05)
+    try: return retry_sharing_violation(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError: return None
 
 def mailbox_rel(path):
     """`path` relative to the mailbox directory when it is inside one, for
@@ -559,17 +609,288 @@ def readj(path,default=None):
     # The one exception retried: on Windows a read that lands while `atomic`
     # replaces the file fails with a sharing violation. That is transient, and
     # it is still raised if it persists.
-    for i in range(40):
-        try: return json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError: return default
-        except json.JSONDecodeError as e:
-            # Still a JSONDecodeError, so callers that decide per case keep
-            # working, but one that names the record: an uncaught one used to
-            # surface as a bare traceback.
-            raise json.JSONDecodeError(f"{mailbox_rel(path)} is not valid JSON ({e.msg})",e.doc,e.pos) from None
-        except PermissionError:
-            if i==39: raise
-            time.sleep(.05)
+    try: text=retry_sharing_violation(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError: return default
+    try: return json.loads(text)
+    except json.JSONDecodeError as e:
+        # Still a JSONDecodeError, so callers that decide per case keep
+        # working, but one that names the record: an uncaught one used to
+        # surface as a bare traceback.
+        raise json.JSONDecodeError(f"{mailbox_rel(path)} is not valid JSON ({e.msg})",e.doc,e.pos) from None
+
+# Process identity. A recorded process is its pid plus a start-time token: a
+# recycled pid carries another start time. The token formats live here only,
+# so every reader of a recorded `pid_started` agrees with every writer.
+_PROCESS_QUERY_LIMITED_INFORMATION,_SYNCHRONIZE=0x1000,0x00100000
+_WAIT_OBJECT_0,_WAIT_TIMEOUT=0x0,0x102
+_ERROR_ACCESS_DENIED,_ERROR_INVALID_PARAMETER=5,87
+_KERNEL32=None
+
+def _kernel32():
+    """pair.py's own kernel32 with explicit signatures, loaded on first use (Windows only).
+
+    Private, so these signatures never change, or depend on, the instance that
+    other code shares through ctypes.windll."""
+    global _KERNEL32
+    if _KERNEL32 is None:
+        import ctypes
+        from ctypes import wintypes
+        k32=ctypes.WinDLL("kernel32",use_last_error=True)
+        k32.OpenProcess.restype=wintypes.HANDLE
+        k32.OpenProcess.argtypes=(wintypes.DWORD,wintypes.BOOL,wintypes.DWORD)
+        k32.GetProcessTimes.restype=wintypes.BOOL
+        k32.GetProcessTimes.argtypes=(wintypes.HANDLE,)+(ctypes.POINTER(wintypes.FILETIME),)*4
+        k32.WaitForSingleObject.restype=wintypes.DWORD
+        k32.WaitForSingleObject.argtypes=(wintypes.HANDLE,wintypes.DWORD)
+        k32.CloseHandle.restype=wintypes.BOOL
+        k32.CloseHandle.argtypes=(wintypes.HANDLE,)
+        _KERNEL32=k32
+    return _KERNEL32
+
+def pid_of(value):
+    """`value` as a process id, or None when it is missing or cannot be one.
+
+    Only a positive int below 2**31 qualifies: os.kill reads zero and negative
+    values as process groups (-1: every process this user may signal), and a
+    larger value overflows it."""
+    return value if type(value) is int and 0<value<2**31 else None
+
+def process_exists(pid):
+    """Whether process `pid` exists: True, False (proven gone) or None (unknown).
+
+    A probe that fails is never proof that a process ended."""
+    pid=pid_of(pid)
+    if pid is None: return False
+    if os.name=="nt":
+        import ctypes
+        k32=_kernel32()
+        h=k32.OpenProcess(_SYNCHRONIZE,False,pid)
+        if not h:
+            # Access denied still proves that the process exists; the
+            # start-time check decides whose it is.
+            return {_ERROR_INVALID_PARAMETER:False,_ERROR_ACCESS_DENIED:True}.get(ctypes.get_last_error())
+        try:
+            # A handle still opens for a process that has exited but not been
+            # reaped, so ask whether the process object is signalled.
+            return {_WAIT_TIMEOUT:True,_WAIT_OBJECT_0:False}.get(k32.WaitForSingleObject(h,0))
+        finally: k32.CloseHandle(h)
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    except OSError: return None
+    return True
+
+def handle_start_time(h):
+    """The start-time token of the process behind Windows handle `h`, or None.
+
+    process_start_time() reads it here, and so does a caller that already holds
+    a handle, so their tokens always agree."""
+    import ctypes
+    from ctypes import wintypes
+    times=[wintypes.FILETIME() for _ in range(4)]
+    if not _kernel32().GetProcessTimes(h,*(ctypes.byref(t) for t in times)): return None
+    return f"win:{(times[0].dwHighDateTime<<32)|times[0].dwLowDateTime}"
+
+# --- Windows job primitives ---------------------------------------------------
+# Shared with pair-conductor.py, which aliases them: one implementation, and the
+# conductor keeps depending on this module, never the reverse.
+CREATE_SUSPENDED = 0x4
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JOB_EXTENDED_LIMITS = 9
+PROCESS_TERMINATE, PROCESS_SET_QUOTA, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE = 0x1, 0x100, 0x1000, 0x100000
+JOB_PROCESS_ACCESS = PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+THREAD_SUSPEND_RESUME, THREAD_QUERY_LIMITED_INFORMATION = 0x2, 0x800
+TH32CS_SNAPTHREAD = 0x4
+ERROR_NO_MORE_FILES = 18
+RESUME_FAILED = 0xFFFFFFFF
+
+class ContainmentError(Exception):
+    """Containment cannot be set up, or a worker cannot be contained or
+    identified. Raised before the worker's program could run; a process created
+    for it has been ended."""
+
+
+@functools.lru_cache(maxsize=None)
+def win_structs():
+    """The Win32 structures that containment fills (Windows only):
+    `(JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, THREADENTRY32)`."""
+    import ctypes
+    from ctypes import wintypes
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in ("ReadOperationCount", "WriteOperationCount",
+                                                         "OtherOperationCount", "ReadTransferCount",
+                                                         "WriteTransferCount", "OtherTransferCount")]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION), ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+        _fields_ = [("TotalUserTime", ctypes.c_int64), ("TotalKernelTime", ctypes.c_int64),
+                    ("ThisPeriodTotalUserTime", ctypes.c_int64), ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                    ("TotalPageFaultCount", wintypes.DWORD), ("TotalProcesses", wintypes.DWORD),
+                    ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD)]
+
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ThreadID", wintypes.DWORD),
+                    ("th32OwnerProcessID", wintypes.DWORD), ("tpBasePri", wintypes.LONG),
+                    ("tpDeltaPri", wintypes.LONG), ("dwFlags", wintypes.DWORD)]
+
+    return JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, THREADENTRY32
+
+
+@functools.lru_cache(maxsize=None)
+def kernel32():
+    """This module's own kernel32, with explicit signatures (Windows only).
+
+    Private, so these signatures never change, or depend on, the instance that
+    other code shares through ctypes.windll."""
+    import ctypes
+    from ctypes import wintypes
+    handle, dword, ok = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL
+    entry = ctypes.POINTER(win_structs()[2])
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    for name, restype, argtypes in (
+            ("CreateJobObjectW", handle, (wintypes.LPVOID, wintypes.LPCWSTR)),
+            ("SetInformationJobObject", ok, (handle, ctypes.c_int, wintypes.LPVOID, dword)),
+            ("QueryInformationJobObject", ok, (handle, ctypes.c_int, wintypes.LPVOID, dword, wintypes.LPDWORD)),
+            ("AssignProcessToJobObject", ok, (handle, handle)),
+            ("TerminateJobObject", ok, (handle, wintypes.UINT)),
+            ("GetCurrentProcess", handle, ()),
+            ("OpenProcess", handle, (dword, ok, dword)),
+            ("CloseHandle", ok, (handle,)),
+            ("CreateToolhelp32Snapshot", handle, (dword, dword)),
+            ("Thread32First", ok, (handle, entry)),
+            ("Thread32Next", ok, (handle, entry)),
+            ("OpenThread", handle, (dword, ok, dword)),
+            ("GetProcessIdOfThread", dword, (handle,)),
+            ("ResumeThread", dword, (handle,))):
+        function = getattr(k32, name)
+        function.restype, function.argtypes = restype, argtypes
+    return k32
+
+
+def win_failure(what):
+    """A ContainmentError for the Win32 call `what`, which has just failed.
+    Build it before any other call: the next one replaces the error code."""
+    import ctypes
+    code = ctypes.get_last_error()
+    return ContainmentError(f"{what} failed: [WinError {code}] {ctypes.FormatError(code).strip()}")
+
+
+def close_handles(*handles):
+    for h in handles:
+        if h:
+            kernel32().CloseHandle(h)
+
+
+def new_job(kill_on_close=True):
+    """A new job object. It allows no breakaway, and its handle is not
+    inheritable. With `kill_on_close` it ends every process in it when its last
+    handle closes; without it, closing the handle leaves them running."""
+    import ctypes
+    k32 = kernel32()
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        raise win_failure("CreateJobObjectW")
+    if not kill_on_close:
+        return job
+    limits = win_structs()[0]()
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not k32.SetInformationJobObject(job, JOB_EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)):
+        error = win_failure("SetInformationJobObject")
+        close_handles(job)
+        raise error
+    return job
+
+
+def assign(job, process):
+    """Put the process behind handle `process` into `job`."""
+    if not kernel32().AssignProcessToJobObject(job, process):
+        raise win_failure("AssignProcessToJobObject")
+
+
+def only_thread(pid):
+    """The id of the one thread of process `pid`. Refused when no snapshot can
+    list the threads, or when the process has any other number of them."""
+    import ctypes
+    k32 = kernel32()
+    snapshot = k32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise win_failure("CreateToolhelp32Snapshot")
+    try:
+        entry = win_structs()[2]()
+        entry.dwSize = ctypes.sizeof(entry)
+        threads = []
+        more = k32.Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                threads.append(entry.th32ThreadID)
+            more = k32.Thread32Next(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != ERROR_NO_MORE_FILES:
+            raise win_failure("Thread32Next")
+    finally:
+        close_handles(snapshot)
+    if len(threads) != 1:
+        raise ContainmentError(f"process {pid} has {len(threads)} threads before it is resumed, not 1")
+    return threads[0]
+
+
+def resume_suspended(pid):
+    """Resume the one thread of process `pid`, created suspended: it must still
+    belong to `pid` and have been suspended exactly once."""
+    k32 = kernel32()
+    tid = only_thread(pid)
+    h = k32.OpenThread(THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION, False, tid)
+    if not h:
+        raise win_failure(f"OpenThread({tid})")
+    try:
+        if k32.GetProcessIdOfThread(h) != pid:
+            raise ContainmentError(f"thread {tid} cannot be proven to belong to process {pid}")
+        previous = k32.ResumeThread(h)
+        if previous == RESUME_FAILED:
+            raise win_failure(f"ResumeThread({tid})")
+        if previous != 1:
+            raise ContainmentError(f"thread {tid} of process {pid} was suspended {previous} times, not once")
+    finally:
+        close_handles(h)
+
+
+def process_start_time(pid):
+    """A start-time token for process `pid`, or None when it cannot be read.
+
+    Together with the pid it names one process: a recycled pid carries a
+    different start time. None means unknown, and unknown never matches: it
+    is never proof that a process ended."""
+    try:
+        pid=int(pid)
+        if os.name=="nt":
+            k32=_kernel32()
+            h=k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION,False,pid)
+            if not h: return None
+            try: return handle_start_time(h)
+            finally: k32.CloseHandle(h)
+        stat_file=Path(f"/proc/{pid}/stat")
+        if stat_file.exists():
+            # The command name is parenthesised and may contain spaces, so
+            # count fields after the last ")": field 22, starttime, is index 19.
+            fields=stat_file.read_text(encoding="utf-8",errors="replace").rsplit(")",1)[1].split()
+            boot=Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+            return f"linux:{boot}:{fields[19]}"
+        r=subprocess.run(["ps","-o","lstart=","-p",str(pid)],capture_output=True,text=True,
+                         timeout=10,env=dict(os.environ,LC_ALL="C"))
+        return f"ps:{r.stdout.strip()}" if r.returncode==0 and r.stdout.strip() else None
+    except (OSError,ValueError,IndexError,subprocess.TimeoutExpired):
+        return None
 
 def exclude_path(repo):
     """The lexical path to info/exclude — deliberately not `.resolve()`d.
@@ -597,10 +918,11 @@ def exclude(repo,mode=None):
     into a repository the user is not in."""
     if (mode or mailbox_vcs(repo))=="none": return
     p=exclude_path(repo)
-    p.parent.mkdir(parents=True,exist_ok=True)
-    cur=p.read_text(encoding="utf-8",errors="replace") if p.exists() else ""
     rule="/"+PAIR_DIR+"/"
-    if rule not in cur.splitlines():
+    try:
+        p.parent.mkdir(parents=True,exist_ok=True)
+        cur=p.read_text(encoding="utf-8",errors="replace") if p.exists() else ""
+        if rule in cur.splitlines(): return
         # If the file had no final newline we must add one to start our block,
         # and removing the block then has to put the file back exactly as it
         # was. A note on the marker records that we supplied that separator;
@@ -610,6 +932,12 @@ def exclude(repo,mode=None):
         with p.open("a",encoding="utf-8",newline="\n") as f:
             if needs_sep: f.write("\n")
             f.write((EXCLUDE_MARK+NO_EOL_NOTE if needs_sep else EXCLUDE_MARK)+"\n"+rule+"\n")
+    except OSError as e:
+        # A host sandbox that keeps .git read-only refuses exactly this write,
+        # and a bare traceback named neither the file nor a way forward.
+        raise SystemExit(f"cannot write {p} ({e.strerror or type(e).__name__}). start adds the line {rule} there so Git "
+                         "ignores the mailbox. The host most likely keeps .git read-only: approve this command once, "
+                         f"or add the line {rule} to that file by hand, then run start again") from None
 
 def glob_re(pat):
     """A glob over `/`-separated path segments, as a regex.
@@ -968,13 +1296,27 @@ def vcs_lines(repo,s,count=None):
             "  there is no history, so the review set is a manifest delta against the unit base",
             "  ignore: "+(", ".join(pats) if pats else f"(none; add {PAIRIGNORE} to exclude paths)")]
 
+class Gone(SystemExit):
+    """A `Lock(make=False)` whose directory is gone: the session, or the whole
+    mailbox, that it guards was purged. Its exit text is SESSION_CLOSED."""
+
 class Lock:
-    def __init__(self,p,wait=10): self.p=p; self.fd=None; self.wait=wait
+    """An exclusive lock file (spec L-5).
+
+    `make=False` never creates the lock's directory; a missing one raises Gone.
+    A writer that had waited out a `purge` and then created that directory for
+    its lock rebuilt what the purge removed: the session directory, for a role
+    lock, or the mailbox itself, for the state lock."""
+    def __init__(self,p,wait=10,make=True): self.p=p; self.fd=None; self.wait=wait; self.make=make
     def __enter__(self):
-        end=time.monotonic()+self.wait; self.p.parent.mkdir(parents=True,exist_ok=True); reaped=False
+        end=time.monotonic()+self.wait; reaped=False
+        if self.make: self.p.parent.mkdir(parents=True,exist_ok=True)
         while True:
             try:
                 self.fd=os.open(self.p,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.write(self.fd,f"{os.getpid()} {now()}\n".encode()); return self
+            except FileNotFoundError:
+                if self.make: raise
+                raise Gone("SESSION_CLOSED") from None
             # PermissionError is the same condition on Windows: re-creating a lock
             # file another process has just unlinked, while its delete is still
             # pending, is refused with "access denied" rather than "exists".
@@ -1041,7 +1383,7 @@ class MB:
         if rec is None:
             raise SystemExit(f"corrupt mailbox: the pointer names session {a['session_id']}, but its record is missing; "
                              "refusing to guess. Restore the record, or remove the pointer if that session is gone")
-        return check_protocol(rec,f"session {a['session_id']}")
+        return check_session(rec,f"session {a['session_id']}",a.get("schema"))
     def point(self,s,status=None):
         """Make `s` the session the mailbox points at.
 
@@ -1102,6 +1444,27 @@ class MB:
     def pushes(self,s,role): return self.file(s,"pushes",role,"jsonl")
     def receipts(self,s,role): return self.file(s,"receipts",role,"jsonl")
     def role_lock(self,s,role): return self.journal(s,role).with_suffix(".lock")
+    def writable(self,s,closed_ok=False):
+        """Whether `s` may still be written: its own record is on disk and,
+        unless `closed_ok`, not terminal. Read by session id, never through the
+        pointer, which may name another session by now."""
+        rec=readj(session_file(self.sd(s),want=schema(s)))
+        return isinstance(rec,dict) and (closed_ok or rec.get("status") not in TERMINAL)
+    @contextlib.contextmanager
+    def role_locked(self,s,role,closed_ok=False):
+        """`role`'s role lock in session `s` (L-6), held only while `s` is writable.
+
+        It never creates a directory, and once held it reads the record again.
+        `purge` holds every target's role locks while it deletes and removes the
+        record before it lets them go, so a writer that waited one out refuses
+        here as SESSION_CLOSED instead of rebuilding the session as an orphan.
+        `closed_ok` is for delivery facts: a session closed since its writer
+        read it still takes them until it is purged."""
+        lk=Lock(self.role_lock(s,role),make=False); lk.__enter__()
+        try:
+            if not self.writable(s,closed_ok): raise SystemExit("SESSION_CLOSED")
+            yield lk
+        finally: lk.__exit__()
     def manifest(self,s,key="anchor",unit=None):
         """Where a no-VCS unit's base manifest lives — one file per tree per unit.
 
@@ -1139,6 +1502,10 @@ class MB:
         fields=address(self,s,role,kind,expect,to,reply_to,broadcast,internal,forward)
         if not body.strip(): raise SystemExit("refusing to post an empty message; a body that failed to render is worse than no post, because the peer treats it as a real turn")
         if len(body)>12000: raise SystemExit("message too large; reference a repo artifact instead")
+        # The owner's review request carries the bytes it asks about. Computed
+        # before the append and published only after it (publish_review).
+        trees=review_snapshot(self,s) if (kind=="REVIEW_REQUEST" and snapshot_on(s) and s.get("owner")==role) else None
+        if trees is not None: extra={**(extra or {}),"review_snapshot":snapshot_digest(trees)}
         # A post by the role that owns the pause is not a claim that the peer is
         # back — it IS the peer executing, which is the only evidence that ever
         # mattered. The whole PAUSE RECORD is captured, not just its role, so a
@@ -1149,7 +1516,9 @@ class MB:
             # proof, so a failed append may lose the message but must not leave
             # a pause the evidence has already disproved — which is precisely the
             # stale state this whole change exists to remove.
-            with Lock(self.lock):
+            # make=False here and below: a mailbox purged since `require` is
+            # refused, never re-created for the lock.
+            with Lock(self.lock,make=False):
                 fresh=self.active()
                 if (fresh and fresh["session_id"]==s["session_id"]
                         and pauses(fresh).get(role)==entry_pause):
@@ -1160,7 +1529,16 @@ class MB:
                     # pause standing, which is the whole defect.
                     clear_pause(fresh,role); fresh["updated_at"]=now(); self.save(fresh)
                     self.set_health(role,"ready",s=fresh)
-        p=self.journal(s,role); p.parent.mkdir(parents=True,exist_ok=True)
+        p=self.journal(s,role)
+        if not p.parent.is_dir():
+            # `start` makes this directory for every session; the protocol does
+            # not require that of every implementation. Made only for a record
+            # that is still open, under the state lock that `purge` deletes
+            # under, and never with parents=True: that is what rebuilt purged
+            # sessions as orphans.
+            with Lock(self.lock,make=False):
+                if not self.writable(s): raise SystemExit("SESSION_CLOSED")
+                p.parent.mkdir(exist_ok=True)
         # One writer at a time per role journal. Allocating the sequence and
         # appending outside a lock let two concurrent posts by the same role take
         # the same number, and on Windows interleave their appends into a torn
@@ -1168,8 +1546,10 @@ class MB:
         # state lock, so the peer's posts are never serialised behind this one.
         # Entered before the role lock, so it also covers the lock's release:
         # once the append has landed, even that failing is POSTED_INCOMPLETE.
+        # `role_locked` refuses a session closed or purged since `require`
+        # (SESSION_CLOSED) before anything is written.
         appended={}
-        with appended_guard(appended,"the role lock could not be released"), Lock(p.with_suffix(".lock")):
+        with appended_guard(appended,"the role lock could not be released"), self.role_locked(s,role):
             # The next seq follows whichever is higher: `latest`, or the journal's
             # own last record. `latest` is written after the append, so a crash
             # between the two left it one behind, and the next post reused the
@@ -1203,7 +1583,10 @@ class MB:
             # it may report a retryable failure (spec M-7).
             with posted_guard(mid,"the latest record could not be written"):
                 atomic(self.latest(s,role),m)
-        with posted_guard(mid,"the session update did not complete"), Lock(self.lock,wait=after_append_wait()):
+        # The role lock is released before the state lock is taken (L-6). A
+        # purge that removed the whole mailbox meanwhile left no session to
+        # update, so Gone is skipped just as a session that is no longer active.
+        with posted_guard(mid,"the session update did not complete"), contextlib.suppress(Gone), Lock(self.lock,wait=after_append_wait(),make=False):
             fresh=self.active()
             if fresh and fresh["session_id"]==s["session_id"]:
                 # The inverse drift the session-first ordering can produce:
@@ -1239,6 +1622,7 @@ class MB:
                             if not wm[rt]["pending"]: del wm[rt]
                         if expect: wm[m["msg_id"]]={"from":role,"kind":kind,"since":m["at"],"pending":list(m["to"]),"answered_by":[]}
                         fresh["waiting"]=wm or None
+                    if trees is not None and fresh.get("owner")==role: publish_review(fresh,role,seq,mid,trees)
                 fresh["updated_at"]=now(); self.save(fresh)
         return m
 
@@ -1311,13 +1695,77 @@ def start_participants(role,with_):
             raise SystemExit(f"--role {role} has no default partner; name the other participant(s) with --with")
         return [role,[r for r in HISTORIC if r!=role][0]]
     named=[x.strip() for x in with_.split(",") if x.strip()]
-    bad=[x for x in named if x not in PARTICIPANTS]
-    if bad: raise SystemExit(f"unknown participant(s) {', '.join(bad)}; choose from {', '.join(PARTICIPANTS)}")
+    for name in named:
+        try: participant(name)
+        except argparse.ArgumentTypeError as exc: raise SystemExit(str(exc))
     if len(set(named))!=len(named): raise SystemExit("--with names a participant twice")
     parts=[role]+[x for x in named if x!=role]
     if len(parts)!=len(named)+1: raise SystemExit("--with must not repeat the starting role")
     if not 2<=len(parts)<=3: raise SystemExit(f"a session has 2 or 3 participants, not {len(parts)}")
     return parts
+
+@contextlib.contextmanager
+def container_rollback(base):
+    """Remove the mailbox container again when the command that created it
+    fails before writing anything into it. A refused `start` (an info/exclude
+    the host will not let it write, say) otherwise left an empty
+    `.pair-programming/` behind, which the next command finds as a mailbox."""
+    made=not os.path.lexists(base)
+    try: yield
+    except BaseException:
+        if made:
+            try: base.rmdir()
+            except FileNotFoundError: pass
+            except OSError as e:
+                # Not empty: whatever was written there since stays. Any other
+                # failure is named here, and the failure that stopped this
+                # command is still the one raised.
+                if e.errno not in (errno.ENOTEMPTY,errno.EEXIST):
+                    print(f"could not remove the empty {base} this command created ({e.strerror or e}); remove it by hand",file=sys.stderr)
+        raise
+
+# --- participant builds ---------------------------------------------------------
+#
+# Informational, never protocol state: each participant records the skill
+# version it runs under sessions/<sid>/builds/<role>.json, so a pair split
+# across two installs of different versions is visible at join.
+
+def skill_version():
+    """metadata.version of the SKILL.md beside this script's folder, or "unknown"."""
+    try: text=(Path(__file__).resolve().parent.parent/"SKILL.md").read_text(encoding="utf-8")
+    except OSError: return "unknown"
+    m=re.match(r"---\r?\n(.*?)\r?\n---",text,re.S)
+    v=re.search(r"^\s+version:\s*\"?([^\"\s]+)\"?\s*$",m.group(1),re.M) if m else None
+    return v.group(1) if v else "unknown"
+
+def record_build(mb,s,role):
+    """Best effort: an informational record never fails the command that writes it."""
+    try:
+        p=mb.sd(s)/"builds"/f"{role}.json"; p.parent.mkdir(exist_ok=True)
+        atomic(p,{"role":role,"version":skill_version(),"at":now()})
+    except OSError: pass
+
+def builds(mb,s):
+    out={}
+    for r in participants(s):
+        try: b=readj(mb.sd(s)/"builds"/f"{r}.json",{}) or {}
+        except (ValueError,OSError): continue  # informational: damage never stops a command
+        if isinstance(b,dict) and isinstance(b.get("version"),str): out[r]=b["version"]
+    return out
+
+def version_key(v):
+    return tuple(int(x) for x in v.split(".")) if re.fullmatch(r"\d+(\.\d+){0,3}",v or "") else None
+
+def build_mismatch(bs):
+    """A BUILD_MISMATCH line when the recorded builds differ, else None. It
+    names an older install only when every version is comparable."""
+    if len(set(bs.values()))<2: return None
+    pairs=" ".join(f"{r}={v}" for r,v in sorted(bs.items()))
+    keys={r:version_key(v) for r,v in bs.items()}
+    if any(k is None for k in keys.values()):
+        return f"BUILD_MISMATCH {pairs} (a build reports no comparable version; check each install)"
+    new=max(keys.values()); old=sorted(r for r,k in keys.items() if k!=new)
+    return f"BUILD_MISMATCH {pairs} (update {','.join(old)} to {'.'.join(map(str,new))}; host-notes, installs)"
 
 def start(a):
     repo=root(a.repo,no_vcs=getattr(a,"no_vcs",False)); mb=MB(repo); task=body(a).strip()
@@ -1330,7 +1778,15 @@ def start(a):
     comps,absent=load_companion_decl(repo)
     parts=start_participants(a.role,getattr(a,"with_",None))
     auth=declare_authority(parts,a.role,getattr(a,"advisers",None))
-    with Lock(mb.lock):
+    # Strict unless asked otherwise. Legacy is an explicit choice for a peer on
+    # an older build, never a fallback this command takes on its own.
+    pol=getattr(a,"signoff",None) or "strict"
+    if pol not in SIGNOFFS: raise SystemExit(f"--signoff must be one of {', '.join(SIGNOFFS)}")
+    snap=bool(getattr(a,"review_snapshot",False))
+    if snap and pol!="strict": raise SystemExit("--review-snapshot needs strict sign-off; a --signoff legacy session cannot enforce it")
+    if snap and any(r=="localpilot" or r.startswith("localpilot-") for r in parts):
+        raise SystemExit("--review-snapshot is not supported with LocalPilot yet: its native participant does not implement it, so the session could not be enforced")
+    with container_rollback(mb.base), Lock(mb.lock):
         # Inside the lock. Outside it, `start` could read info/exclude, see the
         # rule and skip, while a concurrent `purge` removed that same rule under
         # the lock - leaving a live mailbox that is no longer ignored.
@@ -1345,12 +1801,22 @@ def start(a):
         # One scan per tree, anchor and companions alike: `q`/`rows` and
         # `crows` are what both the digests and the stored manifests come from.
         q,rows=snap_rows(repo,vcs); crows={}
-        s={"session_id":sid,"task":task,"work_unit":a.work_unit or slug(task),"unit_id":"1-"+uuid.uuid4().hex[:8],"driver":a.role,"navigator":parts[1],"owner":a.role,"ownership_epoch":1,"status":"active","phase":"huddle","waiting":None,"pause":None,"handoff":None,"vcs":vcs,"base_head":q["head"],"base_status":q["status"],"companions":snap_companions(comps,crows),"absent_companions":absent,"caps":{a.role:list(CAPS)},"delivery":"print","protocol":PROTOCOL,"created_at":now(),"updated_at":now()}
+        s={"session_id":sid,"task":task,"work_unit":a.work_unit or slug(task),"unit_id":"1-"+uuid.uuid4().hex[:8],"driver":a.role,"navigator":parts[1],"owner":a.role,"ownership_epoch":1,"status":"active","phase":"huddle","waiting":None,"pause":None,"handoff":None,"vcs":vcs,"base_head":q["head"],"base_status":q["status"],"companions":snap_companions(comps,crows),"absent_companions":absent,"caps":{a.role:list(CAPS)},"delivery":"print","protocol":PROTOCOL,"signoff":pol,"created_at":now(),"updated_at":now()}
+        # Required, so a versioned build without M-6a refuses the session
+        # rather than closing it on a prefix AGREE (V-3).
+        if pol=="strict": s["requires"]=["strict-signoff"]
         if getattr(a,"context_summaries",False): s["context_summaries"]=True
-        if set(parts)!=set(HISTORIC):
+        # A strict session is schema 2 even for the historic pair: the sentinel
+        # is what stops a build from before schema 2, which reads no
+        # `requires`, from operating it at all (V-4).
+        if pol=="strict" or set(parts)!=set(HISTORIC):
             # Schema 2 carries its participant list and no single navigator: with
             # three identities there is none, and a derived one would be a guess.
             s.pop("navigator"); s.pop("pause"); s["schema"]=2; s["participants"]=parts; s["authority"]=auth; s["pauses"]={}
+        # Required on the session, so a build that knows only bare host names
+        # refuses an instance-named session before it reads a single record.
+        if any(r not in PARTICIPANTS for r in parts): s["requires"]=sorted(set(s.get("requires") or [])|{"participant-instances"})
+        if snap: s["requires"]=sorted(set(s.get("requires") or [])|{SNAPSHOT})
         for area in ("journal","latest","health","cursor"): (mb.sd(s)/area).mkdir(parents=True,exist_ok=True)
         if rows is not None: write_manifest(mb.manifest(s),rows)
         # Not gated on the anchor's mode: a Git anchor may declare a no-VCS
@@ -1359,6 +1825,7 @@ def start(a):
         # back to the whole tree on every request.
         for i,r in crows.items(): write_manifest(mb.manifest(s,ckey(s["companions"][i],i)),r)
         mb.save(s)
+        record_build(mb,s,a.role)
         for r in participants(s):
             atomic(mb.health(s,r),{"role":r,"status":"ready" if r==a.role else "not_joined","generation":1,"updated_at":now(),"reason":None,"resume_at":None})
             atomic(mb.cursor(s,r),v2_cursor(s,r,{}) if schema(s)==2 else {"peer_seq":0,"peer_health_generation":0,"resume_seen":None,"stale_wait_seq":None})
@@ -1366,6 +1833,7 @@ def start(a):
     # Two participants keep the historic line exactly; three name every peer.
     print(f"STARTED session={sid} role=driver peer={others[0]} work={s['work_unit']}" if len(others)==1 else
           f"STARTED session={sid} role=driver peers={','.join(others)} work={s['work_unit']}")
+    if snapshot_on(s): print("REVIEW_SNAPSHOT on")
     if hasattr(a,"anchor_source"): print(anchor_line(a))
     for line in vcs_lines(repo,s,None if rows is None else len(rows)): print(line)
     # Printed rather than left in session.json: the navigator's `join` prints the
@@ -1373,7 +1841,26 @@ def start(a):
     # having to be told about it in prose.
     for c in s["companions"]: print(companion_line(c))
     for c in s["absent_companions"]: print(absent_line(c))
+    notifier_hint(repo,a.role,sid)
     return 0
+
+def notifier_hint(repo,role,sid):
+    """One stderr line when a Codex terminal has no notifier bound to this session.
+
+    Only inside Codex (CODEX_THREAD_ID set) and only for a codex role: without a
+    notifier, mail that arrives after a Codex turn ends waits for a human, and
+    the foreground wait that replaces it costs a model call per tool yield.
+    Reads the notifier's state file and nothing else; it never starts one."""
+    if not (role=="codex" or role.startswith("codex-")) or not os.environ.get("CODEX_THREAD_ID"): return
+    st=readj(Path(repo)/PAIR_DIR/"notifier"/f"{role}.json",{}) or {}
+    if not isinstance(st,dict): st={}
+    pid=pid_of(st.get("pid"))
+    if (pid and st.get("session_id")==sid and st.get("thread")==os.environ["CODEX_THREAD_ID"]
+            and st.get("pid_started") is not None and process_exists(pid) is True
+            and process_start_time(pid)==st.get("pid_started")):
+        return  # the recorded process, still running: its pid and start time both match
+    print(f"NOTIFIER_HINT no live notifier wakes this Codex thread for {role}: run codex-notifier.py start --repo \"{repo}\" --role {role} "
+          "(codex-notifier.py check verifies one; host-notes, Codex notifier)",file=sys.stderr)
 
 def join(a):
     repo=root(a.repo); mb=MB(repo); end=None if a.timeout==0 else time.monotonic()+a.timeout
@@ -1414,6 +1901,7 @@ def join(a):
                     s["delivery"]="ack"; changed=True
                 if changed: s["updated_at"]=now(); mb.save(s)
                 mb.set_health(a.role,"ready",s=s)
+                record_build(mb,s,a.role)
             # post takes the lock itself, so it happens outside — pinned to the
             # session id resolved above rather than to whatever is current.
             if a.role!=s["driver"] and was!="ready":
@@ -1435,6 +1923,9 @@ def join(a):
             # companion nobody reviews is the failure this exists to prevent.
             for c in (s.get("companions") or []): print(companion_line(c))
             for c in (s.get("absent_companions") or []): print(absent_line(c))
+            mm=build_mismatch(builds(mb,s))
+            if mm: print(mm,file=sys.stderr)
+            notifier_hint(repo,a.role,s["session_id"])
             print(f"TASK:\n{s['task']}"); return 0
         if end is not None and time.monotonic()>=end: return 1
         time.sleep(a.poll)
@@ -1465,7 +1956,7 @@ def parse_ack(s,role,through):
     if schema(s)==1: raise SystemExit("sender:N acknowledgement needs an N-party session")
     vec={}
     for part in t.split(","):
-        m=re.fullmatch(r"([a-z]+):([1-9][0-9]*)",part.strip())
+        m=re.fullmatch(r"([a-z][a-z0-9-]*):([1-9][0-9]*)",part.strip())
         if not m: raise SystemExit(f"cannot read acknowledgement {part!r}; expected sender:N")
         snd,n=m.group(1),int(m.group(2))
         if snd==role: raise SystemExit("a participant does not acknowledge its own mail")
@@ -1631,7 +2122,7 @@ def consume(mb,role,stale,expect_sid=None):
     s=fresh; w=s.get("waiting")
     if w and w.get("from_role")==role and c.get("stale_wait_seq")!=w.get("seq"):
         since=datetime.fromisoformat(w["since"].replace("Z","+00:00")).timestamp()
-        if time.time()-since>=stale and status!="rate_limited": c["stale_wait_seq"]=w["seq"]; return f"PEER_STALE {peer} waiting_on={w['kind']}#{w['seq']} last_health={h.get('updated_at') or 'unknown'}", commit
+        if time.time()-since>=stale and status!="rate_limited": c["stale_wait_seq"]=w["seq"]; return f"PEER_STALE {peer} waiting_on={w['kind']}#{w['seq']} last_health={h.get('updated_at') or 'unknown'} {STALE_HINT}", commit
     return None, commit
 
 def route_marks(m):
@@ -1701,7 +2192,16 @@ def consume_v2(mb,s,role,stale,expect_sid):
             c["stale_marks"]=sorted(set(c.get("stale_marks") or [])|set(cur.get("stale_marks") or []))
             atomic(mb.cursor(s,role),c)
     if out:
-        out.sort(key=lambda m:(m.get("at",""),m.get("role",""),int(m.get("seq",0))))
+        # Senders interleave by time (C-8 leaves that order open), but each
+        # sender's own mail stays in seq order: keyed by the latest `at` seen
+        # so far in that sender's sequence, a record whose clock went backwards
+        # (a clock step, an older build's record) can never overtake the mail
+        # before it. `out` is built sender by sender, each in seq order.
+        top={}; keyed=[]
+        for m in out:
+            t=max(top.get(m.get("role"),""),m.get("at","")); top[m.get("role")]=t
+            keyed.append(((t,m.get("role",""),int(m.get("seq",0))),m))
+        out=[m for _,m in sorted(keyed,key=lambda x:x[0])]
         def head_line(m):
             u=f" [{unit_label(m.get('work_unit'),m.get('unit_id'))}]" if m.get("work_unit") else ""
             cnt=n.get((m["role"],int(m["seq"])),0)
@@ -1740,7 +2240,7 @@ def consume_v2(mb,s,role,stale,expect_sid):
             key=f"{mid}>{rcp}"; h=readj(mb.health(fresh,rcp),{}) or {}
             if key in marks or h.get("status")=="rate_limited": continue
             marks.append(key)
-            return f"PEER_STALE {rcp} waiting_on={e['kind']}#{mid} last_health={h.get('updated_at') or 'unknown'}", commit
+            return f"PEER_STALE {rcp} waiting_on={e['kind']}#{mid} last_health={h.get('updated_at') or 'unknown'} {STALE_HINT}", commit
     return None, commit
 
 def emit(text):
@@ -1836,7 +2336,7 @@ def endpoint(a):
     record as a tombstone for exactly that reason."""
     mb=MB(root(a.repo)); s=require(mb,a.role,allow_paused=True)
     p=mb.endpoint(s,a.role)
-    with Lock(mb.role_lock(s,a.role)):
+    with mb.role_locked(s,a.role,closed_ok=True):
         old=readj(p) or {}
         if a.unregister:
             if not old.get("active"): return refuse("no_active_endpoint",f"{a.role} has no active endpoint to unregister")
@@ -1873,7 +2373,7 @@ def accept(a):
     receipt. Validate, record with fsync, and only then answer, so a success
     without a durable receipt cannot happen. Idempotent per (msg_id, generation)."""
     mb=MB(root(a.repo)); s=require(mb,a.role,allow_paused=True)
-    with Lock(mb.role_lock(s,a.role)):
+    with mb.role_locked(s,a.role,closed_ok=True):
         ep=readj(mb.endpoint(s,a.role)) or {}
         if not ep.get("active"): return refuse("no_active_endpoint",f"{a.role} has no active endpoint")
         if not endpoint_live(ep): return refuse("expired_endpoint",f"{a.role}'s endpoint lease expired at {ep.get('expires_at')}; fall back to watch")
@@ -1898,7 +2398,7 @@ def record_push(a):
     if not m: return refuse("unknown_message",f"no message {a.msg_id} in this session")
     if a.to not in participants(s) or not addressed_to(s,m,a.to):
         return refuse("not_addressed",f"{a.msg_id} is not addressed to {a.to}")
-    with Lock(mb.role_lock(s,a.role)):
+    with mb.role_locked(s,a.role,closed_ok=True):
         append_fact(mb.pushes(s,a.role),{"msg_id":a.msg_id,"to":a.to,"generation":a.generation,"at":now(),"outcome":a.outcome})
     print(f"PUSH_RECORDED msg_id={a.msg_id} to={a.to} outcome={a.outcome}"); return 0
 
@@ -1985,7 +2485,7 @@ def push_all():
     for (mb,s,sender,r,_,req),th,out in running:
         outcome="timeout" if th and th.is_alive() else out[0]
         try:
-            with Lock(mb.role_lock(s,sender)):
+            with mb.role_locked(s,sender,closed_ok=True):
                 append_fact(mb.pushes(s,sender),{"msg_id":req["msg_id"],"to":r,"generation":req["generation"],"at":now(),"outcome":outcome})
         except (OSError,ValueError,SystemExit): continue
 
@@ -2018,6 +2518,9 @@ def status(a):
     done=len(s.get("units") or [])
     unit=unit_label(s.get("work_unit"),s.get("unit_id")) + (f" ({done} closed)" if done else "")
     print(f"SESSION {s['session_id']} status={s['status']} phase={s['phase']} driver={s['driver']} owner={s['owner']} work={unit}")
+    if snapshot_on(s):
+        rv=s.get("review")
+        print("REVIEW_SNAPSHOT on"+(f" request={rv['request']} digest={rv['digest']}" if rv else ""))
     if (s.get("vcs") or mailbox_vcs(root(a.repo)))=="none": print(f"VCS none base={s.get('base_head')}")
     for c in (s.get("companions") or []): print(companion_line(c))
     for c in (s.get("absent_companions") or []): print(absent_line(c))
@@ -2027,6 +2530,8 @@ def status(a):
     if len(participants(s))>2:
         print(authority_line(s["owner"],authority(s)))
         for r,pz in sorted(pauses(s).items()): print(pause_line(s,r,pz))
+    mm=build_mismatch(builds(mb,s))
+    if mm: print(mm)
     for r in participants(s):
         h=readj(mb.health(s,r),{}) or {}; print(f"{r}: {h.get('status','unknown')} updated={h.get('updated_at','unknown')} resume_at={h.get('resume_at') or '-'}")
     # Damage is reported, never skipped in silence: readers ignore an invalid
@@ -2065,6 +2570,7 @@ def guard(a):
     repo=root(a.repo); mb=MB(repo); s=require(mb,a.role,allow_paused=True)
     if s.get("status")!="active" or s.get("owner")!=a.role or s.get("handoff"):
         print(f"WRITE_DENIED status={s.get('status')} owner={s.get('owner')} handoff={'yes' if s.get('handoff') else 'no'}",file=sys.stderr); return 4
+    if snapshot_on(s) and s.get("review"): print(review_pending_line(s),file=sys.stderr)
     if not a.path: return 0
     q=Path(a.path)
     q=(q if q.is_absolute() else (Path.cwd()/q)).resolve()
@@ -2167,7 +2673,7 @@ def handoff_accept(a):
             s["authority"]=handoff_authority(s,a.role)
             if old in s["authority"]["required_reviewers"]:
                 fl=dict(s.get("verdict_floor") or {}); fl[old]=int((readj(mb.latest(s,old),{}) or {}).get("seq",0)); s["verdict_floor"]=fl
-        s["owner"]=a.role; s["ownership_epoch"]=o["epoch"]; s["handoff"]=None; s["waiting"]=None; settle_status(s); s["updated_at"]=now(); mb.save(s)
+        s["owner"]=a.role; s["ownership_epoch"]=o["epoch"]; s["handoff"]=None; s["waiting"]=None; s.pop("review",None); settle_status(s); s["updated_at"]=now(); mb.save(s)
     multi=len(participants(s))>2
     mb.post(a.role,"HANDOFF_ACCEPT",f"epoch={o['epoch']} head={o['head']}",broadcast=multi,internal=True,
             extra={"actor":getattr(a,"actor",None)}); print(f"HANDOFF_ACCEPTED epoch={o['epoch']} owner={a.role}"); return 0
@@ -2256,6 +2762,78 @@ def latest_decision(mb,s,role):
         if m.get("kind") in DECISION_KINDS or m.get("expect_reply"): last=m
     return last
 
+# Strict sign-off (spec M-6a) counts tokens on a VERDICT's header line; it does
+# not parse the whole documented grammar. Every rule is a character rule, never
+# a language's Unicode notion of a line or a space, so no two implementations
+# can disagree about whether a unit may close: the header ends at the first LF
+# (one CR before it is dropped), tokens are split on runs of SPACE and TAB only,
+# and values are ASCII digits compared by their characters.
+SIGNOFF_SPACE=re.compile(r"[ \t]+")
+SIGNOFF_DIGITS=re.compile(r"[0-9]+")
+SIGNOFF_KEYS=("round","blocking","important")
+# Control names are matched with ASCII A-Z folded to a-z and nothing else:
+# str.lower() also folds, for example, KELVIN SIGN (U+212A) to `k`, so a
+# Unicode-aware fold elsewhere could disagree about which token is a control.
+SIGNOFF_FOLD=str.maketrans(string.ascii_uppercase,string.ascii_lowercase)
+STRICT_SIGNOFF=("strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, "
+                "names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any")
+
+def signoff_policy(s):
+    """`strict` when the record claims strict sign-off either way (signoff=strict,
+    or requiring strict-signoff), else `legacy`. check_session has already
+    refused a claim the record cannot protect; reading any claim as strict
+    keeps a path that did not ask it on M-6a, never on the prefix rule."""
+    return "strict" if s.get("signoff")=="strict" or "strict-signoff" in (s.get("requires") or []) else "legacy"
+
+def strict_header(body):
+    """A VERDICT body's header (M-6a): the text before its first LF, less one
+    CR right before that LF. No other character ends it."""
+    h=body.split("\n",1)[0]
+    return h[:-1] if h.endswith("\r") else h
+
+def strict_problem(header):
+    """Why `header`, a VERDICT's header line, is not a strict AGREE (M-6a), or None.
+
+    Tokens are the runs between SPACE and TAB characters. Token 1 is `AGREE`
+    and token 2 `round=<n>`. A later token is a control token when the text
+    before its first `=`, with only ASCII A-Z folded, is round, blocking or
+    important. A control token must be written in lowercase, appear once, and
+    have a value of ASCII digits; every other token is prose. Leading zeros
+    compare by value: round=01 is round 1 and blocking=00 is zero, but
+    round=0 and round=00 are not a round."""
+    toks=[t for t in SIGNOFF_SPACE.split(header) if t]
+    if not toks or toks[0]!="AGREE": return "it does not start with AGREE"
+    if len(toks)<2 or not toks[1].startswith("round="): return "its second token is not round=<n>"
+    seen={}
+    for t in toks[1:]:
+        k,eq,v=t.partition("=")
+        if not eq or k.translate(SIGNOFF_FOLD) not in SIGNOFF_KEYS: continue
+        if k not in SIGNOFF_KEYS: return f"{t}: control names are lowercase"
+        if k in seen: return f"{k}= appears twice"
+        if not SIGNOFF_DIGITS.fullmatch(v): return f"{t} has no ASCII-digit value"
+        seen[k]=v
+    if not seen["round"].strip("0"): return f"round={seen['round']} is not above zero"
+    if seen.get("blocking","0").strip("0"): return f"blocking={seen['blocking']} reports a blocker"
+    return None
+
+def agreement_problem(s,m):
+    """Why message `m` does not sign off the unit in session `s`, or None.
+
+    The one definition of an agreement, read for a pair's latest decision
+    (U-3a) and for each required reviewer's standing decision (U-3b). A legacy
+    session (`--signoff legacy`, or one started before 1.3) keeps M-6 exactly
+    as it was: any VERDICT whose first line starts `AGREE `. A strict session
+    reads M-6a, so a contradictory or free-text AGREE never closes a unit."""
+    if signoff_policy(s)=="legacy":
+        first=(m.get("body") or "").splitlines()[0] if m.get("body") else ""
+        return None if m.get("kind")=="VERDICT" and first.startswith("AGREE ") else "it is not an AGREE verdict"
+    if m.get("kind")!="VERDICT": return "it is not a VERDICT"
+    return strict_problem(strict_header(str(m.get("body") or "")))
+
+def decision_text(m):
+    """A decision as a refusal names it: kind, seq and its header line."""
+    return f"{m.get('kind')} #{m.get('seq')} \"{strict_header(str(m.get('body') or ''))}\""
+
 # ---- Artifacts (spec §4a, R-1..R-8) ----------------------------------------
 ARTIFACT_TYPES={"review-pack","plan","design","document","dataset","summary"}
 ART_MAX_FILES=64; ART_MAX_FILE=16*1024*1024; ART_MAX_TOTAL=64*1024*1024; ART_MAX_REFS=16
@@ -2325,16 +2903,16 @@ def art_dir(mb,s): return mb.sd(s)/"artifacts"
 def usage_lines(s):
     groups={}
     for r in s.get("usage") or []:
-        key=(r["role"],r["unit_id"],r["source"])
+        key=(r["role"],r["unit_id"],r["source"],r.get("activity"))
         g=groups.setdefault(key,{"tokens":0,"cost":0,"known":0,"reports":0,"limit":None})
         g["tokens"]+=sum(r[k] for k in ("input_tokens","output_tokens","cache_creation_input_tokens","cache_read_input_tokens"))
         g["reports"]+=1
         if r.get("cost_microusd") is not None: g["cost"]+=r["cost_microusd"]; g["known"]+=1
         if r.get("limit_percent") is not None: g["limit"]=r["limit_percent"]
-    return [f"USAGE role={role} unit={unit} source={source} tokens={g['tokens']} "
+    return [f"USAGE role={role} unit={unit} source={source}{f' activity={act}' if act else ''} tokens={g['tokens']} "
             f"cost_microusd={g['cost'] if g['known'] else 'unknown'} cost_coverage={g['known']}/{g['reports']} "
             f"limit_percent={g['limit'] if g['limit'] is not None else 'unknown'} reports={g['reports']} coverage=partial"
-            for (role,unit,source),g in sorted(groups.items())]
+            for (role,unit,source,act),g in sorted(groups.items(),key=lambda kv:tuple(x or "" for x in kv[0]))]
 
 def usage(a):
     mb=MB(root(a.repo))
@@ -2349,7 +2927,10 @@ def usage(a):
     if a.limit_percent is not None and not 0<=a.limit_percent<=100: raise SystemExit("limit percent must be 0..100")
     with Lock(mb.lock):
         s=require(mb,a.role,allow_paused=True)
+        if (a.expect_session and a.expect_session!=s["session_id"]) or (a.expect_unit is not None and a.expect_unit!=(s.get("unit_id") or "")):
+            raise SystemExit(f"USAGE_DESTINATION_CHANGED session={s['session_id']} unit={s.get('unit_id')}")
         rec={"role":a.role,"unit_id":s.get("unit_id"),"report_id":a.report_id,"source":"reported",**vals,"limit_percent":a.limit_percent}
+        if a.activity: rec["activity"]=a.activity
         rows=list(s.get("usage") or [])
         old=next((r for r in rows if r["role"]==a.role and r["report_id"]==a.report_id),None)
         if old:
@@ -2650,7 +3231,7 @@ def artifact_refs(mb,s,ids):
         refs.append({"id":aid,"type":m.get("type")})
     return refs
 
-def changed_paths(repo,base,mode=None,manifest=None):
+def changed_paths(repo,base,mode=None,manifest=None,strict=False):
     """Everything committed since `base`, plus everything currently uncommitted.
 
     One definition, used for the session's own tree and for every companion, so
@@ -2666,7 +3247,18 @@ def changed_paths(repo,base,mode=None,manifest=None):
     -z throughout: NUL-separated, never quoted, so a path containing a space, a
     tab, or a non-ASCII byte survives whatever core.quotePath is set to. The
     textual forms mangle all three, and a fixed-prefix slice additionally turned
-    a rename's "old -> new" into one nonexistent path."""
+    a rename's "old -> new" into one nonexistent path.
+
+    `strict` is for a caller that must never read a failed Git call as "nothing
+    changed": each call then checks its exit code and refuses, naming the
+    subcommand. A strict read also lists both sides of a committed rename, its
+    deleted source and its added destination, where Git's rename detection would
+    list the destination alone. The default keeps these best-effort reads
+    exactly as they were."""
+    def run(*args):
+        if not strict: return git(repo,*args,check=False)
+        try: return git(repo,*args)
+        except SystemExit as e: raise SystemExit(f"git {args[0]} failed: {(str(e.code).strip().splitlines() or ['no message'])[0]}") from None
     if (mode or mailbox_vcs(repo))=="none":
         live={r:(k,str(s),d) for r,k,s,d in scan_tree(repo)}
         was=read_manifest(manifest) if manifest else None
@@ -2677,10 +3269,11 @@ def changed_paths(repo,base,mode=None,manifest=None):
         # is the whole tree. `git diff HEAD` would compare HEAD to the worktree
         # instead and hand back nothing once the work was committed and the tree
         # was clean - an empty review set for a finished change.
-        tracked=[x for x in git(repo,"ls-tree","-r","--name-only","-z","HEAD",check=False).split(chr(0)) if x]
+        tracked=[x for x in run("ls-tree","-r","--name-only","-z","HEAD").split(chr(0)) if x]
     else:
-        tracked=[x for x in git(repo,"diff","--name-only","-z",f"{base}..HEAD",check=False).split(chr(0)) if x]
-    parts=[x for x in git(repo,"status","-z","--porcelain=v1","--untracked-files=all",check=False).split(chr(0)) if x]
+        renames=("--no-renames",) if strict else ()
+        tracked=[x for x in run("diff","--name-only","-z",*renames,f"{base}..HEAD").split(chr(0)) if x]
+    parts=[x for x in run("status","-z","--porcelain=v1","--untracked-files=all").split(chr(0)) if x]
     dirty=[]; i=0
     while i<len(parts):
         ent=parts[i]; code,path=ent[:2],ent[3:]
@@ -2713,11 +3306,12 @@ def redact_text(s):
     for r in SECRET_SHAPES: s=r.sub("[REDACTED]",s)
     return s
 
-def companion_scope(mb,s,ci,c):
+def companion_scope(mb,s,ci,c,strict=False):
     """A companion's changed paths inside its write scope, and outside it: one
-    definition for the request and for its pack."""
+    definition for the request and for its pack. `strict` as in changed_paths:
+    a failed Git call refuses instead of reading as "nothing changed"."""
     croot=Path(c["root"]); cbase=c.get("head") or "UNBORN"; cvcs=c.get("vcs") or "git"
-    ct,cd=changed_paths(croot,cbase,cvcs,mb.manifest(s,ckey(c,ci)))
+    ct,cd=changed_paths(croot,cbase,cvcs,mb.manifest(s,ckey(c,ci)),strict=strict)
     allp=sorted({x for x in ct+cd if x}); inside=[f for f in allp if glob_match(c["write"],f)]
     return croot,cbase,cvcs,inside,[f for f in allp if f not in set(inside)]
 
@@ -2793,6 +3387,85 @@ def build_pack(a,repo,mb,s,vcs,base,files):
         raise SystemExit("PACK_TOO_LARGE: the changed set does not fit an artifact; use verify-request without --pack")
     return store_artifact(mb,s,"review-pack",a.role,meta,entries,[("review.diff",diff)])
 
+# `verify-request --pack --tests` budget, and the grace for collecting output
+# once the command's managed job or process group has been terminated.
+TESTS_TIMEOUT_S,TESTS_DRAIN_S=1800,30
+
+def end_managed(proc,job,contained):
+    """End a `--tests` command: its job when it was `contained` in one
+    (Windows), else its process group (POSIX) or, before containment, the
+    process itself. Then wait up to TESTS_DRAIN_S for its output to close.
+    Returns None when that is shown, else what could not be shown."""
+    problem=None
+    try:
+        if os.name!="nt": os.killpg(proc.pid,signal.SIGKILL)
+        elif contained:
+            if not kernel32().TerminateJobObject(job,1): problem=str(win_failure("TerminateJobObject"))
+        else: proc.kill()
+    except ProcessLookupError: pass
+    except OSError as e: problem=f"ending pid {proc.pid} failed: {e}"
+    try: proc.communicate(timeout=TESTS_DRAIN_S)
+    except subprocess.TimeoutExpired: problem=problem or f"its output was still open {TESTS_DRAIN_S} s later"
+    except (OSError,ValueError) as e: problem=problem or f"its output could not be drained: {e}"
+    return problem
+
+def run_tests(cmd,cwd):
+    """Run a `--tests` command and return `(rc, stdout+stderr)`.
+
+    The command runs in a job of its own (Windows: created suspended, assigned,
+    then resumed, so nothing it starts escapes the assignment) or in a new
+    process group (POSIX). Past TESTS_TIMEOUT_S that job or group is terminated
+    and the call refuses with TESTS_TIMEOUT, storing nothing. An interruption
+    while it runs (Ctrl-C included, which no longer reaches a new process group)
+    ends it the same way and is then re-raised. This cancels the managed job or
+    group; it is not a sandbox: a POSIX descendant that leaves the group with
+    setsid is out of reach. On success nothing is ended: the job has no
+    kill-on-close, so a process the command left running keeps running."""
+    kw=dict(shell=True,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding="utf-8",errors="replace")
+    job=handle=None
+    if os.name=="nt":
+        kind="job"
+        try:
+            job=new_job(kill_on_close=False)
+            proc=subprocess.Popen(cmd,creationflags=CREATE_SUSPENDED,**kw)
+        except (ContainmentError,OSError) as e:
+            close_handles(job)
+            raise SystemExit(f"TESTS_NOT_RUN: --tests could not be started in a job ({e}); nothing was stored")
+        contained=False
+        try:
+            handle=kernel32().OpenProcess(JOB_PROCESS_ACCESS,False,proc.pid)
+            if not handle: raise win_failure(f"OpenProcess({proc.pid})")
+            assign(job,handle); contained=True
+            resume_suspended(proc.pid)
+        except BaseException as e:
+            try: problem=end_managed(proc,job,contained)
+            finally: close_handles(handle,job)
+            if not isinstance(e,ContainmentError):
+                if problem: print(f"TESTS_INTERRUPTED: ending the --tests {kind} (pid {proc.pid}) is unverified: {problem}",file=sys.stderr)
+                raise
+            ended=f"ending it is unverified: {problem}" if problem else "it was ended before it ran"
+            raise SystemExit(f"TESTS_NOT_RUN: --tests could not be contained ({e}); {ended}. Nothing was stored")
+    else:
+        kind="process group"
+        proc=subprocess.Popen(cmd,start_new_session=True,**kw)
+    try:
+        try:
+            out,err=proc.communicate(timeout=TESTS_TIMEOUT_S)
+            return proc.returncode,out+err
+        except subprocess.TimeoutExpired:
+            problem=end_managed(proc,job,True)
+        except BaseException:
+            problem=end_managed(proc,job,True)
+            if problem: print(f"TESTS_INTERRUPTED: ending the --tests {kind} (pid {proc.pid}) is unverified: {problem}",file=sys.stderr)
+            raise
+        if problem:
+            raise SystemExit(f"TESTS_TIMEOUT: --tests did not finish within {TESTS_TIMEOUT_S} s; ending its {kind} "
+                             f"(pid {proc.pid}) is unverified: {problem}. Nothing was stored")
+        raise SystemExit(f"TESTS_TIMEOUT: --tests did not finish within {TESTS_TIMEOUT_S} s; its {kind} was "
+                         f"terminated and nothing was stored")
+    finally:
+        close_handles(handle,job)
+
 def verify_request(a):
     """Emit a self-contained verification request for a fresh, uninvolved reader.
 
@@ -2816,9 +3489,9 @@ def verify_request(a):
     guarantee that a second agent signed off."""
     repo=root(a.repo); mb=MB(repo); s=require(mb,a.role)
     if getattr(a,"pack",False) and getattr(a,"tests",None):
-        r=subprocess.run(a.tests,shell=True,cwd=repo,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=1800)
-        a.test_result={"command":redact_text(a.tests),"rc":r.returncode,
-                       "tail":redact_text("\n".join((r.stdout+r.stderr).splitlines()[-20:]))}
+        rc,output=run_tests(a.tests,repo)
+        a.test_result={"command":redact_text(a.tests),"rc":rc,
+                       "tail":redact_text("\n".join(output.splitlines()[-20:]))}
     vcs=s.get("vcs") or mailbox_vcs(repo)
     files=list(a.file or [])
     base=s.get("base_head") or "UNBORN"
@@ -2858,9 +3531,13 @@ def verify_request(a):
              "    intermediate state; you are reviewing the end state only.",
              "  - a path listed below whose digest reads gone/unreadable was deleted.",
              "Read the named files directly."] if vcs=="none" else
+            # --no-optional-locks on every command handed to the reader: a plain
+            # `git status` refreshes and rewrites .git/index (why `git()` sets
+            # GIT_OPTIONAL_LOCKS=0), which breaks the read-only rule below. The
+            # global flag rather than the variable, so it works in any shell.
             ["Reproduce the change with either of these (both non-mutating):",
-             (f"  git diff {base}..HEAD" if base!="UNBORN" else "  git log --patch   # the unit began before the first commit"),
-             "  git status --porcelain=v1 --untracked-files=all   # uncommitted work, if any"])
+             (f"  git --no-optional-locks diff {base}..HEAD" if base!="UNBORN" else "  git --no-optional-locks log --patch   # the unit began before the first commit"),
+             "  git --no-optional-locks status --porcelain=v1 --untracked-files=all   # uncommitted work, if any"])
     out += ["",
          "You were opened in a new session so that you carry none of the implementation",
          "narrative. That absence is the whole value — do not reconstruct it, and do not go",
@@ -2906,8 +3583,8 @@ def verify_request(a):
                 (f"  Base content digest for this unit: {cbase}" if cvcs=="none" else f"  Base commit for this unit: {cbase}"),
                 ("  Not under version control: the set below is a digest delta against that base,"
                  " with no history behind it" if cvcs=="none" else
-                 f'  Reproduce with: git -C "{c["root"]}" diff {cbase}..HEAD' if cbase!="UNBORN"
-                 else f'  Reproduce with: git -C "{c["root"]}" log --patch'),
+                 f'  Reproduce with: git -C "{c["root"]}" --no-optional-locks diff {cbase}..HEAD' if cbase!="UNBORN"
+                 else f'  Reproduce with: git -C "{c["root"]}" --no-optional-locks log --patch'),
                 "  Files under review there (same digest recipe):"]
         out += [f"    {h}  {f}" for h,f in digest_rows(croot,inside)] or ["    (none changed)"]
         if outside:
@@ -2977,10 +3654,145 @@ def reviewer_standing(mb,s,r):
             if best is None or int(m.get("seq",0))>int(best.get("seq",0)): best=m
     if best is None:
         return None,(f"{r}: no review requested from it in this unit" if thread is None else f"{r}: no verdict since the unit boundary or resume")
-    first=(best.get("body") or "").splitlines()[0] if best.get("body") else ""
-    if best.get("kind")!="VERDICT" or not first.startswith("AGREE "):
-        return None,f"{r}: {best.get('kind')} #{best.get('seq')} stands"
+    why=agreement_problem(s,best)
+    if why and signoff_policy(s)=="strict" and best.get("kind")=="VERDICT":
+        return None,f"{r}: {decision_text(best)} is not a strict AGREE: {why}"
+    if why: return None,f"{r}: {best.get('kind')} #{best.get('seq')} stands"
     return best,None
+
+# --- review snapshots ---------------------------------------------------------
+#
+# A session that requires "review-snapshot" closes a unit only on the bytes its
+# reviewers saw. The owner's REVIEW_REQUEST records every changed path (against
+# the unit's base commit plus the working tree, in the anchor and in each
+# companion's write scope) with the SHA-256 of its working-tree bytes; complete
+# and next-unit recompute it and refuse on any difference.
+
+SNAPSHOT="review-snapshot"
+
+def snapshot_on(s): return SNAPSHOT in (s.get("requires") or [])
+
+def entry_value(root_dir,rel):
+    """One path's snapshot value: a file's byte digest, a link's target digest,
+    "gone" for a path that is verifiably absent, "unreadable" or "unsupported".
+
+    Links are hashed as link data and never followed, and a path whose parent
+    resolves outside the tree is unsupported: the review never reaches beyond
+    the scope it was asked about."""
+    root_dir=Path(root_dir); p=root_dir/rel
+    try:
+        parent=p.parent.resolve()
+        if parent!=root_dir.resolve() and root_dir.resolve() not in parent.parents: return "unsupported"
+    except OSError: return "unreadable"
+    try: st=os.lstat(p)
+    except FileNotFoundError: return "gone"
+    except OSError: return "unreadable"
+    if stat.S_ISLNK(st.st_mode):
+        try: return "link:"+hashlib.sha256(os.fsencode(os.readlink(p))).hexdigest()
+        except OSError: return "unreadable"
+    if not stat.S_ISREG(st.st_mode): return "unsupported"
+    try: return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError: return "unreadable"
+
+def review_snapshot(mb,s):
+    """{tree key: {path: value}} for the current unit: the anchor and every
+    companion, each against the unit's own base."""
+    repo=mb.repo; vcs=s.get("vcs") or mailbox_vcs(repo)
+    tracked,dirty=changed_paths(repo,s.get("base_head") or "UNBORN",vcs,mb.manifest(s),strict=True)
+    paths=sorted({x for x in tracked+dirty if x and x!=PAIR_DIR and not x.startswith(PAIR_DIR+"/")})
+    trees={"anchor":{x:entry_value(repo,x) for x in paths}}
+    for ci,c in enumerate(s.get("companions") or []):
+        croot,_,_,inside,_=companion_scope(mb,s,ci,c,strict=True)
+        trees[ckey(c,ci)]={x:entry_value(croot,x) for x in inside}
+    return trees
+
+def snapshot_digest(trees):
+    return "S:"+hashlib.sha256(json.dumps(trees,sort_keys=True,separators=(",",":")).encode()).hexdigest()[:12]
+
+def snapshot_label(s,key,path):
+    if key=="anchor": return path
+    i=int(key[1:]); comps=s.get("companions") or []
+    return f"{comps[i]['name'] if i<len(comps) else key}:{path}"
+
+def snapshot_problems(s,trees):
+    """Paths whose value can never be reviewed as bytes."""
+    return [snapshot_label(s,k,p) for k,t in sorted(trees.items()) for p,v in sorted(t.items()) if v in ("unreadable","unsupported")]
+
+def snapshot_changes(s,old,new):
+    out=[]
+    for k in sorted(set(old)|set(new)):
+        a,b=old.get(k) or {},new.get(k) or {}
+        out+=[snapshot_label(s,k,p) for p in sorted(set(a)|set(b)) if a.get(p)!=b.get(p)]
+    return out
+
+def publish_review(fresh,role,seq,mid,trees):
+    """Make a REVIEW_REQUEST the unit's current review, under the state lock.
+
+    Called only after the request's append has landed, so a failed append never
+    leaves a review standing. A request older than the current one, or than a
+    withdrawal, never reinstates itself: each role's floor only moves up."""
+    floor=int((fresh.get("review_floor") or {}).get(role,0))
+    cur=fresh.get("review") or {}
+    if seq<=floor or (cur.get("role")==role and int(cur.get("seq",0))>=seq): return
+    fresh["review"]={"request":mid,"role":role,"seq":seq,"unit_id":fresh.get("unit_id"),"digest":snapshot_digest(trees),"trees":trees}
+    fresh["review_floor"]={**(fresh.get("review_floor") or {}),role:seq}
+
+def snapshot_close_check(mb,s,agrees):
+    """Refuse a close whose AGREE does not answer the current request, or whose
+    reviewed bytes changed since."""
+    rv=s.get("review")
+    if not rv or rv.get("unit_id")!=s.get("unit_id"):
+        raise SystemExit("REVIEW_SNAPSHOT_MISSING: there is no current review request in this unit; post a REVIEW_REQUEST and get a verdict on it")
+    # A newer request or withdrawal can be durable in the journal while its
+    # writer still waits for the state lock to publish it (or never managed
+    # to). The journal, not the published state, is what the owner said last.
+    newer=[m.get("msg_id") or f"{m.get('role')}:{m.get('seq')}" for m in journal_rows(mb,s,rv["role"])
+           if m.get("unit_id")==s.get("unit_id") and int(m.get("seq",0))>int(rv.get("seq",0))
+           and (m.get("kind")=="REVIEW_REQUEST" or (m.get("kind")=="NOTE" and (m.get("body") or "").startswith("REVIEW_WITHDRAWN ")))]
+    if newer:
+        raise SystemExit(f"REVIEW_SNAPSHOT_UNSETTLED request={rv['request']} newer={','.join(newer)}: a later review request or withdrawal "
+                         "is not the published review; wait for it to settle, or post a new REVIEW_REQUEST")
+    stale=[m.get("msg_id") or f"{m.get('role')}:{m.get('seq')}" for m in agrees if m.get("reply_to")!=rv["request"]]
+    if stale:
+        raise SystemExit(f"REVIEW_SNAPSHOT_STALE request={rv['request']}: the AGREE ({', '.join(stale)}) does not answer the current review request; "
+                         "an AGREE must be posted with --reply-to the current request")
+    now_trees=review_snapshot(mb,s)
+    bad=snapshot_problems(s,now_trees)
+    if bad: raise SystemExit(f"REVIEW_SNAPSHOT_UNSUPPORTED paths={','.join(bad)}: these cannot be reviewed as bytes")
+    changed=snapshot_changes(s,rv["trees"],now_trees)
+    if changed:
+        raise SystemExit(f"REVIEW_SNAPSHOT_CHANGED request={rv['request']} paths={','.join(changed)}: the reviewed set changed after the request; "
+                         "post a new REVIEW_REQUEST (it supersedes the old one) and get a fresh verdict")
+
+def review_withdraw(a):
+    mb=MB(root(a.repo)); s=require(mb,a.role)
+    if not snapshot_on(s): raise SystemExit("this session does not use review snapshots; there is nothing to withdraw")
+    if s["owner"]!=a.role: raise SystemExit("only the current owner may withdraw its review request")
+    rv=s.get("review")
+    if not rv: raise SystemExit("no review request is current in this unit")
+    why=(getattr(a,"reason",None) or "").strip()
+    m=mb.post(a.role,"NOTE",f"REVIEW_WITHDRAWN request={rv['request']}"+(f"\n{why}" if why else ""),internal=True,expect_unit=s.get("unit_id"))
+    with Lock(mb.lock):
+        fresh=require(mb,a.role)
+        cur=fresh.get("review") or {}
+        if cur.get("request")==rv["request"]: fresh["review"]=None
+        fresh["review_floor"]={**(fresh.get("review_floor") or {}),a.role:max(int(m["seq"]),int((fresh.get("review_floor") or {}).get(a.role,0)))}
+        fresh["updated_at"]=now(); mb.save(fresh)
+    print(f"REVIEW_WITHDRAWN request={rv['request']}"); return 0
+
+def unresolved_steers(mb,s,owner):
+    """Peer STEERs in this unit that no later post by the owner names."""
+    unit=s.get("unit_id"); mine=[m for m in journal_rows(mb,s,owner) if m.get("unit_id")==unit]
+    out=[]
+    for r in participants(s):
+        if r==owner: continue
+        for m in journal_rows(mb,s,r):
+            if m.get("unit_id")!=unit or m.get("kind")!="STEER": continue
+            mid=m.get("msg_id") or f"{r}:{m.get('seq')}"
+            named=any(x.get("at","")>=m.get("at","") and (x.get("reply_to")==mid or mid in (x.get("body") or "")
+                      or re.search(rf"(?<![\w:])#{m.get('seq')}\b",x.get("body") or "")) for x in mine)
+            if not named: out.append(mid)
+    return out
 
 def peer_agreed(mb,s,role):
     """The peer's standing AGREE, or a SystemExit explaining why there isn't one.
@@ -2988,13 +3800,19 @@ def peer_agreed(mb,s,role):
     Shared by `complete` and `next-unit` because both close a unit of work and
     neither may do it on the owner's say-so alone. A second copy of this check
     would be a second definition of what counts as sign-off."""
+    strict=signoff_policy(s)=="strict"
     if len([x for x in participants(s) if x!=role])>1:
         # Every required reviewer; a majority never closes. Advisers are never read.
-        blocks=[why for r in authority(s)["required_reviewers"] for _,why in [reviewer_standing(mb,s,r)] if why]
-        if blocks: raise SystemExit("not every required reviewer agrees: "+"; ".join(blocks))
+        stand=[reviewer_standing(mb,s,r) for r in authority(s)["required_reviewers"]]
+        blocks=[why for _,why in stand if why]
+        if blocks: raise SystemExit("not every required reviewer agrees: "+"; ".join(blocks)+(f"; {STRICT_SIGNOFF}" if strict else ""))
+        if snapshot_on(s): snapshot_close_check(mb,s,[m for m,_ in stand])
         return None
-    peer=latest_decision(mb,s,the_peer(s,role)); first=(peer.get("body") or "").splitlines()[0] if peer.get("body") else ""
-    if peer.get("kind")!="VERDICT" or not first.startswith("AGREE "): raise SystemExit("peer's latest decision is not an AGREE verdict")
+    peer=latest_decision(mb,s,the_peer(s,role)); why=agreement_problem(s,peer)
+    if why and strict:
+        raise SystemExit("peer's latest decision is not a strict AGREE: "+(f"{decision_text(peer)}: {why}" if peer else "there is none yet")
+                         +f"; {STRICT_SIGNOFF}")
+    if why: raise SystemExit("peer's latest decision is not an AGREE verdict")
     # Sequence alone is not enough. `post` reads the session to stamp a message,
     # then appends outside the mailbox lock, so a verdict composed against the
     # previous work unit can land AFTER the boundary sampled verdict_floor:
@@ -3005,7 +3823,182 @@ def peer_agreed(mb,s,role):
         raise SystemExit(f"peer's AGREE was given on work unit {peer.get('work_unit')!r} ({peer.get('unit_id')}), not the current {s.get('work_unit')!r} ({s.get('unit_id')}); a fresh verdict is required")
     floor=int((s.get("verdict_floor") or {}).get(the_peer(s,role),0))
     if int(peer.get("seq",0))<=floor: raise SystemExit("peer's AGREE predates the last unit boundary or resume; the review was invalidated and a new verdict is required")
+    if snapshot_on(s): snapshot_close_check(mb,s,[peer])
     return peer
+
+def host_usage(a):
+    """Record this host's usage before a unit closes, when the user enabled it
+    ({"host_usage": true} in <user config>/pair-programming/usage/config.json).
+    Best effort: a failure warns and never blocks the close."""
+    if os.environ.get("PAIR_HOST_USAGE")=="off" or not getattr(a,"role",None): return
+    env=os.environ.get("PAIR_USAGE_DIR")
+    if env: d=Path(env)
+    elif os.name=="nt" and os.environ.get("APPDATA"): d=Path(os.environ["APPDATA"])/"pair-programming"/"usage"
+    else:
+        x=os.environ.get("XDG_CONFIG_HOME"); d=(Path(x) if x and os.path.isabs(x) else Path.home()/".config")/"pair-programming"/"usage"
+    try: on=(json.loads((d/"config.json").read_text(encoding="utf-8")) or {}).get("host_usage") is True
+    except (OSError,ValueError,AttributeError): on=False
+    if not on: return
+    argv=[sys.executable,str(Path(__file__).resolve().parent/"host-usage.py")]+(["--repo",a.repo] if a.repo else [])+["record","--role",a.role]
+    try: r=subprocess.run(argv,capture_output=True,text=True,timeout=120,env=dict(os.environ,PAIR_HOST_USAGE="off"))
+    except (OSError,subprocess.TimeoutExpired) as ex: print(f"HOST_USAGE_FAILED {ex}",file=sys.stderr); return
+    if r.returncode: print(f"HOST_USAGE_FAILED {(r.stderr or r.stdout).strip()[:300]}",file=sys.stderr)
+
+# --- brief ------------------------------------------------------------------------
+#
+# What a fresh host session needs to take over: read-only, from records that
+# already exist. The review it reports is the one a close would accept now, or
+# the one the last close did accept, rebuilt from that unit's archived record.
+
+BRIEF_MAX=40
+# `<sha256[:12]> <path>`, or sha256sum's binary form `<sha256[:12]> *<path>`.
+FINGERPRINT=re.compile(r"^\s*([0-9a-f]{12})\s+\*?(\S.*?)\s*$",re.M)
+
+def fingerprints(m):
+    return [(h,p) for h,p in FINGERPRINT.findall((m or {}).get("body") or "")]
+
+def find_message(mb,s,mid):
+    role=(mid or "").split(":")[0]
+    if role not in participants(s): return None
+    return next((m for m in journal_rows(mb,s,role) if (m.get("msg_id") or f"{m.get('role')}:{m.get('seq')}")==mid),None)
+
+def msg_ref(mb,s,m):
+    rel=mb.journal(s,m.get("role")).relative_to(mb.repo).as_posix()
+    return f"{rel}#{m.get('seq')}"
+
+def mid_of(m): return m.get("msg_id") or f"{m.get('role')}:{m.get('seq')}"
+
+def manifest_value(repo,s,path):
+    """The current sha256[:12] of a reviewed path, or why there is none. The
+    snapshot's own policy: links are never followed and nothing outside the
+    tree, or inside the mailbox, is read."""
+    names={c.get("name") for c in (s.get("companions") or [])}
+    if ":" in path and path.split(":",1)[0] in names: return "companion"
+    pp=Path(path)
+    if pp.is_absolute() or pp.drive or pp.root or ".." in pp.parts: return "refused"
+    if in_mailbox(repo,pp): return "refused"
+    v=entry_value(repo,path)
+    if v=="gone": return "missing"
+    if re.fullmatch(r"[0-9a-f]{64}",v): return v[:12]
+    return "link" if v.startswith("link:") else v
+
+def in_mailbox(repo,rel):
+    """Whether repo/rel is, or is inside, the mailbox, by any spelling: the
+    resolved path (which follows parent links and, on Windows, canonicalises
+    case, short names and trailing dots) and each existing ancestor compared
+    by file identity, not by name."""
+    nc=os.path.normcase; base=Path(repo); mbox=base/PAIR_DIR
+    try:
+        real=(base/rel).resolve(); mreal=mbox.resolve()
+    except OSError: return True
+    if nc(str(real))==nc(str(mreal)) or nc(str(mreal)) in {nc(str(p)) for p in real.parents}: return True
+    if not mbox.exists(): return False
+    for anc in [base/rel,*(base/rel).parents]:
+        if anc==base or base not in anc.parents: break
+        try:
+            if anc.exists() and os.path.samefile(anc,mbox): return True
+        except OSError: return True
+    return False
+
+def standing_review(mb,s):
+    """The current unit's agreeing decisions, or None: the same reads a close makes."""
+    owner=s["owner"]
+    if len(participants(s))>2:
+        stand=[reviewer_standing(mb,s,r) for r in authority(s)["required_reviewers"]]
+        if not stand or any(why for _,why in stand): return None
+        return [m for m,_ in stand]
+    peer=latest_decision(mb,s,the_peer(s,owner))
+    if not peer or agreement_problem(s,peer) or peer.get("unit_id")!=s.get("unit_id"): return None
+    if int(peer.get("seq",0))<=int((s.get("verdict_floor") or {}).get(the_peer(s,owner),0)): return None
+    return [peer]
+
+def accepted_review(mb,s,u):
+    """The decisions closed unit u's close read, rebuilt from its record: each
+    required reviewer's latest decision stamped with u, above u's opening floor
+    and no later than its close. None when one of them is not an agreement."""
+    reviewers=(u.get("authority") or {}).get("required_reviewers") or [r for r in participants(s) if r!=u.get("owner")][:1]
+    floor=u.get("verdict_floor") or {}; out=[]
+    for r in reviewers:
+        last=None
+        for m in journal_rows(mb,s,r):
+            if m.get("unit_id")!=u.get("unit_id") or int(m.get("seq",0))<=int(floor.get(r,0)) or (m.get("at") or "")>(u.get("closed_at") or ""): continue
+            if m.get("kind") in DECISION_KINDS or m.get("expect_reply"): last=m
+        if not last or agreement_problem(s,last): return None
+        out.append(last)
+    return out
+
+def bounded(lines,more):
+    return lines if len(lines)<=BRIEF_MAX else lines[:BRIEF_MAX]+[more(len(lines)-BRIEF_MAX)]
+
+def review_brief(mb,s):
+    """(lines, reviewed paths) for the review a close accepts now, else the one
+    the last close accepted."""
+    repo=mb.repo; units=s.get("units") or []
+    agrees=standing_review(mb,s); unit=s; source="standing"
+    if agrees is None and units:
+        unit=units[-1]; agrees=accepted_review(mb,s,unit); source="reconstructed"
+    if agrees is None:
+        return [f"REVIEWED none unit={unit_label(unit.get('work_unit'),unit.get('unit_id'))}"+(" source=reconstructed status=unknown" if unit is not s else "")],set()
+    ulabel=unit_label(unit.get("work_unit"),unit.get("unit_id"))
+    head=f"REVIEWED unit={ulabel} source={source} verdict={','.join(mid_of(m) for m in agrees)}"
+    rv=s.get("review") if unit is s and snapshot_on(s) else None
+    if unit is s and snapshot_on(s):
+        # The close's own check, so the brief never calls current what
+        # `complete` would refuse.
+        try: snapshot_close_check(mb,s,agrees); why=None
+        except SystemExit as ex: why=str(ex)
+        except OSError as ex: why=f"REVIEW_SNAPSHOT_UNREADABLE {ex}"
+        code=(re.match(r"REVIEW_SNAPSHOT_([A-Z]+)",why or "") or [None,"current"])[1].lower() if why else "current"
+        if not rv: return [head+f" status={code}"],set()
+        lines=[head+f" request={rv['request']} digest={rv['digest']} status={code} files={sum(len(t) for t in (rv.get('trees') or {}).values())}"]
+        m=re.search(r" paths=(\S+)",why or "")
+        body=[f"  {code} {p}" for p in (m.group(1).split(",") if m else [])]
+        return lines+bounded(body,lambda k:f"  MORE {k} paths: run complete to see them all"),{p for t in (rv.get("trees") or {}).values() for p in t}
+    m=agrees[0]; fp=fingerprints(m); src=m
+    if not fp:
+        req=find_message(mb,s,m.get("reply_to")) if m.get("reply_to") else None
+        if req and fingerprints(req): fp,src=fingerprints(req),req
+    lines=[head+f" files={len(fp)} manifest={msg_ref(mb,s,src) if fp else 'none'}"]
+    body=[]
+    for h,p in fp:
+        v=manifest_value(repo,s,p)
+        body.append(f"  {h} {p} "+("same" if v==h else "changed" if re.fullmatch(r"[0-9a-f]{12}",v) else v))
+    return lines+bounded(body,lambda k:f"  MORE {k} manifest lines in {msg_ref(mb,s,src)}"),{p for _,p in fp}
+
+def brief_lines(mb,s,role):
+    repo=mb.repo; units=s.get("units") or []
+    rl="driver" if role==s["driver"] else "navigator"
+    out=[f"BRIEF session={s['session_id']} role={role} as={rl} owner={s['owner']} phase={s['phase']} "
+         f"work={unit_label(s.get('work_unit'),s.get('unit_id'))} closed={len(units)}"]
+    task=" ".join(str(s.get("task") or "").split())
+    out.append("TASK "+(task[:300]+" …" if len(task)>300 else task))
+    for u in units[-5:]: out.append(f"CLOSED_UNIT {unit_label(u.get('work_unit'),u.get('unit_id'))} closed_at={u.get('closed_at')} head={u.get('closed_head')}")
+    if schema(s)==2 and len(participants(s))>2:
+        for mid,e in sorted(waiting_map(s).items()):
+            out.append(f"WAITING {mid} {e.get('kind')} from={e.get('from')} pending={','.join(e.get('pending') or []) or '-'}")
+    elif isinstance(s.get("waiting"),dict):
+        w=s["waiting"]; out.append("WAITING "+" ".join(f"{k}={v}" for k,v in sorted(w.items()) if isinstance(v,(str,int))))
+    if schema(s)==1:
+        x=unacked_range(mb,s,role)
+        if x: out.append(f"UNACKED #{x[0]}..#{x[1]}")
+    else:
+        u=unacked_v2(mb,s,role)
+        if u: out.append("UNACKED "+",".join(f"{snd}:{a}..{snd}:{b}" for snd,a,b in u))
+    rb,reviewed=review_brief(mb,s)
+    out+=rb
+    try:
+        tracked,dirty=changed_paths(repo,s.get("base_head") or "UNBORN",s.get("vcs") or mailbox_vcs(repo),mb.manifest(s))
+        since=sorted({x for x in tracked+dirty if x and x!=PAIR_DIR and not x.startswith(PAIR_DIR+"/")}-reviewed)
+    except (SystemExit,OSError): since=None
+    if since is None: out.append("CHANGED_SINCE unknown")
+    elif since: out+=bounded([f"CHANGED_SINCE {p}" for p in since],lambda k:f"CHANGED_SINCE MORE {k}: run git status")
+    return out
+
+def brief(a):
+    mb=MB(root(a.repo)); s=mb.active()
+    if not s or s.get("status")=="parked": print("NO_ACTIVE_SESSION",file=sys.stderr); return 1
+    if a.role not in participants(s): raise SystemExit(f"role not in active session (participants: {', '.join(participants(s))})")
+    print("\n".join(brief_lines(mb,s,a.role))); return 0
 
 def next_unit(a):
     """Close the current work unit and open the next one, atomically.
@@ -3027,6 +4020,7 @@ def next_unit(a):
     `complete` requires it — the unit is being closed either way."""
     repo=root(a.repo); mb=MB(repo); task=body(a).strip()
     if not task: raise SystemExit("the next work unit needs a task")
+    host_usage(a)
     with Lock(mb.lock):
         s=require(mb,a.role)
         if s["owner"]!=a.role: raise SystemExit("only the current owner may open the next work unit")
@@ -3071,13 +4065,18 @@ def next_unit(a):
         # per-role monotonic and two messages can share a wall-clock second.
         s["verdict_floor"]={r:int((readj(mb.latest(s,r),{}) or {}).get("seq",0)) for r in participants(s)}
         if schema(s)==2: s["authority"]=auth
+        s.pop("review",None)
         s["phase"]="huddle"; s["waiting"]=None; settle_status(s); s["updated_at"]=now(); mb.save(s)
     print(f"NEXT_UNIT session={s['session_id']} work={s['work_unit']} closed={done[-1]['work_unit']} units={len(done)+1}")
     print("REVIEW_INVALIDATED phase=huddle; a new peer AGREE is required before the next boundary or complete")
+    if getattr(a,"brief",False):
+        cur=mb.active()
+        if cur and cur["session_id"]==s["session_id"]: print("\n".join(brief_lines(mb,cur,a.role)))
     return 0
 
 def complete(a):
     mb=MB(root(a.repo))
+    host_usage(a)
     # Validate and close under one lock, on one session object. Re-reading
     # mb.active() inside the lock — as this did — closes whatever is current
     # rather than what was checked, so a park/start/resume landing between the
@@ -3085,6 +4084,10 @@ def complete(a):
     with Lock(mb.lock):
         s=require(mb,a.role)
         if s["owner"]!=a.role: raise SystemExit("only current owner may close")
+        # The same precondition as `next-unit` (spec U-3): ownership is unsettled
+        # while an offer stands, and closing over it left the session completed
+        # with the handoff still recorded.
+        if s.get("handoff"): raise SystemExit("a handoff is pending; settle ownership before completing the session")
         peer_agreed(mb,s,a.role)
         s["status"]="completed"; s["phase"]="complete"; s["waiting"]=None; s["updated_at"]=now(); mb.save(s)
     print(f"COMPLETED session={s['session_id']}"); return 0
@@ -3125,7 +4128,7 @@ def scan_sessions(mb,strict=False):
         why=None
         try:
             try: sf=session_file(d)
-            except SystemExit as e:
+            except SystemExit:
                 if strict: raise
                 continue
             sj=json.loads(sf.read_text(encoding="utf-8"))
@@ -3173,20 +4176,24 @@ def reparse(p):
     except FileNotFoundError: return False
     except (OSError,ValueError): return True
 
-def rmtree_no_links(p):
+def rmtree_no_links(p,keep=frozenset()):
     """Delete a tree, refusing to descend through any reparse point.
 
     `reparse` is asked before `is_dir`, always: `is_dir()` on a link stats its
     *target*, which is the step the no-follow contract says never happens. And a
     link that appears between preflight and here is refused rather than unlinked
     — preflight said this tree was safe, so anything new in it is a surprise, and
-    surprises during a delete are not resolved by deleting them."""
+    surprises during a delete are not resolved by deleting them.
+
+    Files in `keep` stay, and so does every directory above one: a purge's own
+    held role locks, which go only when it releases them."""
     if reparse(p): raise SystemExit(f"refusing to delete through a link: {p}")
     for child in sorted(p.iterdir()):
         if reparse(child): raise SystemExit(f"a link appeared under {p} after preflight: {child}; nothing further was deleted")
-        if child.is_dir(): rmtree_no_links(child)
+        if child in keep: continue
+        if child.is_dir(): rmtree_no_links(child,keep)
         else: child.unlink()
-    p.rmdir()
+    if not any(p in k.parents for k in keep): p.rmdir()
 
 def check_deletable(p):
     """Raise before anything is removed if this tree cannot be safely deleted."""
@@ -3194,6 +4201,59 @@ def check_deletable(p):
     for child in sorted(p.iterdir()):
         if reparse(child): raise SystemExit(f"refusing to delete through a link: {child}")
         if child.is_dir(): check_deletable(child)
+
+def hold_role_locks(d):
+    """Every role lock of session directory `d`, held for a purge (L-6: taken
+    after the state lock). Every role this build knows, not the record's own
+    list: a delete does not trust the record it is deleting. A session with no
+    journal directory has no writer to wait for, and a linked one is refused by
+    the delete itself, so nothing is created through it here."""
+    held=[]
+    if reparse(d) or reparse(d/"journal"): return held
+    try:
+        for r in PARTICIPANTS:
+            lk=Lock(d/"journal"/f"{r}.lock",make=False)
+            try: lk.__enter__()
+            except Gone: break
+            held.append(lk)
+    except BaseException:
+        release_after_failure(held); raise
+    return held
+
+def release(locks):
+    """Release every lock in `locks`, and return the ones that did not go
+    cleanly, as "<lock file> (<why>)". One failure must not leave the rest
+    held. A lock whose directory became a link since it was taken is only
+    closed: nothing is deleted through a link."""
+    bad=[]
+    for lk in locks:
+        try:
+            if reparse(lk.p.parent) or reparse(lk.p.parent.parent):
+                os.close(lk.fd); lk.fd=None; bad.append(f"{lk.p} (its directory became a link; the lock file was left)"); continue
+            lk.__exit__()
+        except OSError as e: bad.append(f"{lk.p} ({e.strerror or e})")
+    return bad
+
+def release_after_failure(locks):
+    """`release` while another failure is on its way out: a lock that would not
+    go is named on stderr, so the failure being raised stays the one reported."""
+    bad=release(locks)
+    if bad: print("could not release "+"; ".join(bad),file=sys.stderr)
+
+def rmdir_settled(p,wait=10):
+    """Remove the emptied directory `p`. A writer that takes a role lock the
+    purge has just released finds no record, refuses, and removes its lock file
+    again; wait for that, bounded as `Lock` is, rather than leave a directory
+    without a record behind."""
+    end=time.monotonic()+wait
+    while True:
+        try: p.rmdir(); return
+        except FileNotFoundError: return
+        except OSError as e:
+            if time.monotonic()>=end:
+                raise SystemExit(f"could not remove {p} after releasing its role locks ({e.strerror or e}); the session "
+                                 "record is already gone, so `orphans --remove` clears what is left") from None
+            time.sleep(.05)
 
 def sharing_worktrees(repo):
     """Other worktrees that resolve the same info/exclude as this one.
@@ -3253,7 +4313,7 @@ def purge(a):
             targets={k:v for k,v in known.items() if v.get("status") in TERMINAL}
         # A session written under rules this build does not speak may not mean
         # "finished" by the same word; deleting it on a guess is not undoable.
-        for k,v in targets.items(): check_protocol(v,f"session {k}")
+        for k,v in targets.items(): check_session(v,f"session {k}",envelope_of(mb.base/"sessions"/k))
         keep=[]
         for k,v in sorted(known.items()):
             st=v.get("status")
@@ -3330,23 +4390,39 @@ def purge(a):
         if novcs: plan.append("  n/a    no ignore-rule bookkeeping: this mailbox has no version control, so none was ever written")
         if not a.apply:
             print("DRY_RUN (nothing was changed; re-run with --apply)"); print("\n".join(plan)); return 0
-        # Pointer first. `active()` dereferences it, so a crash between the two
-        # leaves session directories with no pointer, which reads as a clean "no
-        # active session". The other order would leave the pointer naming a
-        # directory that is gone — a dangling reference every command follows.
-        if drop_ptr:
-            try: (mb.base/"active.json").unlink()
-            except FileNotFoundError: pass
-        for k in sorted(targets):
-            d=mb.base/"sessions"/k
-            if not os.path.lexists(d): continue
-            # Re-ask at delete time. A target swapped for a link after preflight
-            # is the whole reason the no-follow rule exists, and `is_dir()` here
-            # would follow it. A link to a *file* must refuse too, not be quietly
-            # skipped while teardown carries on and declares the mailbox finished.
-            if reparse(d): raise SystemExit(f"{d} became a link after preflight; nothing further was deleted")
-            if not d.is_dir(): raise SystemExit(f"{d} is no longer a directory; nothing further was deleted")
-            rmtree_no_links(d)
+        # Every target's role locks, under the state lock (L-6 allows that
+        # order) and all before anything is removed. A post that holds one
+        # finishes its append first; one that takes one afterwards finds its
+        # record gone and refuses (`MB.role_locked`). Without them a post in
+        # flight rebuilt the purged session directory as an orphan.
+        fences={}
+        try:
+            for k in sorted(targets): fences[k]=hold_role_locks(mb.base/"sessions"/k)
+            # Pointer first. `active()` dereferences it, so a crash between the two
+            # leaves session directories with no pointer, which reads as a clean "no
+            # active session". The other order would leave the pointer naming a
+            # directory that is gone — a dangling reference every command follows.
+            if drop_ptr:
+                try: (mb.base/"active.json").unlink()
+                except FileNotFoundError: pass
+            for k in sorted(targets):
+                d=mb.base/"sessions"/k
+                if not os.path.lexists(d): continue
+                # Re-ask at delete time. A target swapped for a link after preflight
+                # is the whole reason the no-follow rule exists, and `is_dir()` here
+                # would follow it. A link to a *file* must refuse too, not be quietly
+                # skipped while teardown carries on and declares the mailbox finished.
+                if reparse(d): raise SystemExit(f"{d} became a link after preflight; nothing further was deleted")
+                if not d.is_dir(): raise SystemExit(f"{d} is no longer a directory; nothing further was deleted")
+                # The held lock files outlast the rest of the session, its record
+                # included; they go by their own release, their directory after.
+                rmtree_no_links(d,keep={lk.p for lk in fences[k]})
+                bad=release(fences.pop(k))
+                if bad: raise SystemExit(f"could not release {'; '.join(bad)}; the session record is already gone, "
+                                         "so `orphans --remove` clears what is left")
+                rmdir_settled(d/"journal"); rmdir_settled(d)
+        except BaseException:
+            release_after_failure([lk for held in fences.values() for lk in held]); raise
         removed_rule=False
         if last and marked:
             # info/exclude can be shared: a linked worktree resolves it through
@@ -3496,7 +4572,7 @@ def resume(a):
         else:
             raise SystemExit("ambiguous; pass --session <id>:\n"+"\n".join(
                 f"  {k} {v['work_unit']} parked_at={v.get('parked_at')}" for k,v in parked.items()))
-        check_protocol(s,f"parked session {s.get('session_id')}")
+        check_session(s,f"parked session {s.get('session_id')}",envelope_of(mb.base/"sessions"/s["session_id"]))
         before=s.get("parked_tree") or {}
         # Pointer first, while the target still reads parked. MB.save writes
         # session.json before active.json, so reactivating with it would leave a
@@ -3550,6 +4626,10 @@ def resume(a):
             print(f"COMPANION_CHANGED {c['name']} head {was.get('head')} -> {live.get('head')} dirty {len(was.get('status') or [])} -> {len(live.get('status') or [])}")
     return 0
 
+def review_pending_line(s):
+    return (f"REVIEW_PENDING request={s['review']['request']} digest={s['review']['digest']}: an edit now changes the reviewed set; "
+            "post a new REVIEW_REQUEST or run review-withdraw")
+
 def cmd_post(a):
     mb=MB(root(a.repo)); b=body(a)
     # Addressing is validated by `MB.post` on the snapshot it appends under.
@@ -3565,11 +4645,19 @@ def cmd_post(a):
     if not b.strip(): raise SystemExit("refusing to post an empty message; a body that failed to render is worse than no post, because the peer treats it as a real turn")
     if a.ack_through is not None:
         with Lock(mb.lock): apply_ack(mb,require(mb,a.role,allow_paused=True),a.role,a.ack_through)
-    m=mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward,
+    mb.post(a.role,a.kind,b,a.expect_reply,to=a.to,reply_to=a.reply_to,broadcast=a.broadcast,forward=a.forward,
               expect_sid=s0["session_id"] if refs else None,extra={"actor":getattr(a,"actor",None),"artifacts":refs})
     # stderr, so a successful post stays silent on stdout. Not an ack: a post
     # proves the model is active, not that it saw what some watcher printed.
     s=mb.active()
+    if s and s["session_id"] and snapshot_on(s) and s.get("owner")==a.role:
+        if a.kind=="REVIEW_REQUEST":
+            rv=s.get("review") or {}
+            bad=snapshot_problems(s,rv.get("trees") or {})
+            if bad: print(f"REVIEW_SNAPSHOT_UNSUPPORTED paths={','.join(bad)} (a close will refuse until they are regular files, links or gone)",file=sys.stderr)
+            st=unresolved_steers(mb,s,a.role)
+            if st: print(f"UNRESOLVED_STEER {','.join(st)} (name each in a post: --reply-to it, or its id in the body)",file=sys.stderr)
+        elif s.get("review"): print(review_pending_line(s),file=sys.stderr)
     if s and s["session_id"]:
         if schema(s)==1:
             r=unacked_range(mb,s,a.role)
@@ -3599,9 +4687,9 @@ def named_or_active(mb,sid):
         base=mb.base/"sessions"
         known={d.name for d in base.iterdir()} if base.is_dir() else set()
         if sid not in known: raise SystemExit(f"unknown session {sid!r}")
-        s=readj(session_file(base/sid))
+        sf=session_file(base/sid); s=readj(sf)
         if not s: raise SystemExit(f"unknown session {sid!r}")
-        return check_protocol(s,f"session {sid}")
+        return check_session(s,f"session {sid}",2 if sf.name==SESSION_V2 else 1)
     s=mb.active()
     if not s: raise SystemExit("NO_ACTIVE_SESSION")
     return s
@@ -3678,7 +4766,7 @@ def orphan_reason(d,live):
         raise SystemExit(f"session directory {d.name!r} does not hold its own session record; refusing to judge it")
     # A record this build cannot operate is refused before it is judged (V-3),
     # so a newer build's session is never read as abandoned work.
-    check_protocol(s,f"session {d.name}")
+    check_session(s,f"session {d.name}",2 if sf.name==SESSION_V2 else 1)
     st=s.get("status")
     if st not in ("active","paused","parked","completed","abandoned"):
         raise SystemExit(f"session directory {d.name!r} has an unknown status {st!r}; refusing to judge it")
@@ -3748,7 +4836,7 @@ def transcript(a):
 
 def parser():
     p=argparse.ArgumentParser(); p.add_argument("--repo"); sp=p.add_subparsers(dest="cmd",required=True)
-    def rc(n): q=sp.add_parser(n); q.add_argument("--role",choices=PARTICIPANTS,required=True); return q
+    def rc(n): q=sp.add_parser(n); q.add_argument("--role",type=participant,required=True); return q
     q=rc("start"); q.add_argument("--task",dest="body"); q.add_argument("--task-file",dest="body_file"); q.add_argument("--work-unit")
     q.add_argument("--with",dest="with_",help="the other participant(s), comma-separated; default: the historic claude/codex partner")
     q.add_argument("--advisers",help="non-owner participant(s) who advise but need not agree; default: none, so every non-owner is a required reviewer")
@@ -3757,6 +4845,12 @@ def parser():
     # told again — and cannot be told a different one.
     q.add_argument("--no-vcs",action="store_true",help="anchor ownership to a content digest of this directory instead of Git HEAD; refused inside a Git working tree")
     q.add_argument("--context-summaries",action="store_true",help="opt into advisory LocalMind session summaries")
+    q.add_argument("--signoff",choices=SIGNOFFS,default="strict",
+                   help="how complete and next-unit read a VERDICT, frozen for the session: strict (default) counts the tokens of its "
+                        "first line (spec M-6a); legacy accepts any first line starting `AGREE ` and keeps the claude/codex pair on "
+                        "schema 1, for a peer on an older build")
+    q.add_argument("--review-snapshot",action="store_true",
+                   help="close a unit only on the exact bytes its reviewers saw; every participant must run a build with this feature")
     q.set_defaults(fn=start)
     q=rc("join"); q.add_argument("--timeout",type=int,default=0); q.add_argument("--poll",type=float,default=1); q.set_defaults(fn=join)
     q=rc("post"); q.add_argument("--kind",choices=sorted(KINDS),required=True); q.add_argument("--body"); q.add_argument("--body-file"); q.add_argument("--expect-reply",action="store_true")
@@ -3774,10 +4868,13 @@ def parser():
     q=rc("ack"); q.add_argument("--through",required=True,help="N, or sender:N[,sender:N]"); q.set_defaults(fn=ack)
     q=rc("health"); q.add_argument("--status",choices=sorted(HEALTH),required=True); q.add_argument("--reason"); q.add_argument("--resume-at"); q.set_defaults(fn=health)
     q=sp.add_parser("status"); q.set_defaults(fn=status)
-    q=sp.add_parser("usage"); q.add_argument("--role",choices=PARTICIPANTS); q.add_argument("--report-id"); q.add_argument("--session")
+    q=sp.add_parser("brief"); q.add_argument("--role",required=True,type=participant); q.set_defaults(fn=brief)
+    q=sp.add_parser("usage"); q.add_argument("--role",type=participant); q.add_argument("--report-id"); q.add_argument("--session")
     for f in ("input-tokens","output-tokens","cache-creation-input-tokens","cache-read-input-tokens"):
         q.add_argument("--"+f,type=int,default=0)
-    q.add_argument("--cost-microusd",type=int); q.add_argument("--limit-percent",type=int); q.set_defaults(fn=usage)
+    q.add_argument("--cost-microusd",type=int); q.add_argument("--limit-percent",type=int)
+    q.add_argument("--activity",choices=("waiting","work"))
+    q.add_argument("--expect-session"); q.add_argument("--expect-unit"); q.set_defaults(fn=usage)
     q=rc("takeover-authorize"); q.add_argument("--to",required=True); q.add_argument("--duty",choices=("owner","reviewer"),required=True); q.add_argument("--revoke",action="store_true"); q.set_defaults(fn=takeover_authorize)
     q=rc("takeover"); q.add_argument("--from",dest="from_role",required=True); q.add_argument("--duty",choices=("owner","reviewer"),required=True); q.set_defaults(fn=takeover)
     q=rc("summary"); q.set_defaults(fn=summary)
@@ -3798,18 +4895,20 @@ def parser():
     q.add_argument("--tests",help="with --pack: run this command and record its exit code and last lines")
     q.set_defaults(fn=verify_request)
     q=rc("next-unit"); q.add_argument("--task",dest="body"); q.add_argument("--task-file",dest="body_file"); q.add_argument("--work-unit")
+    q.add_argument("--brief",action="store_true")
     q.add_argument("--advisers",help="advisers for the new unit, or 'none'; default: the current unit's advisers")
     q.set_defaults(fn=next_unit)
     q=rc("complete"); q.set_defaults(fn=complete)
+    q=rc("review-withdraw"); q.add_argument("--reason"); q.set_defaults(fn=review_withdraw)
     q=rc("abandon"); q.add_argument("--reason"); q.set_defaults(fn=abandon)
     q=rc("purge"); g=q.add_mutually_exclusive_group(); g.add_argument("--session"); g.add_argument("--all-closed",action="store_true"); q.add_argument("--apply",action="store_true"); q.set_defaults(fn=purge)
     q=rc("park"); q.add_argument("--reason"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=park)
     q=rc("resume"); q.add_argument("--session"); q.add_argument("--actor",choices=sorted(ACTORS)); q.set_defaults(fn=resume)
     q=sp.add_parser("transcript"); q.add_argument("--session"); q.set_defaults(fn=transcript)
-    q=sp.add_parser("replay"); q.add_argument("--session"); q.add_argument("--only",choices=PARTICIPANTS,metavar="ROLE"); q.set_defaults(fn=replay)
+    q=sp.add_parser("replay"); q.add_argument("--session"); q.add_argument("--only",type=participant,metavar="ROLE"); q.set_defaults(fn=replay)
     q=sp.add_parser("orphans"); q.add_argument("--remove",metavar="SESSION"); q.set_defaults(fn=orphans)
     q=sp.add_parser("artifact"); asp=q.add_subparsers(dest="artifact_op",required=True)
-    r=asp.add_parser("put"); r.add_argument("--role",choices=PARTICIPANTS,required=True); r.add_argument("--type",required=True)
+    r=asp.add_parser("put"); r.add_argument("--role",type=participant,required=True); r.add_argument("--type",required=True)
     r.add_argument("--meta"); r.add_argument("paths",nargs="+"); r.set_defaults(fn=artifact_put)
     r=asp.add_parser("list"); r.add_argument("--session"); r.set_defaults(fn=artifact_list)
     r=asp.add_parser("show"); r.add_argument("id"); r.add_argument("--session"); r.set_defaults(fn=artifact_show)

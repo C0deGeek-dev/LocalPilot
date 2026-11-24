@@ -12,7 +12,6 @@ use std::process::Command;
 use localpilot_mesh::ops::push::Transport;
 use localpilot_mesh::ops::PostArgs;
 use localpilot_mesh::{Mailbox, Mesh};
-use serde_json::Value;
 
 fn reference() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -99,11 +98,12 @@ fn a_message_in_the_journal_is_owed_its_wake_even_if_the_post_then_fails() {
             &address,
         ],
     );
-    let active: Value = serde_json::from_str(
-        &std::fs::read_to_string(anchor.join(".pair-programming").join("active.json")).unwrap(),
-    )
-    .unwrap();
-    let sid = active["session_id"].as_str().unwrap().to_owned();
+    // The reference starts a strict, schema-2 session by default, so the
+    // session is found through its pointer, not by reading `active.json`.
+    let sid = localpilot_mesh::session::pointer(&Mailbox::at(anchor))
+        .unwrap()
+        .expect("an active session")
+        .session_id;
     // Break the step after the append: `latest` stays readable (the post
     // reads it first) but cannot be replaced.
     let latest = Mailbox::at(anchor).latest(&sid, "codex");

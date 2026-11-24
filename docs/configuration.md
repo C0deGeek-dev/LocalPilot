@@ -434,9 +434,31 @@ of finding the mail on its next look:
 | `2` | A usage error, or the delegate writer is selected. |
 | `4` | The session cannot host the engine (the reason is on stderr). |
 
+#### Sign-off and participant instances
+
+The native participant implements mailbox protocol 1.4 and its required
+`strict-signoff` and `participant-instances` features. The reference starts
+every session with strict sign-off unless `--signoff legacy` is given: such a
+session is schema 2 even for the Claude Code and Codex pair, and a unit closes
+(`complete`, `next-unit`, or the engine's own close as owner) only on a
+`VERDICT` whose first line is a strict agreement, such as
+`AGREE round=1 blocking=0 important=0`. `AGREE` must be the first token and
+`round=<n>` the second; `round`, `blocking` and `important` appear at most
+once, in lowercase, with ASCII-digit values, `round` above zero and
+`blocking` zero. Free text such as `AGREE but the crash is open` never closes
+a strict unit. A legacy session, and every session started before strict
+sign-off existed, keeps the older rule: any `VERDICT` whose first line starts
+`AGREE `. A session record that claims strict sign-off in any other shape, or
+names a sign-off policy this build does not know, is refused without change.
+
+A participant may be a host name with an instance suffix, such as `codex-sol`
+beside `codex`, when its session requires `participant-instances`. Instance
+names are 1 to 32 lowercase ASCII letters or digits after the host and a
+hyphen; any other participant name is refused.
+
 #### Artifacts, usage, quota takeover, and advisory context
 
-The native participant implements mailbox protocol 1.2. Mail can carry
+Mail can carry
 `--artifact <sha256-id>` references; every attached bundle is verified before
 posting and shown when mail is read. Immutable artifact creation and extraction
 remain reference operations: use `pair.py artifact put|list|show|get` or

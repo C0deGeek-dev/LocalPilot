@@ -1,0 +1,827 @@
+{
+ "id": "instances-same-host-pair-reviews-and-completes",
+ "profiles": [
+  "n-party"
+ ],
+ "layers": [
+  "cli",
+  "state"
+ ],
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "codex-sol",
+    "--with",
+    "codex",
+    "--task",
+    "fixture task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=codex work=fixture-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "codex-sol",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/codex-sol.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "codex-sol": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/codex-sol.json": {
+     "role": "codex-sol",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "not_joined",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "codex-sol",
+     "owner": "codex-sol",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "codex-sol": [
+       "ack"
+      ]
+     },
+     "delivery": "print",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "participant-instances",
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "codex",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=codex-sol work=fixture-task\nANCHOR=<REPO> source=flag\nTASK:\nfixture task\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "codex-sol",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/codex-sol.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "codex-sol": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/codex-sol.json": {
+     "role": "codex-sol",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "codex-sol",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "codex-sol"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "codex-sol",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "codex-sol"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "codex-sol",
+     "owner": "codex-sol",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "codex-sol": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "participant-instances",
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "codex",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "codex-sol",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/codex-sol.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "codex-sol": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/codex-sol.json": {
+     "role": "codex-sol",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "codex-sol",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "codex-sol"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1",
+      "owner": "codex-sol",
+      "msg_id": "codex:2",
+      "to": [
+       "codex-sol"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1",
+     "owner": "codex-sol",
+     "msg_id": "codex:2",
+     "to": [
+      "codex-sol"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:2",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "codex-sol",
+     "owner": "codex-sol",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "codex-sol": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "participant-instances",
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex-sol"
+   ],
+   "rc": 0,
+   "stdout": "COMPLETED session=<SID>\n",
+   "stderr": "",
+   "state": {
+    "sessions/<SID>/cursor/codex-sol.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "codex-sol": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/codex-sol.json": {
+     "role": "codex-sol",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "codex-sol",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "codex-sol"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1",
+      "owner": "codex-sol",
+      "msg_id": "codex:2",
+      "to": [
+       "codex-sol"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1",
+     "owner": "codex-sol",
+     "msg_id": "codex:2",
+     "to": [
+      "codex-sol"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:2",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "codex-sol",
+     "owner": "codex-sol",
+     "ownership_epoch": 1,
+     "status": "completed",
+     "phase": "complete",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "codex-sol": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "participant-instances",
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "codex-sol",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  }
+ ],
+ "final_state": {
+  "sessions/<SID>/cursor/codex-sol.json": {
+   "from": {
+    "codex": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/cursor/codex.json": {
+   "from": {
+    "codex-sol": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/health/codex-sol.json": {
+   "role": "codex-sol",
+   "status": "ready",
+   "generation": 1,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/health/codex.json": {
+   "role": "codex",
+   "status": "ready",
+   "generation": 2,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/journal/codex.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "HELLO",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "joined; navigator ready",
+    "owner": "codex-sol",
+    "protocol": "1.4",
+    "msg_id": "codex:1",
+    "to": [
+     "codex-sol"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "codex:1",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1",
+    "owner": "codex-sol",
+    "msg_id": "codex:2",
+    "to": [
+     "codex-sol"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "codex:2",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
+   }
+  ],
+  "sessions/<SID>/latest/codex.json": {
+   "seq": 2,
+   "at": "<TS>",
+   "role": "codex",
+   "kind": "VERDICT",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "AGREE round=1",
+   "owner": "codex-sol",
+   "msg_id": "codex:2",
+   "to": [
+    "codex-sol"
+   ],
+   "reply_to": null,
+   "broadcast": false,
+   "thread_id": "codex:2",
+   "route_trace": [
+    "codex"
+   ],
+   "ttl": null,
+   "forward": false
+  },
+  "sessions/<SID>/session.v2.json": {
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "codex-sol",
+   "owner": "codex-sol",
+   "ownership_epoch": 1,
+   "status": "completed",
+   "phase": "complete",
+   "waiting": null,
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "codex-sol": [
+     "ack"
+    ],
+    "codex": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.4",
+   "signoff": "strict",
+   "created_at": "<TS>",
+   "updated_at": "<TS>",
+   "requires": [
+    "participant-instances",
+    "strict-signoff"
+   ],
+   "schema": 2,
+   "participants": [
+    "codex-sol",
+    "codex"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "codex"
+    ],
+    "advisers": []
+   },
+   "pauses": {}
+  },
+  "vcs.json": {
+   "vcs": "git",
+   "recorded_at": "<TS>"
+  }
+ },
+ "provenance": {
+  "build": "8aa6e19c845c:pair.py",
+  "sha12": "06f9d9b5428c",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ }
+}

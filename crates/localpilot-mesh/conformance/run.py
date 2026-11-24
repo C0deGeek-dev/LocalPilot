@@ -222,6 +222,10 @@ def snapshot(root: Path) -> dict:
         if not p.is_file():
             continue
         rel = normalise_text(relabel(p.relative_to(base).as_posix()), root)
+        # Participant builds are informational, never protocol state, and
+        # differ by install: no implementation is held to them here.
+        if re.match(r"^sessions/[^/]+/builds/", rel):
+            continue
         raw = relabel(p.read_bytes().decode("utf-8", errors="replace"))
         if p.suffix == ".jsonl":
             out[rel] = journal_entries(raw, root)
@@ -503,19 +507,46 @@ def raw_step(root: Path, op: dict) -> None:
 
 
 def resolve_session_path(root: Path, rel: str) -> str:
-    """`raw` paths may say <SID> for the active session's id."""
-    if "<SID>" not in rel:
+    """`raw` paths may say <SID> for the active session's id, and <RECORD> for
+    that session's record file: `session.v2.json` or `session.json`, whichever
+    the build that started it wrote. One step then damages the real record in a
+    legacy view too, where an older build starts the same pair on schema 1."""
+    if "<SID>" not in rel and "<RECORD>" not in rel:
         return rel
     base = root / MAILBOX
     ptr = base / "active.v2.json"
     if not ptr.exists():
         ptr = base / "active.json"
-    sid = json.loads(ptr.read_text(encoding="utf-8"))["session_id"]
+    if ptr.exists():
+        try:
+            sid = json.loads(ptr.read_text(encoding="utf-8")).get("session_id")
+        except (ValueError, AttributeError):
+            sid = None
+        # A schema-2 sentinel left without its pointer, or a damaged pointer:
+        # following it would be a guess.
+        if not isinstance(sid, str) or not sid:
+            raise Refused(f"RAW_PATH_REFUSED <SID>: {ptr.name} names no session")
+    else:
+        # A schema-2 session that is parked or closed holds no pointer at all
+        # (spec S-7); with one session in the mailbox it is still unambiguous.
+        found = sorted(d.name for d in (base / "sessions").iterdir() if d.is_dir()) if (base / "sessions").is_dir() else []
+        if len(found) != 1:
+            raise Refused(f"RAW_PATH_REFUSED <SID> has no pointer to follow and {len(found)} sessions to choose from")
+        sid = found[0]
+    if "<RECORD>" in rel:
+        found = [n for n in ("session.v2.json", "session.json") if (base / "sessions" / sid / n).is_file()]
+        if len(found) != 1:
+            raise Refused(f"RAW_PATH_REFUSED <RECORD> needs exactly one session record for the active session, found {found}")
+        rel = rel.replace("<RECORD>", found[0])
     return rel.replace("<SID>", sid)
 
 
 def new_root(vcs: str) -> Path:
-    root = Path(tempfile.mkdtemp(prefix="pair-conformance-")).resolve()
+    # Keep the prefix short. A stored artifact blob lies about 200 characters
+    # below this root, and with the default Windows temp directory a longer
+    # prefix pushes that path past the 260-character Win32 limit, where readers
+    # can no longer open it.
+    root = Path(tempfile.mkdtemp(prefix="pc-")).resolve()
     here = Path.cwd().resolve()
     if _inside(root, here):
         remove_tree(root)
@@ -677,6 +708,8 @@ def clear_setup() -> None:
 def child_env(extra: dict | None = None) -> dict:
     e = dict(os.environ)
     e.pop("PAIR_REPO", None)  # never let a step reach the live repository
+    e["PAIR_HOST_USAGE"] = "off"  # nor the user's host-usage recording
+    e.pop("CODEX_THREAD_ID", None)  # inside Codex, start/join would add a notifier hint to pinned stderr
     for k in STEP_ENV:
         e.pop(k, None)
     for k, v in (extra or {}).items():
@@ -806,12 +839,24 @@ def fixture_roles(fx: dict) -> set:
     return roles
 
 
+# start flags that turn on a session feature a native participant need not
+# implement yet (the session then requires it, and such a participant refuses).
+OPTIONAL_FEATURE_FLAGS = {"--review-snapshot"}
+
+
 def participant_selection(fx: dict, native: list) -> tuple:
     """(roles run natively, None) when the fixture fits the participant
     profile, or (None, reason) when it does not."""
     roles = [r for r in native if r in fixture_roles(fx)]
     if not roles:
         return None, f"none of {','.join(native)} takes part"
+    # A session feature that a native participant may not implement yet is
+    # opt-in at start, so its fixtures are not mandatory for that profile.
+    for st in fx["steps"]:
+        for cmd in ([st["cmd"]] if "cmd" in st else st.get("parallel", [])):
+            used = sorted(OPTIONAL_FEATURE_FLAGS & set(cmd))
+            if used:
+                return None, f"uses the optional feature {used[0]}"
     for st in fx["steps"]:
         for cmd in ([st["cmd"]] if "cmd" in st else st.get("parallel", [])):
             role = cmd[cmd.index("--role") + 1] if "--role" in cmd else OBSERVER

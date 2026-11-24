@@ -818,7 +818,16 @@ async fn a_schema_one_session_is_refused() {
         "--reason",
         "restart as a pair",
     ]);
-    f.reference(&["start", "--role", "claude", "--task", "pair"]);
+    // Only a legacy historic pair is schema 1; a strict one is schema 2.
+    f.reference(&[
+        "start",
+        "--role",
+        "claude",
+        "--task",
+        "pair",
+        "--signoff",
+        "legacy",
+    ]);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_localpilot"));
     cmd.arg("mesh")
         .arg("--repo")
@@ -3514,7 +3523,15 @@ async fn a_two_party_mcp_verdict_validates_reply_to_but_posts_without_it() {
     };
     // Replace the three-party session with a historic pair (schema 1).
     f.reference(&["park", "--role", "claude", "--reason", "two-party test"]);
-    f.reference(&["start", "--role", "claude", "--task", "pair"]);
+    f.reference(&[
+        "start",
+        "--role",
+        "claude",
+        "--task",
+        "pair",
+        "--signoff",
+        "legacy",
+    ]);
     f.reference(&["join", "--role", "codex", "--timeout", "1"]);
     std::fs::write(f.anchor.join("a.txt"), "beta\n").unwrap();
     let body = format!(

@@ -1,0 +1,8747 @@
+{
+ "id": "signoff-strict-pair-complete-needs-a-strict-agree",
+ "profiles": [
+  "two-party",
+  "signoff"
+ ],
+ "layers": [
+  "cli",
+  "state"
+ ],
+ "steps": [
+  {
+   "cmd": [
+    "start",
+    "--role",
+    "claude",
+    "--task",
+    "fixture task"
+   ],
+   "rc": 0,
+   "stdout": "STARTED session=<SID> role=driver peer=codex work=fixture-task\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "not_joined",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ]
+     },
+     "delivery": "print",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "join",
+    "--role",
+    "codex",
+    "--timeout",
+    "1"
+   ],
+   "rc": 0,
+   "stdout": "JOINED session=<SID> role=navigator peer=claude work=fixture-task\nANCHOR=<REPO> source=flag\nTASK:\nfixture task\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "handoff-offer",
+    "--role",
+    "claude"
+   ],
+   "rc": 0,
+   "stdout": "HANDOFF_OFFERED epoch=2 to=codex\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "claude:1",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false,
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HELLO",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "joined; navigator ready",
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "codex:1",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": true,
+     "thread_id": "codex:1",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "claude",
+     "ownership_epoch": 1,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": {
+      "claude:1": {
+       "from": "claude",
+       "kind": "HANDOFF_OFFER",
+       "since": "<TS>",
+       "pending": [
+        "codex"
+       ],
+       "answered_by": []
+      }
+     },
+     "handoff": {
+      "epoch": 2,
+      "from": "claude",
+      "to": "codex",
+      "offer_id": "<OFFER>",
+      "head": "<SHA>",
+      "status": [],
+      "companions": [],
+      "offered_at": "<TS>"
+     },
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "codex"
+      ],
+      "advisers": []
+     },
+     "pauses": {}
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "handoff-accept",
+    "--role",
+    "codex"
+   ],
+   "rc": 0,
+   "stdout": "HANDOFF_ACCEPTED epoch=2 owner=codex\n",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "claude:1",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false,
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "HANDOFF_ACCEPT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "epoch=2 head=<SHA>",
+     "owner": "codex",
+     "msg_id": "codex:2",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:2",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "codex",
+    "--kind",
+    "REVIEW_REQUEST",
+    "--body",
+    "please review"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 1,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "HANDOFF_OFFER",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": true,
+     "body": "epoch=2 to=codex head=<SHA> dirty=0",
+     "owner": "claude",
+     "protocol": "1.4",
+     "msg_id": "claude:1",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:1",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false,
+     "offer_id": "<OFFER>"
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 blocking=1 important=0"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=1 important=0",
+     "owner": "codex",
+     "msg_id": "claude:2",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:2",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #2 \"AGREE round=1 blocking=1 important=0\": blocking=1 reports a blocker; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 2,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=1 important=0",
+     "owner": "codex",
+     "msg_id": "claude:2",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:2",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE but the crash is open"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE but the crash is open",
+     "owner": "codex",
+     "msg_id": "claude:3",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:3",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #3 \"AGREE but the crash is open\": its second token is not round=<n>; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE but the crash is open",
+     "owner": "codex",
+     "msg_id": "claude:3",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:3",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 4,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE",
+     "owner": "codex",
+     "msg_id": "claude:4",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:4",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #4 \"AGREE\": its second token is not round=<n>; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 4,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE",
+     "owner": "codex",
+     "msg_id": "claude:4",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:4",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 blocking=x"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 5,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=x",
+     "owner": "codex",
+     "msg_id": "claude:5",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:5",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #5 \"AGREE round=1 blocking=x\": blocking=x has no ASCII-digit value; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 5,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=x",
+     "owner": "codex",
+     "msg_id": "claude:5",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:5",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=0"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 6,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=0",
+     "owner": "codex",
+     "msg_id": "claude:6",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:6",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #6 \"AGREE round=0\": round=0 is not above zero; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 6,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=0",
+     "owner": "codex",
+     "msg_id": "claude:6",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:6",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 round=2"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 7,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 round=2",
+     "owner": "codex",
+     "msg_id": "claude:7",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:7",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #7 \"AGREE round=1 round=2\": round= appears twice; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 7,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 round=2",
+     "owner": "codex",
+     "msg_id": "claude:7",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:7",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 blocking=0 blocking=0"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 8,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=0 blocking=0",
+     "owner": "codex",
+     "msg_id": "claude:8",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:8",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #8 \"AGREE round=1 blocking=0 blocking=0\": blocking= appears twice; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 8,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=0 blocking=0",
+     "owner": "codex",
+     "msg_id": "claude:8",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:8",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 important=1 important=2"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 9,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 important=1 important=2",
+      "owner": "codex",
+      "msg_id": "claude:9",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:9",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 9,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 important=1 important=2",
+     "owner": "codex",
+     "msg_id": "claude:9",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:9",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "peer's latest decision is not a strict AGREE: VERDICT #9 \"AGREE round=1 important=1 important=2\": important= appears twice; strict sign-off needs a VERDICT whose first line starts `AGREE round=<n>` with n above zero, names round=, blocking= and important= at most once each with ASCII-digit values, and gives blocking=0 if any [anchor=<REPO> source=flag]\n",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 9,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 important=1 important=2",
+      "owner": "codex",
+      "msg_id": "claude:9",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:9",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 9,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 important=1 important=2",
+     "owner": "codex",
+     "msg_id": "claude:9",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:9",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "post",
+    "--role",
+    "claude",
+    "--kind",
+    "VERDICT",
+    "--body",
+    "AGREE round=1 blocking=0 important=2"
+   ],
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "state": {
+    "active.json": {
+     "$text": "N-PARTY SESSION <SID>: this mailbox needs a pair-programming build that supports N-party sessions. See active.v2.json.\n"
+    },
+    "active.v2.json": {
+     "session_id": "<SID>",
+     "driver": "claude",
+     "status": "active",
+     "updated_at": "<TS>",
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "schema": 2
+    },
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 9,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 important=1 important=2",
+      "owner": "codex",
+      "msg_id": "claude:9",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:9",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 10,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 important=2",
+      "owner": "codex",
+      "msg_id": "claude:10",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:10",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 10,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=0 important=2",
+     "owner": "codex",
+     "msg_id": "claude:10",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:10",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "active",
+     "phase": "huddle",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "complete",
+    "--role",
+    "codex"
+   ],
+   "rc": 0,
+   "stdout": "COMPLETED session=<SID>\n",
+   "stderr": "",
+   "state": {
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 9,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 important=1 important=2",
+      "owner": "codex",
+      "msg_id": "claude:9",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:9",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 10,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 important=2",
+      "owner": "codex",
+      "msg_id": "claude:10",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:10",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 10,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=0 important=2",
+     "owner": "codex",
+     "msg_id": "claude:10",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:10",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "completed",
+     "phase": "complete",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  },
+  {
+   "cmd": [
+    "status"
+   ],
+   "rc": 1,
+   "stdout": "NO_ACTIVE_SESSION\nANCHOR=<REPO> source=flag\n",
+   "stderr": "",
+   "state": {
+    "sessions/<SID>/cursor/claude.json": {
+     "from": {
+      "codex": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/cursor/codex.json": {
+     "from": {
+      "claude": {
+       "peer_seq": 0,
+       "delivered_seq": 0,
+       "delivered_counts": {}
+      }
+     },
+     "health": {},
+     "stale_marks": []
+    },
+    "sessions/<SID>/health/claude.json": {
+     "role": "claude",
+     "status": "ready",
+     "generation": 1,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/health/codex.json": {
+     "role": "codex",
+     "status": "ready",
+     "generation": 2,
+     "updated_at": "<TS>",
+     "reason": null,
+     "resume_at": null
+    },
+    "sessions/<SID>/journal/claude.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "HANDOFF_OFFER",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": true,
+      "body": "epoch=2 to=codex head=<SHA> dirty=0",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "claude:1",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:1",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false,
+      "offer_id": "<OFFER>"
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=1 important=0",
+      "owner": "codex",
+      "msg_id": "claude:2",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:2",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE but the crash is open",
+      "owner": "codex",
+      "msg_id": "claude:3",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:3",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 4,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE",
+      "owner": "codex",
+      "msg_id": "claude:4",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:4",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 5,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=x",
+      "owner": "codex",
+      "msg_id": "claude:5",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:5",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 6,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=0",
+      "owner": "codex",
+      "msg_id": "claude:6",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:6",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 7,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 round=2",
+      "owner": "codex",
+      "msg_id": "claude:7",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:7",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 8,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 blocking=0",
+      "owner": "codex",
+      "msg_id": "claude:8",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:8",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 9,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 important=1 important=2",
+      "owner": "codex",
+      "msg_id": "claude:9",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:9",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 10,
+      "at": "<TS>",
+      "role": "claude",
+      "kind": "VERDICT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "AGREE round=1 blocking=0 important=2",
+      "owner": "codex",
+      "msg_id": "claude:10",
+      "to": [
+       "codex"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "claude:10",
+      "route_trace": [
+       "claude"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/journal/codex.jsonl": [
+     {
+      "seq": 1,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HELLO",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "joined; navigator ready",
+      "owner": "claude",
+      "protocol": "1.4",
+      "msg_id": "codex:1",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": true,
+      "thread_id": "codex:1",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 2,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "HANDOFF_ACCEPT",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "epoch=2 head=<SHA>",
+      "owner": "codex",
+      "msg_id": "codex:2",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:2",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     },
+     {
+      "seq": 3,
+      "at": "<TS>",
+      "role": "codex",
+      "kind": "REVIEW_REQUEST",
+      "work_unit": "fixture-task",
+      "unit_id": "1-<U>",
+      "expect_reply": false,
+      "body": "please review",
+      "owner": "codex",
+      "msg_id": "codex:3",
+      "to": [
+       "claude"
+      ],
+      "reply_to": null,
+      "broadcast": false,
+      "thread_id": "codex:3",
+      "route_trace": [
+       "codex"
+      ],
+      "ttl": null,
+      "forward": false
+     }
+    ],
+    "sessions/<SID>/latest/claude.json": {
+     "seq": 10,
+     "at": "<TS>",
+     "role": "claude",
+     "kind": "VERDICT",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "AGREE round=1 blocking=0 important=2",
+     "owner": "codex",
+     "msg_id": "claude:10",
+     "to": [
+      "codex"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "claude:10",
+     "route_trace": [
+      "claude"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/latest/codex.json": {
+     "seq": 3,
+     "at": "<TS>",
+     "role": "codex",
+     "kind": "REVIEW_REQUEST",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "expect_reply": false,
+     "body": "please review",
+     "owner": "codex",
+     "msg_id": "codex:3",
+     "to": [
+      "claude"
+     ],
+     "reply_to": null,
+     "broadcast": false,
+     "thread_id": "codex:3",
+     "route_trace": [
+      "codex"
+     ],
+     "ttl": null,
+     "forward": false
+    },
+    "sessions/<SID>/session.v2.json": {
+     "session_id": "<SID>",
+     "task": "fixture task",
+     "work_unit": "fixture-task",
+     "unit_id": "1-<U>",
+     "driver": "claude",
+     "owner": "codex",
+     "ownership_epoch": 2,
+     "status": "completed",
+     "phase": "complete",
+     "waiting": null,
+     "handoff": null,
+     "vcs": "git",
+     "base_head": "<SHA>",
+     "base_status": [],
+     "companions": [],
+     "absent_companions": [],
+     "caps": {
+      "claude": [
+       "ack"
+      ],
+      "codex": [
+       "ack"
+      ]
+     },
+     "delivery": "ack",
+     "protocol": "1.4",
+     "signoff": "strict",
+     "created_at": "<TS>",
+     "updated_at": "<TS>",
+     "requires": [
+      "strict-signoff"
+     ],
+     "schema": 2,
+     "participants": [
+      "claude",
+      "codex"
+     ],
+     "authority": {
+      "required_reviewers": [
+       "claude"
+      ],
+      "advisers": []
+     },
+     "pauses": {},
+     "verdict_floor": {
+      "claude": 1
+     }
+    },
+    "vcs.json": {
+     "vcs": "git",
+     "recorded_at": "<TS>"
+    }
+   }
+  }
+ ],
+ "final_state": {
+  "sessions/<SID>/cursor/claude.json": {
+   "from": {
+    "codex": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/cursor/codex.json": {
+   "from": {
+    "claude": {
+     "peer_seq": 0,
+     "delivered_seq": 0,
+     "delivered_counts": {}
+    }
+   },
+   "health": {},
+   "stale_marks": []
+  },
+  "sessions/<SID>/health/claude.json": {
+   "role": "claude",
+   "status": "ready",
+   "generation": 1,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/health/codex.json": {
+   "role": "codex",
+   "status": "ready",
+   "generation": 2,
+   "updated_at": "<TS>",
+   "reason": null,
+   "resume_at": null
+  },
+  "sessions/<SID>/journal/claude.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "HANDOFF_OFFER",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": true,
+    "body": "epoch=2 to=codex head=<SHA> dirty=0",
+    "owner": "claude",
+    "protocol": "1.4",
+    "msg_id": "claude:1",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:1",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false,
+    "offer_id": "<OFFER>"
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 blocking=1 important=0",
+    "owner": "codex",
+    "msg_id": "claude:2",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:2",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 3,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE but the crash is open",
+    "owner": "codex",
+    "msg_id": "claude:3",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:3",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 4,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE",
+    "owner": "codex",
+    "msg_id": "claude:4",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:4",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 5,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 blocking=x",
+    "owner": "codex",
+    "msg_id": "claude:5",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:5",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 6,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=0",
+    "owner": "codex",
+    "msg_id": "claude:6",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:6",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 7,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 round=2",
+    "owner": "codex",
+    "msg_id": "claude:7",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:7",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 8,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 blocking=0 blocking=0",
+    "owner": "codex",
+    "msg_id": "claude:8",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:8",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 9,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 important=1 important=2",
+    "owner": "codex",
+    "msg_id": "claude:9",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:9",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 10,
+    "at": "<TS>",
+    "role": "claude",
+    "kind": "VERDICT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "AGREE round=1 blocking=0 important=2",
+    "owner": "codex",
+    "msg_id": "claude:10",
+    "to": [
+     "codex"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "claude:10",
+    "route_trace": [
+     "claude"
+    ],
+    "ttl": null,
+    "forward": false
+   }
+  ],
+  "sessions/<SID>/journal/codex.jsonl": [
+   {
+    "seq": 1,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "HELLO",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "joined; navigator ready",
+    "owner": "claude",
+    "protocol": "1.4",
+    "msg_id": "codex:1",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": true,
+    "thread_id": "codex:1",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 2,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "HANDOFF_ACCEPT",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "epoch=2 head=<SHA>",
+    "owner": "codex",
+    "msg_id": "codex:2",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "codex:2",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
+   },
+   {
+    "seq": 3,
+    "at": "<TS>",
+    "role": "codex",
+    "kind": "REVIEW_REQUEST",
+    "work_unit": "fixture-task",
+    "unit_id": "1-<U>",
+    "expect_reply": false,
+    "body": "please review",
+    "owner": "codex",
+    "msg_id": "codex:3",
+    "to": [
+     "claude"
+    ],
+    "reply_to": null,
+    "broadcast": false,
+    "thread_id": "codex:3",
+    "route_trace": [
+     "codex"
+    ],
+    "ttl": null,
+    "forward": false
+   }
+  ],
+  "sessions/<SID>/latest/claude.json": {
+   "seq": 10,
+   "at": "<TS>",
+   "role": "claude",
+   "kind": "VERDICT",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "AGREE round=1 blocking=0 important=2",
+   "owner": "codex",
+   "msg_id": "claude:10",
+   "to": [
+    "codex"
+   ],
+   "reply_to": null,
+   "broadcast": false,
+   "thread_id": "claude:10",
+   "route_trace": [
+    "claude"
+   ],
+   "ttl": null,
+   "forward": false
+  },
+  "sessions/<SID>/latest/codex.json": {
+   "seq": 3,
+   "at": "<TS>",
+   "role": "codex",
+   "kind": "REVIEW_REQUEST",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "expect_reply": false,
+   "body": "please review",
+   "owner": "codex",
+   "msg_id": "codex:3",
+   "to": [
+    "claude"
+   ],
+   "reply_to": null,
+   "broadcast": false,
+   "thread_id": "codex:3",
+   "route_trace": [
+    "codex"
+   ],
+   "ttl": null,
+   "forward": false
+  },
+  "sessions/<SID>/session.v2.json": {
+   "session_id": "<SID>",
+   "task": "fixture task",
+   "work_unit": "fixture-task",
+   "unit_id": "1-<U>",
+   "driver": "claude",
+   "owner": "codex",
+   "ownership_epoch": 2,
+   "status": "completed",
+   "phase": "complete",
+   "waiting": null,
+   "handoff": null,
+   "vcs": "git",
+   "base_head": "<SHA>",
+   "base_status": [],
+   "companions": [],
+   "absent_companions": [],
+   "caps": {
+    "claude": [
+     "ack"
+    ],
+    "codex": [
+     "ack"
+    ]
+   },
+   "delivery": "ack",
+   "protocol": "1.4",
+   "signoff": "strict",
+   "created_at": "<TS>",
+   "updated_at": "<TS>",
+   "requires": [
+    "strict-signoff"
+   ],
+   "schema": 2,
+   "participants": [
+    "claude",
+    "codex"
+   ],
+   "authority": {
+    "required_reviewers": [
+     "claude"
+    ],
+    "advisers": []
+   },
+   "pauses": {},
+   "verdict_floor": {
+    "claude": 1
+   }
+  },
+  "vcs.json": {
+   "vcs": "git",
+   "recorded_at": "<TS>"
+  }
+ },
+ "provenance": {
+  "build": "825a1d909cfd+dirty:pair.py",
+  "sha12": "4584395b3fa3",
+  "note": "captured from the reference and reviewed; never regenerate with a build under test"
+ }
+}

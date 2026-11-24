@@ -55,6 +55,120 @@ pub fn check_protocol(record: &Map<String, Value>, what: &str) -> Result<(), Mes
     Ok(())
 }
 
+/// The sign-off policies a session record may name (spec M-6a).
+pub const SIGNOFFS: &[&str] = &["strict", "legacy"];
+
+/// [`check_protocol`] for a session record, then its sign-off claim (spec
+/// M-6a). `envelope` is the schema of the file the record was read through.
+/// A strict session records `signoff: "strict"`, requires `strict-signoff`
+/// and is schema 2; a record that claims strict sign-off any other way, or
+/// names a policy this build does not know, is refused and never read as
+/// legacy, since a reader that skipped the claim would close on a prefix AGREE.
+///
+/// # Errors
+/// As [`check_protocol`]; [`MeshError::Unsupported`] for an unknown or
+/// inconsistent sign-off claim.
+pub fn check_session(
+    record: &Map<String, Value>,
+    what: &str,
+    envelope: u32,
+) -> Result<(), MeshError> {
+    check_protocol(record, what)?;
+    let policy = record.get("signoff");
+    let strict = policy.and_then(Value::as_str) == Some("strict");
+    if let Some(p) = policy {
+        if !p.as_str().is_some_and(|p| SIGNOFFS.contains(&p)) {
+            return Err(MeshError::Unsupported(format!(
+                "{what} records sign-off policy {p}, which this build does not know; nothing was changed"
+            )));
+        }
+    }
+    let required = record
+        .get("requires")
+        .and_then(Value::as_array)
+        .is_some_and(|l| l.iter().any(|f| f.as_str() == Some("strict-signoff")));
+    let schema = record.get("schema").and_then(Value::as_u64).unwrap_or(1);
+    check_participants(record, what, schema)?;
+    if (strict || required) && !(strict && required && envelope == 2 && schema == 2) {
+        return Err(MeshError::Unsupported(format!(
+            "{what} carries an inconsistent strict sign-off claim (signoff={}, requires strict-signoff={}, schema {schema}, read as schema {envelope}); \
+             a strict session records signoff=strict, requires strict-signoff and is schema 2. It is refused; nothing was changed",
+            policy.and_then(Value::as_str).unwrap_or("None"),
+            if required { "yes" } else { "no" },
+        )));
+    }
+    Ok(())
+}
+
+/// The hosts a participant name starts with (spec §1).
+pub const HOSTS: &[&str] = &["claude", "codex", "localpilot"];
+
+/// Whether `name` is a participant name: a host, optionally followed by `-`
+/// and 1-32 lowercase ASCII letters or digits naming an instance (spec §1).
+/// Participant names become file names, so nothing else is accepted.
+#[must_use]
+pub fn is_participant_name(name: &str) -> bool {
+    HOSTS.iter().any(|h| {
+        name == *h
+            || name
+                .strip_prefix(h)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|inst| {
+                    (1..=32).contains(&inst.len())
+                        && inst
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                })
+    })
+}
+
+/// Refuse a record whose participants are not participant names, or that
+/// names an instance without schema 2 and the `participant-instances`
+/// feature (spec §1, V-3).
+fn check_participants(
+    record: &Map<String, Value>,
+    what: &str,
+    schema: u64,
+) -> Result<(), MeshError> {
+    let Some(list) = record.get("participants").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let mut instance = false;
+    for p in list {
+        let Some(name) = p.as_str().filter(|n| is_participant_name(n)) else {
+            return Err(MeshError::Corrupt(format!(
+                "{what} names participant {p}, which is not a participant name"
+            )));
+        };
+        instance |= !HOSTS.contains(&name);
+    }
+    let declared = record
+        .get("requires")
+        .and_then(Value::as_array)
+        .is_some_and(|l| {
+            l.iter()
+                .any(|f| f.as_str() == Some("participant-instances"))
+        });
+    if instance && !(declared && schema == 2) {
+        return Err(MeshError::Unsupported(format!(
+            "{what} names a participant instance but is not a schema-2 session requiring participant-instances; nothing was changed"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a session closes on strict sign-off (M-6a) rather than the legacy
+/// prefix rule (M-6). Any claim reads as strict; [`check_session`] has
+/// already refused a claim the record cannot protect.
+#[must_use]
+pub fn is_strict(record: &Map<String, Value>) -> bool {
+    record.get("signoff").and_then(Value::as_str) == Some("strict")
+        || record
+            .get("requires")
+            .and_then(Value::as_array)
+            .is_some_and(|l| l.iter().any(|f| f.as_str() == Some("strict-signoff")))
+}
+
 /// The pointer to the active session, or `None` when the slot is free.
 ///
 /// # Errors
@@ -149,7 +263,11 @@ pub fn active_record(mb: &Mailbox) -> Result<Option<Map<String, Value>>, MeshErr
             p.session_id
         )));
     };
-    check_protocol(&record, &format!("session {}", p.session_id))?;
+    check_session(
+        &record,
+        &format!("session {}", p.session_id),
+        if p.schema == Some(2) { 2 } else { 1 },
+    )?;
     let session: Session = serde_json::from_value(Value::Object(record.clone()))
         .map_err(|e| MeshError::Corrupt(format!("{shown} is not a session record ({e})")))?;
     // The record must be the schema its file and pointer say it is: a
@@ -406,6 +524,103 @@ mod tests {
         assert!(
             matches!(active(&mb), Err(MeshError::Corrupt(ref m)) if m.contains("is a schema-1 session file"))
         );
+    }
+
+    #[test]
+    fn participant_names_are_hosts_or_named_instances() {
+        for ok in [
+            "claude",
+            "codex",
+            "localpilot",
+            "codex-sol",
+            "claude-a1",
+            &format!("codex-{}", "a".repeat(32)),
+        ] {
+            assert!(is_participant_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "copilot",
+            "codex-",
+            "codex-Sol",
+            "codex-a.b",
+            "codex_sol",
+            "../codex",
+            "codexsol",
+            &format!("codex-{}", "a".repeat(33)),
+            "codex-\u{212a}",
+        ] {
+            assert!(!is_participant_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_strict_claim_is_honoured_only_in_its_one_shape() {
+        let rec = |v: Value| v.as_object().cloned().unwrap_or_default();
+        let good = rec(
+            json!({"schema": 2, "signoff": "strict", "requires": ["strict-signoff"], "participants": ["claude", "codex"]}),
+        );
+        assert!(check_session(&good, "s", 2).is_ok());
+        assert!(is_strict(&good));
+        assert!(check_session(&rec(json!({"signoff": "legacy"})), "s", 1).is_ok());
+        assert!(check_session(&rec(json!({})), "s", 1).is_ok());
+        assert!(!is_strict(&rec(json!({"signoff": "legacy"}))));
+        for (bad, env) in [
+            (
+                json!({"schema": 2, "signoff": "strict", "participants": ["claude", "codex"]}),
+                2,
+            ),
+            (
+                json!({"schema": 2, "signoff": "legacy", "requires": ["strict-signoff"], "participants": ["claude", "codex"]}),
+                2,
+            ),
+            (
+                json!({"schema": 2, "requires": ["strict-signoff"], "participants": ["claude", "codex"]}),
+                2,
+            ),
+            (
+                json!({"signoff": "strict", "requires": ["strict-signoff"]}),
+                1,
+            ),
+            (
+                json!({"schema": 2, "signoff": "strict", "requires": ["strict-signoff"], "participants": ["claude", "codex"]}),
+                1,
+            ),
+            (json!({"signoff": "lenient"}), 1),
+            (json!({"signoff": 1}), 1),
+        ] {
+            assert!(
+                matches!(
+                    check_session(&rec(bad.clone()), "s", env),
+                    Err(MeshError::Unsupported(_))
+                ),
+                "{bad} read as schema {env}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_needs_schema_two_and_its_feature() {
+        let rec = |v: Value| v.as_object().cloned().unwrap_or_default();
+        assert!(check_session(&rec(json!({"schema": 2, "requires": ["participant-instances"], "participants": ["codex-sol", "codex"]})), "s", 2).is_ok());
+        assert!(matches!(
+            check_session(
+                &rec(json!({"schema": 2, "participants": ["codex-sol", "codex"]})),
+                "s",
+                2
+            ),
+            Err(MeshError::Unsupported(_))
+        ));
+        assert!(matches!(
+            check_session(
+                &rec(
+                    json!({"schema": 2, "requires": ["participant-instances"], "participants": ["../x", "codex"]})
+                ),
+                "s",
+                2
+            ),
+            Err(MeshError::Corrupt(_))
+        ));
     }
 
     #[test]

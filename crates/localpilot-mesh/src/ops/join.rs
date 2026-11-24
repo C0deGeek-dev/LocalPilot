@@ -13,7 +13,7 @@ use super::{
 use crate::error::MeshError;
 use crate::jsonl;
 use crate::layout::{SESSION_V1, SESSION_V2};
-use crate::session::check_protocol;
+use crate::session::check_session;
 use crate::timefmt::{parse_utc, utc_now};
 
 const VCS_FILE: &str = "vcs.json";
@@ -478,7 +478,11 @@ impl Mesh {
                     .read_obj(if v2.exists() { &v2 } else { &v1 })?
                     .filter(|s| !s.is_empty())
                     .ok_or_else(unknown)?;
-                check_protocol(&s, &format!("session {want}"))?;
+                check_session(
+                    &s,
+                    &format!("session {want}"),
+                    if v2.exists() { 2 } else { 1 },
+                )?;
                 s
             }
             None => self.active()?.ok_or_else(|| refused("NO_ACTIVE_SESSION"))?,

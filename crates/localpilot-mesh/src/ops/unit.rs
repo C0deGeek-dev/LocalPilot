@@ -8,12 +8,14 @@ use serde_json::{json, Value};
 
 use super::post::{Expect, PostArgs};
 use super::read::num_at;
+use super::signoff::{agreement_problem, decision_text, STRICT_SIGNOFF};
 use super::{
     authority, participants, refused, schema, seq_of, settle_status, sid, str_of, strings,
     the_peer, Mesh, Obj, Out,
 };
 use crate::error::MeshError;
 use crate::jsonl;
+use crate::session::is_strict;
 use crate::timefmt::utc_now;
 use crate::tree;
 
@@ -219,16 +221,6 @@ fn companions(s: &Obj) -> Vec<Obj> {
         .unwrap_or_default()
 }
 
-fn first_line(m: &Obj) -> &str {
-    str_of(m, "body")
-        .and_then(|b| b.lines().next())
-        .unwrap_or_default()
-}
-
-fn is_agree(m: &Obj) -> bool {
-    str_of(m, "kind") == Some("VERDICT") && first_line(m).starts_with("AGREE ")
-}
-
 fn thread_of(m: &Obj) -> Option<&str> {
     str_of(m, "thread_id").or_else(|| str_of(m, "msg_id"))
 }
@@ -419,7 +411,13 @@ impl Mesh {
                 format!("{r}: no verdict since the unit boundary or resume")
             }));
         };
-        if !is_agree(&best) {
+        if let Some(why) = agreement_problem(s, &best) {
+            if is_strict(s) && str_of(&best, "kind") == Some("VERDICT") {
+                return Ok(Err(format!(
+                    "{r}: {} is not a strict AGREE: {why}",
+                    decision_text(&best)
+                )));
+            }
             return Ok(Err(format!(
                 "{r}: {} #{} stands",
                 str_of(&best, "kind").unwrap_or("None"),
@@ -440,8 +438,13 @@ impl Mesh {
                 }
             }
             if !blocks.is_empty() {
+                let need = if is_strict(s) {
+                    format!("; {STRICT_SIGNOFF}")
+                } else {
+                    String::new()
+                };
                 return Err(refused(format!(
-                    "not every required reviewer agrees: {}",
+                    "not every required reviewer agrees: {}{need}",
                     blocks.join("; ")
                 )));
             }
@@ -449,7 +452,17 @@ impl Mesh {
         }
         let peer = the_peer(s, role)?;
         let d = self.latest_decision(s, &peer)?;
-        if !is_agree(&d) {
+        if let Some(why) = agreement_problem(s, &d) {
+            if is_strict(s) {
+                let what = if d.is_empty() {
+                    "there is none yet".to_owned()
+                } else {
+                    format!("{}: {why}", decision_text(&d))
+                };
+                return Err(refused(format!(
+                    "peer's latest decision is not a strict AGREE: {what}; {STRICT_SIGNOFF}"
+                )));
+            }
             return Err(refused("peer's latest decision is not an AGREE verdict"));
         }
         if d.get("unit_id") != s.get("unit_id") {

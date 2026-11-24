@@ -20,6 +20,7 @@ use serde_json::Value;
 use super::engine::fingerprint_of;
 use super::post::{Expect, PostArgs};
 use super::read::num_at;
+use super::signoff::agreement_problem;
 use super::unit::git;
 use super::{authority, participants, seq_of, sid, str_of, Mesh, Obj, MAX_BODY};
 use crate::error::MeshError;
@@ -62,12 +63,6 @@ const CONTEXT_CHARS: usize = 3_000;
 
 /// Engine-owned progress notes are intermediate evidence, never review requests.
 pub const OWNER_CHECKPOINT_PREFIX: &str = "Verified owner checkpoint (Done, Passed):";
-
-fn is_agree(m: &Obj) -> bool {
-    str_of(m, "body")
-        .and_then(|b| b.lines().next())
-        .is_some_and(|l| l.starts_with("AGREE "))
-}
 
 impl Mesh {
     /// Where `role` stands as an owner, from one read of the session and the
@@ -210,7 +205,9 @@ impl Mesh {
                 })
                 .next_back();
             match verdict {
-                Some(v) if is_agree(v) => agreed += 1,
+                // One definition of an agreement for the engine and for
+                // `complete` (spec U-3, M-6a).
+                Some(v) if agreement_problem(&s, v).is_none() => agreed += 1,
                 Some(v) => revise.push(format!(
                     "{} VERDICT {}: {}",
                     reviewer,

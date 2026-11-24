@@ -18,7 +18,8 @@ The exit code is 0 only when every selected fixture passes.
 
 - **STATE** binds every implementation. After **every** command step (`state`)
   and at the end (`final_state`), the normalised mailbox tree must match: every
-  file under `.pair-programming/`, JSON parsed, journals one entry per line.
+  file under `.pair-programming/` except the informational
+  `sessions/<id>/builds/` records, JSON parsed, journals one entry per line.
   After concurrent writes the exact tree is not deterministic, so a `parallel`
   step's state contract is its invariants plus exact journal counts. No exact
   state check may follow a `parallel` step, and such a fixture has no
@@ -93,8 +94,15 @@ A step is exactly one of:
   `json_set` (with `key` and `value`) sets one top-level key of an existing
   JSON object file, as a newer build or damage would leave it.
   `path` is relative to `.pair-programming/`, and `<SID>` stands for the active
-  session's id. `"expect_refused": true` asserts that the runner refuses the
-  step.
+  session's id: the one its pointer names, or, when there is no pointer (a
+  parked or closed schema-2 session keeps none), the only session in the
+  mailbox. `<RECORD>` stands for that session's record file,
+  `session.v2.json` or `session.json`, whichever the build wrote: a legacy
+  view's older build starts the historic pair on schema 1, so a step that
+  damages the record must name it that way. The runner never guesses: a
+  pointer that names no session, no pointer with zero or several sessions, or
+  zero or two record files refuses the step. `"expect_refused": true` asserts
+  that the runner refuses the step.
   `write_tree` (with `tree`: `anchor` or a companion's name, `path`, `data`)
   changes a work file, as a person editing the tree would. Its path is
   relative to that tree and may not enter the mailbox or `.git`.
@@ -228,6 +236,10 @@ python run.py --participant codex=<command> --participant localpilot=<command>
   from the selection rule and checked in, so a change to it is reviewed. A
   mandatory fixture that is skipped or not run fails the run
   (`MANDATORY_NOT_RUN <id>`).
+- A fixture that turns on an optional session feature at `start` (today
+  `--review-snapshot`) is not selected (`uses the optional feature ...`): a
+  participant that does not implement the feature refuses such a session by
+  design. It becomes mandatory once the participant claims the feature.
 - Checking uses the STATE layer plus **obs** instead of the full CLI layer:
   - the exit code of every step;
   - peer mail from `watch` and `peek`, compared as blocks;
