@@ -11996,6 +11996,11 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
         RuntimeEvent::ToolStuck { name, count } => RuntimeUpdate::ToolStuck { name, count },
         RuntimeEvent::FilesTouched(_) => RuntimeUpdate::FilesTouched,
         RuntimeEvent::TurnStarted => RuntimeUpdate::TurnStarted,
+        RuntimeEvent::ModelWaitStarted => RuntimeUpdate::ModelWaitStarted,
+        RuntimeEvent::ModelWaitEnded => RuntimeUpdate::ModelWaitEnded,
+        RuntimeEvent::ModelPromptProgress { processed, total } => {
+            RuntimeUpdate::ModelPromptProgress { processed, total }
+        }
         RuntimeEvent::SoftInterruptInjected { .. } => RuntimeUpdate::SoftInterruptInjected,
         RuntimeEvent::Stopped(reason) => RuntimeUpdate::Stopped(match reason {
             StopReason::Done => StopState::Done,

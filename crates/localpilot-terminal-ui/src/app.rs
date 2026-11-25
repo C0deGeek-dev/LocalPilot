@@ -1688,6 +1688,16 @@ impl fmt::Debug for QuestionAction {
     }
 }
 
+/// Work-chrome label shown while a model request has produced no output.
+pub const WAITING_FOR_MODEL_LABEL: &str = "Waiting for model";
+
+/// The waiting label with the server's prompt-evaluation progress.
+fn prompt_progress_label(processed: u64, total: u64) -> String {
+    let processed = processed.min(total);
+    let percent = processed.saturating_mul(100) / total.max(1);
+    format!("{WAITING_FOR_MODEL_LABEL} · prompt {processed}/{total} tokens ({percent}%)")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeUpdate {
     Text(String),
@@ -1726,6 +1736,17 @@ pub enum RuntimeUpdate {
     /// A hosted turn began. The terminal already shows work from its own
     /// submit, so this changes nothing on screen.
     TurnStarted,
+    /// A model request was sent and has produced no output yet. The work
+    /// chrome reads "Waiting for model" until [`RuntimeUpdate::ModelWaitEnded`].
+    ModelWaitStarted,
+    /// The open model request produced output or ended.
+    ModelWaitEnded,
+    /// The server's prompt-evaluation progress during the open wait. A
+    /// moving count tells a busy server from a stalled connection.
+    ModelPromptProgress {
+        processed: u64,
+        total: u64,
+    },
     FilesTouched,
     SoftInterruptInjected,
     Stopped(StopState),
@@ -3120,6 +3141,25 @@ impl AppModel {
                 );
             }
             RuntimeUpdate::FilesTouched | RuntimeUpdate::TurnStarted => {}
+            RuntimeUpdate::ModelWaitStarted => {
+                if matches!(projection.work, WorkState::Busy { .. }) {
+                    if let Some(activity) = &mut projection.work_activity {
+                        activity.waiting_label = Some(WAITING_FOR_MODEL_LABEL.to_string());
+                    }
+                }
+            }
+            RuntimeUpdate::ModelPromptProgress { processed, total } => {
+                if let Some(activity) = &mut projection.work_activity {
+                    if activity.waiting_label.is_some() && total > 0 {
+                        activity.waiting_label = Some(prompt_progress_label(processed, total));
+                    }
+                }
+            }
+            RuntimeUpdate::ModelWaitEnded => {
+                if let Some(activity) = &mut projection.work_activity {
+                    activity.waiting_label = None;
+                }
+            }
             RuntimeUpdate::SoftInterruptInjected => {
                 Self::style_transcript_on(projection);
                 projection.active_assistant = None;
@@ -3199,6 +3239,7 @@ impl AppModel {
             projection.work_activity = Some(WorkActivity {
                 label: sanitize_inline(label),
                 started_at: Instant::now(),
+                waiting_label: None,
             });
         }
     }
@@ -3224,6 +3265,7 @@ impl AppModel {
         projection.work_activity = Some(WorkActivity {
             label: sanitize_inline(label),
             started_at,
+            waiting_label: None,
         });
         projection.active_assistant = None;
         projection.active_reasoning = None;
@@ -3239,11 +3281,25 @@ impl AppModel {
 
     /// The active operation's high-level label and monotonic elapsed time.
     /// `None` means the projection is idle; no session-age clock is exposed.
+    /// While a model request has produced no output, the label says so, so a
+    /// long prompt evaluation is not mistaken for a stall. A requested
+    /// cancellation keeps the operation's own label.
     #[must_use]
     pub fn active_work_activity(&self) -> Option<(&str, Duration)> {
-        let activity = self.projections.active().work_activity.as_ref()?;
+        let projection = self.projections.active();
+        let activity = projection.work_activity.as_ref()?;
+        let cancelling = matches!(
+            projection.work,
+            WorkState::Busy {
+                cancellation_requested: true
+            }
+        );
+        let label = match &activity.waiting_label {
+            Some(waiting) if !cancelling => waiting.as_str(),
+            _ => activity.label.as_str(),
+        };
         Some((
-            activity.label.as_str(),
+            label,
             Instant::now().saturating_duration_since(activity.started_at),
         ))
     }
@@ -10785,6 +10841,71 @@ mod tests {
         app.edit_selected_setting(true);
         assert!(!app.group_successful_tools());
         assert!(app.group_successful_tools_is_default());
+    }
+
+    #[test]
+    fn model_wait_labels_the_operation_until_output_or_stop() {
+        let mut app = model();
+        // An idle projection ignores a stray wait.
+        app.apply_runtime(RuntimeUpdate::ModelWaitStarted);
+        assert!(app.active_work_activity().is_none());
+
+        app.begin_work();
+        app.apply_runtime(RuntimeUpdate::ModelWaitStarted);
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some(WAITING_FOR_MODEL_LABEL)
+        );
+        // A cancellation request keeps the operation's own label.
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::CancelWork
+        );
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Working")
+        );
+        app.clear_cancellation_request();
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some(WAITING_FOR_MODEL_LABEL)
+        );
+
+        app.apply_runtime(RuntimeUpdate::ModelPromptProgress {
+            processed: 4_096,
+            total: 6_380,
+        });
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Waiting for model · prompt 4096/6380 tokens (64%)")
+        );
+
+        app.apply_runtime(RuntimeUpdate::ModelWaitEnded);
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Working")
+        );
+        // Progress after the wait closed is ignored.
+        app.apply_runtime(RuntimeUpdate::ModelPromptProgress {
+            processed: 6_380,
+            total: 6_380,
+        });
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Working")
+        );
+
+        // A new operation never inherits a previous wait.
+        app.apply_runtime(RuntimeUpdate::ModelWaitStarted);
+        app.begin_work_with_label("Compacting");
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Compacting")
+        );
+
+        app.apply_runtime(RuntimeUpdate::ModelWaitStarted);
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        assert!(app.active_work_activity().is_none());
     }
 
     #[test]

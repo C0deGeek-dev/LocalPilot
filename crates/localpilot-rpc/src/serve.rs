@@ -521,7 +521,10 @@ pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
         // feed (the IPC server); the stdio, ACP and MCP streams never carried it.
         RuntimeEvent::FilesTouched(_)
         | RuntimeEvent::SoftInterruptInjected { .. }
-        | RuntimeEvent::TurnStarted => return None,
+        | RuntimeEvent::TurnStarted
+        | RuntimeEvent::ModelWaitStarted
+        | RuntimeEvent::ModelWaitEnded
+        | RuntimeEvent::ModelPromptProgress { .. } => return None,
     })
 }
 

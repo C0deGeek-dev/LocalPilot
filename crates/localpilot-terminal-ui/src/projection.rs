@@ -82,6 +82,9 @@ pub(super) struct SessionProjection {
 pub(super) struct WorkActivity {
     pub(super) label: String,
     pub(super) started_at: Instant,
+    /// While a provider request is open and has produced no output: the label
+    /// shown in place of `label` (with prompt progress when reported).
+    pub(super) waiting_label: Option<String>,
 }
 
 impl SessionProjection {

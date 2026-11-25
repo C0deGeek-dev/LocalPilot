@@ -1383,6 +1383,120 @@ async fn context_usage_event_is_emitted_before_request() {
     )));
 }
 
+/// The request-wait lifecycle as tags, with the events it must bracket.
+fn wait_trace(events: &[RuntimeEvent]) -> Vec<&'static str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ModelWaitStarted => Some("wait"),
+            RuntimeEvent::ModelWaitEnded => Some("output"),
+            RuntimeEvent::ModelPromptProgress { .. } => Some("progress"),
+            RuntimeEvent::Text(_) => Some("text"),
+            RuntimeEvent::ToolStarted { .. } => Some("tool"),
+            RuntimeEvent::Warning(_) => Some("warning"),
+            RuntimeEvent::Stopped(_) => Some("stopped"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_model_wait_brackets_each_request_until_its_first_output() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "read_file", json!({ "path": "src/lib.rs" }))
+        .text("the file says hello");
+    let mut h = build(
+        provider,
+        &[("src/lib.rs", "hello world")],
+        SessionConfig::default(),
+    );
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("read the file", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    // A tool-call-only response ends its wait before the tool runs; the
+    // second request waits again until its text; Stopped stays last.
+    assert_eq!(
+        wait_trace(&drain(&mut rx)),
+        ["wait", "output", "tool", "wait", "output", "text", "stopped"]
+    );
+}
+
+#[tokio::test]
+async fn prompt_progress_keeps_the_wait_open_and_is_dropped_after_output() {
+    let provider = FakeProvider::new().script(vec![
+        Ok(ModelEvent::PromptProgress {
+            processed: 2_048,
+            total: 6_380,
+        }),
+        Ok(ModelEvent::PromptProgress {
+            processed: 6_380,
+            total: 6_380,
+        }),
+        Ok(ModelEvent::TextDelta("done".to_string())),
+        Ok(ModelEvent::PromptProgress {
+            processed: 6_380,
+            total: 6_380,
+        }),
+        Ok(ModelEvent::Done),
+    ]);
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    assert_eq!(
+        wait_trace(&drain(&mut rx)),
+        ["wait", "progress", "progress", "output", "text", "stopped"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_request_ends_its_wait_before_the_retry_backoff() {
+    let provider = FakeProvider::new().fail_open(1).text("recovered");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    assert_eq!(
+        wait_trace(&drain(&mut rx)),
+        ["wait", "output", "warning", "wait", "output", "text", "stopped"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_request_closes_its_wait_before_the_turn_stops() {
+    let provider = FakeProvider::new().fail_open(10).text("never reached");
+    let mut h = build(
+        provider,
+        &[],
+        SessionConfig {
+            max_stream_retries: 0,
+            ..SessionConfig::default()
+        },
+    );
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::ProviderError);
+
+    let trace = wait_trace(&drain(&mut rx));
+    assert_eq!(trace.first(), Some(&"wait"));
+    assert_eq!(trace.last(), Some(&"stopped"));
+    assert_eq!(
+        trace.iter().filter(|tag| **tag == "wait").count(),
+        trace.iter().filter(|tag| **tag == "output").count(),
+        "every wait is closed: {trace:?}"
+    );
+}
+
 #[tokio::test]
 async fn provider_prompt_usage_calibrates_the_next_compaction_threshold() {
     let provider = Arc::new(CalibratingProvider::new());

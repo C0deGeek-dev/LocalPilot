@@ -295,6 +295,16 @@ convention used by vLLM-style servers). The default is on for local and custom
 endpoints and off for the official hosted API, which does not document those
 fields. The switch itself is never forwarded as a raw API field.
 
+`prompt_progress = true` asks a llama.cpp server for prompt-processing progress
+(its documented `return_progress` request field). While the server evaluates
+the prompt, the full-screen chat then shows
+`Waiting for model · prompt 4096/6380 tokens (64%)` instead of a bare waiting
+label, so a working server is told apart from a stalled connection. It is off
+by default because other OpenAI-compatible servers may reject an unknown
+field; the switch itself is never forwarded. Progress reaches LocalPilot only
+on an `openai-compatible` provider: llama.cpp's Anthropic messages endpoint
+does not stream it (ADR-0294).
+
 ## Model discovery
 
 `localpilot models` queries each configured OpenAI-compatible server's public

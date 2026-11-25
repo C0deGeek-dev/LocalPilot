@@ -302,12 +302,20 @@ impl OpenAiProvider {
                 }
             }
         }
+        // The llama.cpp server's documented `return_progress` streaming field.
+        // Opt-in: other OpenAI-compatible servers may reject an unknown field.
+        if self.requests_prompt_progress() {
+            body["return_progress"] = json!(true);
+        }
         if self.suppresses_thinking() && !self.has_option("reasoning_effort", request) {
             body["reasoning_effort"] = json!("minimal");
         }
         if let Value::Object(map) = &mut body {
             for (k, v) in self.default_options.iter().chain(request.options.iter()) {
-                if k == "suppress_thinking" || k == "reasoning_round_trip" || k == "constraint_mode"
+                if k == "suppress_thinking"
+                    || k == "reasoning_round_trip"
+                    || k == "constraint_mode"
+                    || k == "prompt_progress"
                 {
                     continue;
                 }
@@ -325,6 +333,16 @@ impl OpenAiProvider {
 
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Whether to ask the server for prompt-processing progress (option
+    /// `prompt_progress`, default off). Only a llama.cpp server documents the
+    /// field, so it is never sent unless a provider opts in.
+    fn requests_prompt_progress(&self) -> bool {
+        self.default_options
+            .get("prompt_progress")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     fn suppresses_thinking(&self) -> bool {
@@ -367,6 +385,18 @@ impl OpenAiProvider {
             .and_then(Value::as_bool)
             .unwrap_or(self.declaration.source_type != SourceType::OfficialApi)
     }
+}
+
+/// Read a llama.cpp `prompt_progress` report (`total`, `processed`; the
+/// server documents `cache` and `time_ms` too) from one stream chunk.
+fn prompt_progress(chunk: &Value) -> Option<ModelEvent> {
+    let progress = chunk.get("prompt_progress")?;
+    let total = progress.get("total")?.as_u64()?;
+    let processed = progress.get("processed")?.as_u64()?;
+    (total > 0).then(|| ModelEvent::PromptProgress {
+        processed: processed.min(total),
+        total,
+    })
 }
 
 /// Build a GBNF grammar constraining the output to a single valid tool call:
@@ -927,6 +957,12 @@ impl SseDecoder {
     }
 
     fn handle_chunk(&mut self, chunk: &Value, out: &mut EventQueue) {
+        // A llama.cpp server streams `prompt_progress` while it evaluates the
+        // prompt (beside a role-only delta). Read it whether or not it was
+        // requested; a malformed or empty report is ignored.
+        if let Some(progress) = prompt_progress(chunk) {
+            out.push_back(Ok(progress));
+        }
         if let Some(choice) = chunk["choices"].get(0) {
             let delta = &choice["delta"];
             if let Some(content) = delta["content"].as_str() {
@@ -1661,6 +1697,61 @@ mod tests {
             body.get("constraint_mode").is_none(),
             "constraint_mode is a local selector, not a wire field"
         );
+    }
+
+    #[test]
+    fn prompt_progress_is_requested_only_when_the_provider_opts_in() {
+        let request = ModelRequest::new("m", Vec::new());
+        let local = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        );
+        // Off by default, even for a local server: the field is llama.cpp-only.
+        assert!(local.build_body(&request).get("return_progress").is_none());
+
+        let mut options = IndexMap::new();
+        options.insert("prompt_progress".to_string(), json!(true));
+        let opted_in = local.with_default_options(options);
+        let body = opted_in.build_body(&request);
+        assert_eq!(body.get("return_progress"), Some(&json!(true)));
+        // The selector itself never reaches the wire.
+        assert!(body.get("prompt_progress").is_none());
+    }
+
+    #[test]
+    fn a_prompt_progress_chunk_becomes_a_progress_event_not_output() {
+        // The documented llama.cpp shape: a role-only delta carrying
+        // `prompt_progress` while the prompt is evaluated.
+        let events = collect_sse(&[
+            "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null}}],\"object\":\"chat.completion.chunk\",\"prompt_progress\":{\"total\":6380,\"cache\":0,\"processed\":4096,\"time_ms\":152000}}\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}],\"prompt_progress\":{\"total\":0,\"processed\":0}}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n",
+        ]);
+        let ok: Vec<&ModelEvent> = events
+            .iter()
+            .filter_map(|event| event.as_ref().ok())
+            .collect();
+        assert_eq!(
+            ok.first(),
+            Some(&&ModelEvent::PromptProgress {
+                processed: 4_096,
+                total: 6_380
+            })
+        );
+        assert_eq!(
+            ok.iter()
+                .filter(|event| matches!(event, ModelEvent::PromptProgress { .. }))
+                .count(),
+            1,
+            "an empty report is ignored"
+        );
+        assert!(ok
+            .iter()
+            .any(|event| matches!(event, ModelEvent::TextDelta(text) if text == "hi")));
     }
 
     #[test]

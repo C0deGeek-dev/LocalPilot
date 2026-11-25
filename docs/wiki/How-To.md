@@ -138,7 +138,11 @@ copies first.
 
 The working footer animates and shows elapsed time while a turn or long-running
 operation is active. `/compact` uses the high-level label `Compacting`; the timer
-is elapsed operation time, not an estimated completion percentage. Typing and
+is elapsed operation time, not an estimated completion percentage. After a
+request is sent and before the model's first output, the label reads
+`Waiting for model`; a local server may spend minutes evaluating a long prompt
+there. A llama.cpp provider with `prompt_progress = true` also shows how many
+prompt tokens it has evaluated. Typing and
 Enter are serviced independently from the animation refresh, including when a
 local LocalBox server is consuming the same machine.
 

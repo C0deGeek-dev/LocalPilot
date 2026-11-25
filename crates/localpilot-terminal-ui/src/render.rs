@@ -9686,6 +9686,33 @@ mod tests {
     }
 
     #[test]
+    fn working_footer_says_when_the_model_has_not_answered_yet() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.begin_work();
+        app.apply_runtime(crate::RuntimeUpdate::ModelWaitStarted);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw waiting footer");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.y);
+        assert!(footer.contains("Waiting for model · 00:00 · 0 B · Ctrl+C / Esc interrupt"));
+
+        app.apply_runtime(crate::RuntimeUpdate::ModelWaitEnded);
+        app.apply_runtime(crate::RuntimeUpdate::Text("answer".to_string()));
+        let mut answering = None;
+        terminal
+            .draw(|frame| answering = Some(render(frame, &app)))
+            .expect("draw answering footer");
+        let layout = answering.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.y);
+        assert!(footer.contains("Working · 00:00"));
+        assert!(!footer.contains("Waiting for model"));
+    }
+
+    #[test]
     fn working_footer_shows_truthful_stream_size_and_escape_interrupt() {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");

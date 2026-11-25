@@ -1150,7 +1150,8 @@ and `--provider`.
 
 Any other keys under a provider table are preserved and passed through as
 provider options (for example `max_tokens` for `anthropic`, or the
-LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
+LocalPilot-owned switches `suppress_thinking`, `reasoning_round_trip` and
+`prompt_progress`). See
 [providers.md](providers.md).
 
 **Credentials are never config keys.** For `auth = "api_key"`, a provider's API

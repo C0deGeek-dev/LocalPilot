@@ -97,9 +97,15 @@ pub enum ModelEvent {
     ToolCall { id: String, name: String, input_json: Value },
     Usage { input_tokens: u64, output_tokens: u64 },
     ProviderWarning { message: String },
+    PromptProgress { processed: u64, total: u64 },
     Done,
 }
 ```
+
+`PromptProgress` reports how much of the prompt a server has evaluated before
+its first output (llama.cpp's documented `prompt_progress` stream field). It is
+liveness metadata: the harness never treats it as output, and it keeps the
+request's wait open (ADR-0294).
 
 Provider adapters may emit `ReasoningDelta` only when the provider exposes
 reasoning/thinking content through an official API surface. The UI can render

@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Chat: the working footer reads `Waiting for model` from sending a request
+  until the model's first output, so you can see that the turn is waiting on
+  the model server, not on LocalPilot. The label alone cannot show whether the
+  server is still working. With `prompt_progress = true` on an
+  OpenAI-compatible llama.cpp provider, the footer also shows the server's
+  prompt progress, such as `prompt 4096/6380 tokens (64%)`; a count that
+  keeps rising shows the server is working (LocalHub#297).
+
 - Update notice: a cached once-a-day check is compared with the running version
   again, so bare `localpilot` no longer advertises the release you just
   installed while the cached check is still fresh (LocalHub#296).

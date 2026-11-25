@@ -27,6 +27,10 @@ pub enum ModelEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<serde_json::Value>,
     },
+    /// Prompt-processing progress reported by a server before its first output
+    /// (for example a llama.cpp server asked for progress). `processed` never
+    /// exceeds `total`. Liveness metadata only: never output.
+    PromptProgress { processed: u64, total: u64 },
     /// Token usage for the request.
     Usage(TokenUsage),
     /// A non-fatal provider warning.

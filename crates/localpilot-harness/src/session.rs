@@ -232,6 +232,19 @@ pub enum RuntimeEvent {
     /// The loop stopped.
     /// A turn began (published before any of its other events).
     TurnStarted,
+    /// A provider request was sent and has produced no output yet. Always
+    /// closed by [`RuntimeEvent::ModelWaitEnded`] before the turn's
+    /// `Stopped`.
+    ModelWaitStarted,
+    /// The open provider request produced its first output (text, reasoning,
+    /// a tool call or completion) or ended without any.
+    ModelWaitEnded,
+    /// The server reported how much of the prompt it has evaluated during the
+    /// open wait (only from servers that report it).
+    ModelPromptProgress {
+        processed: u64,
+        total: u64,
+    },
     Stopped(StopReason),
 }
 
@@ -1604,6 +1617,9 @@ pub struct SessionRuntime {
     /// Whether a turn is currently running. A switch is refused while this is set,
     /// so the provider/model are only ever re-pointed at a turn boundary.
     turn_in_flight: bool,
+    /// Whether a provider request is open and has produced no output yet.
+    /// Hosts see this interval as a `ModelWaitStarted`/`ModelWaitEnded` pair.
+    awaiting_model: bool,
     /// Tool calls executed in the current turn. Reset at each turn start; folded
     /// into the per-turn handoff at the turn's exit.
     turn_tool_calls: usize,
@@ -1796,6 +1812,7 @@ impl SessionRuntime {
             registry: None,
             image_support_override: None,
             turn_in_flight: false,
+            awaiting_model: false,
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
             turn_assistant_text: None,
@@ -4373,6 +4390,23 @@ impl SessionRuntime {
         self.append(Message::new(Role::System, vec![ContentBlock::text(text)]));
     }
 
+    /// Mark a provider request as sent and not yet answered. A host can show the
+    /// interval as waiting for the model (a local server may spend minutes on
+    /// prompt processing before its first output). Closes any wait still open.
+    fn begin_model_wait(&mut self, events: &broadcast::Sender<RuntimeEvent>) {
+        self.end_model_wait(events);
+        self.awaiting_model = true;
+        let _ = events.send(RuntimeEvent::ModelWaitStarted);
+    }
+
+    /// Close the open model wait, if any: the first output arrived, or the
+    /// request ended without output. Idempotent.
+    fn end_model_wait(&mut self, events: &broadcast::Sender<RuntimeEvent>) {
+        if std::mem::take(&mut self.awaiting_model) {
+            let _ = events.send(RuntimeEvent::ModelWaitEnded);
+        }
+    }
+
     /// Open a provider stream, retrying a transient connection failure (network
     /// or 5xx) up to `max_stream_retries` with exponential backoff. A rate-limit
     /// or quota error is not retried here — it pauses the run instead.
@@ -4385,9 +4419,11 @@ impl SessionRuntime {
         let max = self.config.max_stream_retries;
         let mut attempt: u32 = 0;
         loop {
+            self.begin_model_wait(events);
             match self.provider.stream(request.clone()).await {
                 Ok(stream) => return Ok(stream),
                 Err(err) => {
+                    self.end_model_wait(events);
                     self.last_quota = err.quota().cloned();
                     let transient = matches!(
                         err,
@@ -5322,6 +5358,7 @@ impl SessionRuntime {
                         return self.stop(events, StopReason::Cancelled);
                     }
                     () = self.steer.urgent_notified() => {
+                        self.end_model_wait(events);
                         let admission = self.admit_soft_interrupts("during_stream", events);
                         if admission.user {
                             self.reset_progress_breakers(
@@ -5353,6 +5390,7 @@ impl SessionRuntime {
                     }
                     event = stream.next() => match event {
                         Some(Ok(ModelEvent::TextDelta(delta))) => {
+                            self.end_model_wait(events);
                             let _ = events.send(RuntimeEvent::Text(delta.clone()));
                             text.push_str(&delta);
                             // Live guard: stop a degenerate punctuation flood or a
@@ -5368,6 +5406,7 @@ impl SessionRuntime {
                             }
                         }
                         Some(Ok(ModelEvent::ReasoningDelta(delta))) => {
+                            self.end_model_wait(events);
                             let _ = events.send(RuntimeEvent::Reasoning(delta.clone()));
                             reasoning.push_str(&delta);
                         }
@@ -5377,6 +5416,7 @@ impl SessionRuntime {
                             input_json,
                             provider_metadata,
                         })) => {
+                            self.end_model_wait(events);
                             calls.push((id, name, input_json, provider_metadata));
                         }
                         Some(Ok(ModelEvent::Usage(usage))) => {
@@ -5402,17 +5442,32 @@ impl SessionRuntime {
                         Some(Ok(ModelEvent::ProviderWarning { message })) => {
                             let _ = events.send(RuntimeEvent::Warning(message));
                         }
+                        // Liveness while the server evaluates the prompt: it
+                        // keeps the wait open and is dropped once output began.
+                        Some(Ok(ModelEvent::PromptProgress { processed, total })) => {
+                            if self.awaiting_model {
+                                let _ = events.send(RuntimeEvent::ModelPromptProgress {
+                                    processed,
+                                    total,
+                                });
+                            }
+                        }
                         Some(Ok(ModelEvent::OutputLimit {
                             message,
                             truncated_tools: cut,
                         })) => {
+                            self.end_model_wait(events);
                             output_limited = true;
                             truncated_tools.extend(cut);
                             output_limit_message = Some(message);
                         }
-                        Some(Ok(ModelEvent::Done)) => break,
+                        Some(Ok(ModelEvent::Done)) => {
+                            self.end_model_wait(events);
+                            break;
+                        }
                         Some(Ok(_)) => {}
                         Some(Err(err)) => {
+                            self.end_model_wait(events);
                             if matches!(err, ProviderError::StreamDecode(_) | ProviderError::MalformedToolArguments { .. }) {
                                 self.capability_evidence.observe_input(false);
                             }
@@ -5460,6 +5515,7 @@ impl SessionRuntime {
                             break;
                         }
                         None => {
+                            self.end_model_wait(events);
                             let _ = events.send(RuntimeEvent::Warning(
                                 "stream ended before a completion marker".to_string(),
                             ));
@@ -7130,6 +7186,9 @@ impl SessionRuntime {
         reason: StopReason,
         detail: Option<String>,
     ) -> StopReason {
+        // Close an open model wait before the terminal event, so `Stopped`
+        // stays the last event a turn publishes.
+        self.end_model_wait(events);
         // The turn has ended: a switch is allowed again at this boundary.
         self.turn_in_flight = false;
         // Build the per-turn handoff from the state tracked across the turn, so a

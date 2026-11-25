@@ -2,6 +2,53 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0294: The Work Chrome Says When It Is Waiting For The Model
+
+**Status:** accepted · **Date:** 2026-11-25. Builds on ADR-0148 (honest
+operation labels with elapsed time). Refs LocalHub#297.
+
+**Context.** A local server can evaluate a long prompt for minutes before its
+first token: one report measured 278 s for 6,380 prompt tokens on CPU. The
+full-screen chat kept showing `Working` with a running clock, which looks the
+same as a stalled connection. A llama.cpp server sends nothing while it
+evaluates a streamed prompt, not even response headers, unless the request asks
+for progress with its documented `return_progress` field. It then streams
+`prompt_progress` (`total`, `cache`, `processed`, `time_ms`) beside a
+role-only delta on its OpenAI-compatible chat endpoint. Its Anthropic messages
+endpoint does not carry these reports. (Public llama.cpp server documentation,
+`tools/server/README.md`, and source, `tools/server/server-task.cpp`.)
+
+**Decision.**
+1. **The harness brackets every provider request.** `RuntimeEvent::ModelWaitStarted`
+   is sent before each request attempt; `ModelWaitEnded` is sent at its first
+   text, reasoning, tool call, output-limit report or completion, on a stream
+   or open error before any retry backoff or compaction, on an urgent steer, and
+   before the turn's `Stopped`, which stays the last event of a turn. Usage and
+   warnings do not end the wait.
+2. **The full-screen chat labels the wait.** While a wait is open in a busy
+   projection, the work chrome reads `Waiting for model` with the operation's
+   elapsed time. A requested cancellation keeps the operation's own label.
+3. **Prompt progress is shown where the server reports it.** A new
+   `ModelEvent::PromptProgress { processed, total }` carries a report; it is
+   liveness metadata, never output, and keeps the wait open. The harness
+   forwards it as `RuntimeEvent::ModelPromptProgress` only while the wait is
+   open, and the label becomes `Waiting for model · prompt 4096/6380 tokens (64%)`.
+   A count that moves means the server is working; a count that stays still
+   for long is suspect.
+4. **The progress request is opt-in per provider.** The OpenAI-compatible
+   adapter sends `return_progress: true` only when the provider option
+   `prompt_progress = true`; the option itself is never forwarded. Other
+   compatible servers may reject an unknown field, so it is off for every
+   source by default. Reports are parsed whenever a server sends them.
+5. **Other hosts ignore the new events.** The served-session feed, ACP and MCP
+   surfaces do not change their wire records.
+
+**Consequences.** Every local turn now shows when it waits for the model. Live
+prompt progress needs an `openai-compatible` provider aimed at llama.cpp's
+chat endpoint with `prompt_progress = true`; the default Anthropic-kind route
+through a LocalBox proxy shows the waiting label only until that route can
+carry progress.
+
 ## ADR-0293: The Native Mesh Participant Supports Strict Sign-Off And Review Snapshots
 
 **Status:** accepted · **Date:** 2026-11-24. Builds on ADR-0190 (the
