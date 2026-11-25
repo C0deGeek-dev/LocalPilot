@@ -31,12 +31,16 @@ pub fn current_version() -> &'static str {
 /// Returns an error if the repository cannot be reached or parsed.
 pub async fn newer_release() -> anyhow::Result<Option<String>> {
     let current = Version::parse(current_version());
-    Ok(match (latest_release().await?, current) {
-        (Some((latest, name)), Some(cur)) if latest.key() > cur.key() => Some(name),
-        // Unparseable local version: surface the latest tag so the user can decide.
-        (Some((_, name)), None) => Some(name),
-        _ => None,
-    })
+    Ok(latest_release()
+        .await?
+        .filter(|(latest, _)| is_upgrade(latest, current.as_ref()))
+        .map(|(_, name)| name))
+}
+
+/// Whether `latest` is worth advertising to a binary running `current`: it is
+/// strictly newer, or the running version does not parse (then the user decides).
+fn is_upgrade(latest: &Version, current: Option<&Version>) -> bool {
+    current.is_none_or(|current| latest.key() > current.key())
 }
 
 /// The newest release tag the repository publishes, whatever the running version
@@ -78,7 +82,9 @@ pub async fn latest_release() -> anyhow::Result<Option<(Version, String)>> {
 
 /// A best-effort, cached "update available" notice for app startup. Checks the
 /// network at most once a day (result cached in the project store) and returns
-/// the newer tag, if any. Never fails; returns `None` on any error.
+/// the newer tag, if any. A cached tag is compared against the running version
+/// again, so a notice never outlives an update that installed it. Never fails;
+/// returns `None` on any error.
 ///
 /// Disabled by `LOCALPILOT_NO_UPDATE_CHECK`, and compiled out on the windows-gnu
 /// toolchain whose TLS stack is unstable (the explicit `update` command still
@@ -96,13 +102,9 @@ pub async fn cached_notice(root: &Path) -> Option<String> {
 
     if let Ok(Some(bytes)) = store.get_cache(CACHE_KEY) {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            let checked_at = value.get("checked_at").and_then(serde_json::Value::as_u64);
-            if checked_at.is_some_and(|t| now.saturating_sub(t) < CHECK_INTERVAL_SECS) {
-                // Fresh cache: return the stored result without a network call.
-                return value
-                    .get("latest")
-                    .and_then(serde_json::Value::as_str)
-                    .map(String::from);
+            if let Some(notice) = fresh_cached_notice(&value, now, current_version()) {
+                // Fresh cache: answer without a network call.
+                return notice;
             }
         }
     }
@@ -116,6 +118,32 @@ pub async fn cached_notice(root: &Path) -> Option<String> {
         let _ = store.put_cache(CACHE_KEY, &bytes);
     }
     latest
+}
+
+/// Read a cached check. `None` when the record is missing its timestamp or is
+/// older than the check interval (the caller asks the network again); otherwise
+/// the notice it supports for a binary running `current`. The record may predate
+/// an update of this binary, so its tag is advertised only while it is still an
+/// upgrade.
+fn fresh_cached_notice(
+    record: &serde_json::Value,
+    now: u64,
+    current: &str,
+) -> Option<Option<String>> {
+    let checked_at = record.get("checked_at")?.as_u64()?;
+    if now.saturating_sub(checked_at) >= CHECK_INTERVAL_SECS {
+        return None;
+    }
+    let current = Version::parse(current);
+    Some(
+        record
+            .get("latest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|tag| {
+                Version::parse(tag).is_some_and(|latest| is_upgrade(&latest, current.as_ref()))
+            })
+            .map(String::from),
+    )
 }
 
 fn now_unix() -> u64 {
@@ -400,7 +428,62 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Version;
+    use super::{fresh_cached_notice, Version, CHECK_INTERVAL_SECS};
+
+    fn record(checked_at: u64, latest: Option<&str>) -> serde_json::Value {
+        serde_json::json!({ "checked_at": checked_at, "latest": latest })
+    }
+
+    #[test]
+    fn fresh_cache_naming_the_running_version_shows_no_notice() {
+        // The check ran on an older binary; this binary is that release now.
+        let cached = record(1_000, Some("v6.0.0"));
+        assert_eq!(fresh_cached_notice(&cached, 1_100, "v6.0.0"), Some(None));
+        // A development build of the same release reads as that release.
+        assert_eq!(
+            fresh_cached_notice(&cached, 1_100, "v6.0.0-3-gabc1234-dirty"),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn fresh_cache_naming_an_older_version_shows_no_notice() {
+        let cached = record(1_000, Some("v5.2.0"));
+        assert_eq!(fresh_cached_notice(&cached, 1_100, "v6.0.0"), Some(None));
+    }
+
+    #[test]
+    fn fresh_cache_naming_a_newer_version_shows_it() {
+        let cached = record(1_000, Some("v6.0.0"));
+        assert_eq!(
+            fresh_cached_notice(&cached, 1_100, "v5.2.0"),
+            Some(Some("v6.0.0".to_string()))
+        );
+        // An unparseable running version still surfaces the tag.
+        assert_eq!(
+            fresh_cached_notice(&cached, 1_100, "abc1234"),
+            Some(Some("v6.0.0".to_string()))
+        );
+    }
+
+    #[test]
+    fn fresh_cache_with_no_release_shows_no_notice() {
+        let cached = record(1_000, None);
+        assert_eq!(fresh_cached_notice(&cached, 1_100, "v5.2.0"), Some(None));
+        let garbage = record(1_000, Some("not-a-version"));
+        assert_eq!(fresh_cached_notice(&garbage, 1_100, "v5.2.0"), Some(None));
+    }
+
+    #[test]
+    fn expired_or_untimed_cache_asks_the_network_again() {
+        let cached = record(1_000, Some("v6.0.0"));
+        assert_eq!(
+            fresh_cached_notice(&cached, 1_000 + CHECK_INTERVAL_SECS, "v5.2.0"),
+            None
+        );
+        let untimed = serde_json::json!({ "latest": "v6.0.0" });
+        assert_eq!(fresh_cached_notice(&untimed, 1_100, "v5.2.0"), None);
+    }
 
     #[test]
     fn alpha_ordering_and_describe_suffix() {

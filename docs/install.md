@@ -452,7 +452,9 @@ If you only need non-interactive commands (`ask`, `print`, `harness`, `memory`,
 ## The update notice
 
 The interactive REPL and the bare `localpilot` launch do a best-effort, cached
-check (at most once a day) and show a notice when a newer release exists.
+check (at most once a day) and show a notice when a newer release exists. A
+cached result is compared with the running version again, so the notice stops
+as soon as you install the release it names.
 **Nothing self-updates** — installing is always something you run. Disable the
 notice with `LOCALPILOT_NO_UPDATE_CHECK=1`. The automatic check is off on the
 `windows-gnu` toolchain (its TLS stack is unstable); `localpilot update` still

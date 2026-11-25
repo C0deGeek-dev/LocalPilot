@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Update notice: a cached once-a-day check is compared with the running version
+  again, so bare `localpilot` no longer advertises the release you just
+  installed while the cached check is still fresh (LocalHub#296).
+
 - Search setup: SearXNG now runs with Docker that is only inside WSL, when WSL
   uses its default NAT networking with localhost forwarding (a `127.0.0.1`
   publish then reaches only Windows' own loopback; other modes are refused with
