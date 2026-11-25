@@ -33,6 +33,21 @@ perform no preparation. A tool already denied by the current permission engine
 keeps its ordinary refusal/retry path and does not trigger Git preparation;
 structured command grants are considered in this read-only preflight.
 
+After the authorized `git init` and before that empty commit, the runtime
+checks Git's effective author and committer identity with the same strict check
+a commit uses, so environment, `author.*`/`committer.*` and
+`includeIf.gitdir` configuration count. When fields are missing, an
+interactive session with a question prompter asks for only those fields and
+where to save them: this repository's `.git/config` (the default) or, only by
+explicit choice, the global Git configuration. Initialization rechecks the
+identity under admission and writes only fields still missing; an existing
+identity is never replaced, and a repository config that is linked or redirected
+outside the project's `.git` directory is refused for a repository-only save.
+Errors from an identity write never echo the supplied values. A declined prompt saves no identity and makes no commit.
+A declined prompt, a non-interactive run, or one without a prompter stops before
+the commit with a recovery that points to repository-local `git config`; the
+completed `git init` and exclusion setup are kept for the retry.
+
 An effectively empty root contains only `.git/`, `.localpilot/`, `.localmind/`,
 `.localpilot.toml` and `.localmind.toml`; links and any other entry disqualify it.
 Those runtime/config paths are excluded locally, never staged. Existing HEADs

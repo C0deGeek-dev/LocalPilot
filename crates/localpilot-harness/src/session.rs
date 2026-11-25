@@ -2042,10 +2042,33 @@ impl SessionRuntime {
         if !allowed || cancel.is_cancelled() {
             return Err(crate::HarnessError::ProjectSetup("empty-project initialization was not authorized; approve Git initialization and an empty commit, or initialize and commit the baseline yourself before retrying".into()));
         }
+        // Git refuses an empty commit without an identity. Ask for only the
+        // missing fields before touching disk; initialization rechecks them
+        // under admission and writes only what is still missing.
+        // Git is initialized first so identity probes see configuration that
+        // applies to the new repository (for example `includeIf.gitdir`).
+        let prepare_root = root.clone();
+        let git = Arc::clone(&self.project_git);
+        let admission = self.admission.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            admission.mutate(|| git.prepare(&prepare_root)).unwrap_or_else(|| {
+                Err(crate::HarnessError::ProjectSetup("session ownership changed before Git setup; resume from the owning session".into()))
+            })
+        })
+        .await
+        .map_err(|error| crate::HarnessError::ProjectSetup(error.to_string()))??;
+        let Some(missing) = prepared else {
+            return Ok(false);
+        };
+        let identity = if missing.is_empty() {
+            None
+        } else {
+            self.ask_git_identity(&root, &missing, cancel).await?
+        };
         let git = Arc::clone(&self.project_git);
         let admission = self.admission.clone();
         let initialized = tokio::task::spawn_blocking(move || {
-            admission.mutate(|| git.initialize(&root)).unwrap_or_else(|| {
+            admission.mutate(|| git.initialize(&root, identity.as_ref())).unwrap_or_else(|| {
                 Err(crate::HarnessError::ProjectSetup("session ownership changed before Git setup; resume from the owning session".into()))
             })
         })
@@ -2057,6 +2080,38 @@ impl SessionRuntime {
             )?);
         }
         Ok(initialized)
+    }
+
+    /// Ask the interactive user for the Git identity fields the baseline
+    /// commit is missing. `None` when no user can answer; initialization then
+    /// fails with a repository-local recovery instead of guessing.
+    async fn ask_git_identity(
+        &self,
+        root: &std::path::Path,
+        missing: &[crate::project_start::IdentityField],
+        cancel: &CancellationToken,
+    ) -> Result<Option<crate::project_start::GitIdentity>, crate::HarnessError> {
+        let Some(prompter) = self.prompter.as_ref() else {
+            return Ok(None);
+        };
+        if self.config.interactivity == Interactivity::NonInteractive {
+            return Ok(None);
+        }
+        let questions = git_identity_questions(root, missing);
+        let answers = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            answers = prompter.ask(&questions) => Some(answers),
+        };
+        let recovery = crate::project_start::identity_recovery(root, missing);
+        let Some(answers) = answers else {
+            return Err(crate::HarnessError::ProjectSetup(format!(
+                "Git identity setup was cancelled. {recovery}"
+            )));
+        };
+        git_identity_from_answers(missing, &answers)
+            .map(Some)
+            .map_err(|reason| crate::HarnessError::ProjectSetup(format!("{reason} {recovery}")))
     }
 
     /// Whether a file-mutating call targets the project's `PROGRESS.md`.
@@ -7467,6 +7522,114 @@ impl Drop for SessionRuntime {
     }
 }
 
+const GIT_IDENTITY_CANCEL: &str = "Cancel";
+const GIT_IDENTITY_REPOSITORY: &str = "This repository only (recommended)";
+const GIT_IDENTITY_GLOBAL: &str = "All repositories (global)";
+
+/// The questions for missing Git identity fields, then where to store them.
+fn git_identity_questions(
+    root: &std::path::Path,
+    missing: &[crate::project_start::IdentityField],
+) -> Vec<localpilot_tools::UserQuestion> {
+    use crate::project_start::IdentityField;
+    use localpilot_tools::{QuestionOption, UserQuestion};
+    let cancel = || QuestionOption {
+        label: GIT_IDENTITY_CANCEL.into(),
+        description: Some("Save nothing; configure Git yourself and retry".into()),
+    };
+    let mut questions: Vec<UserQuestion> = missing
+        .iter()
+        .map(|field| {
+            let (question, kind) = match field {
+                IdentityField::Name => (
+                    "Git has no author name for this project's first commit. Type the name your commits should use.",
+                    "name",
+                ),
+                IdentityField::Email => (
+                    "Git has no author email for this project's first commit. Type the email your commits should use.",
+                    "email",
+                ),
+            };
+            UserQuestion {
+                header: Some(format!("Git {kind}")),
+                question: question.into(),
+                // Free text only; dismissing the batch cancels setup.
+                options: Vec::new(),
+                multi_select: false,
+            }
+        })
+        .collect();
+    questions.push(UserQuestion {
+        header: Some("Git identity".into()),
+        question: "Where should LocalPilot save this Git identity before it creates the empty initial commit?".into(),
+        options: vec![
+            QuestionOption {
+                label: GIT_IDENTITY_REPOSITORY.into(),
+                description: Some(format!(
+                    "Saved in {}; other repositories are unchanged",
+                    root.join(".git").join("config").display()
+                )),
+            },
+            QuestionOption {
+                label: GIT_IDENTITY_GLOBAL.into(),
+                description: Some(
+                    "Saved in your global Git configuration and used by every repository".into(),
+                ),
+            },
+            cancel(),
+        ],
+        multi_select: false,
+    });
+    questions
+}
+
+/// Turn the user's answers into an identity, or say why nothing is saved.
+fn git_identity_from_answers(
+    missing: &[crate::project_start::IdentityField],
+    answers: &[localpilot_tools::UserAnswer],
+) -> Result<crate::project_start::GitIdentity, String> {
+    use crate::project_start::{GitIdentity, IdentityField, IdentityScope};
+    use localpilot_tools::UserAnswer;
+    let declined = || "Git identity setup was declined; nothing was saved.".to_string();
+    let mut identity = GitIdentity {
+        name: None,
+        email: None,
+        scope: IdentityScope::Repository,
+    };
+    for (index, field) in missing.iter().enumerate() {
+        let Some(UserAnswer::Other(text)) = answers.get(index) else {
+            return Err(declined());
+        };
+        let value = text.trim();
+        let invalid = value.is_empty()
+            || value.chars().count() > 256
+            || value
+                .chars()
+                .any(|c| c.is_control() || c == '<' || c == '>')
+            || (*field == IdentityField::Email
+                && (!value.contains('@') || value.chars().any(char::is_whitespace)));
+        if invalid {
+            return Err(format!(
+                "the {} entered is not usable; nothing was saved.",
+                field.key()
+            ));
+        }
+        match field {
+            IdentityField::Name => identity.name = Some(value.to_string()),
+            IdentityField::Email => identity.email = Some(value.to_string()),
+        }
+    }
+    identity.scope = match answers.get(missing.len()) {
+        Some(UserAnswer::Selected(labels)) if labels.len() == 1 => match labels[0].as_str() {
+            GIT_IDENTITY_REPOSITORY => IdentityScope::Repository,
+            GIT_IDENTITY_GLOBAL => IdentityScope::Global,
+            _ => return Err(declined()),
+        },
+        _ => return Err(declined()),
+    };
+    Ok(identity)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -7681,6 +7844,142 @@ mod tests {
             assert!(!dir.path().join("created.txt").exists());
             assert!(runtime.messages.iter().any(message_is_error));
         }
+    }
+
+    struct IdentityPrompter(Vec<localpilot_tools::UserAnswer>);
+
+    impl localpilot_tools::UserPrompter for IdentityPrompter {
+        fn ask<'a>(
+            &'a self,
+            questions: &'a [localpilot_tools::UserQuestion],
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Vec<localpilot_tools::UserAnswer>> + Send + 'a>,
+        > {
+            assert_eq!(questions.len(), 3, "name, email, then where to save");
+            assert!(questions[2].options[0].label.contains("This repository"));
+            Box::pin(std::future::ready(self.0.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_project_asks_for_a_missing_git_identity_and_saves_it_locally() {
+        use localpilot_tools::UserAnswer;
+        for accept in [true, false] {
+            let provider = Arc::new(
+                FakeProvider::new()
+                    .tool_call(
+                        "create",
+                        "write_file",
+                        serde_json::json!({"path":"created.txt", "content":"new\n"}),
+                    )
+                    .text("done"),
+            );
+            let (mut runtime, dir) = runtime_with_provider(provider);
+            let home = tempfile::tempdir().unwrap();
+            runtime.project_git = Arc::new(crate::project_start::ProjectGit::isolated(
+                home.path(),
+                false,
+            ));
+            let global = std::fs::read(home.path().join("gitconfig")).unwrap();
+            runtime.set_permission_profile(Profile::Bypass, Vec::new());
+            runtime.config.interactivity = Interactivity::Interactive;
+            runtime.prompter = Some(Arc::new(IdentityPrompter(if accept {
+                vec![
+                    UserAnswer::Other(" Session Person ".into()),
+                    UserAnswer::Other("session@example.invalid".into()),
+                    UserAnswer::Selected(vec![GIT_IDENTITY_REPOSITORY.into()]),
+                ]
+            } else {
+                vec![UserAnswer::Dismissed; 3]
+            })));
+            let (events, _) = broadcast::channel(256);
+            runtime
+                .run_turn("create created.txt", &events, &CancellationToken::new())
+                .await;
+            assert_eq!(
+                global,
+                std::fs::read(home.path().join("gitconfig")).unwrap()
+            );
+            if accept {
+                assert!(dir.path().join("created.txt").exists());
+                let local = std::fs::read_to_string(dir.path().join(".git/config")).unwrap();
+                assert!(local.contains("name = Session Person"), "{local}");
+                assert!(local.contains("email = session@example.invalid"), "{local}");
+                let author = std::process::Command::new("git")
+                    .args(["log", "-1", "--format=%an <%ae>"])
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&author.stdout).trim(),
+                    "Session Person <session@example.invalid>"
+                );
+            } else {
+                assert!(!dir.path().join("created.txt").exists());
+                // Declining keeps the prepared repository for the recovery
+                // commands, but saves no identity and makes no commit.
+                assert!(dir.path().join(".git").is_dir());
+                let local = std::fs::read_to_string(dir.path().join(".git/config")).unwrap();
+                assert!(!local.contains("[user]"), "{local}");
+                let head = std::process::Command::new("git")
+                    .args(["rev-parse", "--verify", "HEAD"])
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap();
+                assert!(!head.status.success());
+                assert!(runtime.messages.iter().any(message_is_error));
+            }
+        }
+    }
+
+    #[test]
+    fn git_identity_answers_reject_unusable_values_and_default_to_the_repository() {
+        use crate::project_start::{IdentityField, IdentityScope};
+        use localpilot_tools::UserAnswer;
+        let email = [IdentityField::Email];
+        let scope = |label: &str| UserAnswer::Selected(vec![label.into()]);
+        let ok = git_identity_from_answers(
+            &email,
+            &[
+                UserAnswer::Other("a@b.example".into()),
+                scope(GIT_IDENTITY_REPOSITORY),
+            ],
+        )
+        .unwrap();
+        assert_eq!(ok.scope, IdentityScope::Repository);
+        assert_eq!((ok.name, ok.email.as_deref()), (None, Some("a@b.example")));
+        let global = git_identity_from_answers(
+            &email,
+            &[
+                UserAnswer::Other("a@b.example".into()),
+                scope(GIT_IDENTITY_GLOBAL),
+            ],
+        )
+        .unwrap();
+        assert_eq!(global.scope, IdentityScope::Global);
+        for bad in ["", "no-at-sign", "a b@c", "<a@b>", "a@b\u{7}c"] {
+            assert!(git_identity_from_answers(
+                &email,
+                &[
+                    UserAnswer::Other(bad.into()),
+                    scope(GIT_IDENTITY_REPOSITORY)
+                ],
+            )
+            .is_err());
+        }
+        assert!(git_identity_from_answers(
+            &email,
+            &[
+                UserAnswer::Other("a@b.example".into()),
+                scope(GIT_IDENTITY_CANCEL)
+            ],
+        )
+        .is_err());
+        assert!(git_identity_from_answers(
+            &email,
+            &[scope(GIT_IDENTITY_CANCEL), scope(GIT_IDENTITY_REPOSITORY)],
+        )
+        .is_err());
     }
 
     #[tokio::test]

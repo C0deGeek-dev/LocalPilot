@@ -1300,7 +1300,7 @@ pub(crate) const HARNESS_LOCAL_PATHS: [&str; 4] = [
 pub fn init_git_workspace(root: &Path) -> Result<bool, HarnessError> {
     let project = crate::project_start::ProjectGit::default();
     if project.needs_baseline(root)? {
-        return project.initialize(root);
+        return project.initialize(root, None);
     }
     if is_git_workspace(root) {
         return Ok(false);
