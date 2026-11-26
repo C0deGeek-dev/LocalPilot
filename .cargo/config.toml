@@ -15,3 +15,12 @@ ci-check = "check --workspace"
 # installed binary uses the home default unchanged.
 [env]
 LOCALMIND_GLOBAL_ROOT = "@project"
+
+# Windows: link the C runtime statically, so the shipped binaries run on a
+# Windows without the Visual C++ redistributable (a fresh install has none).
+# Dev, CI and release builds all use the same link mode.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

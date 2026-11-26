@@ -13,6 +13,8 @@
 #   ./install/install.ps1 -Target x86_64-pc-windows-gnu   # force a target
 #   ./install/install.ps1 -PowerShellShortcuts     # also install the optional llm* shortcuts
 #   ./install/install.ps1 -NoSetup                 # install only; skip the guided first run
+#   ./install/install.ps1 -InstallVCRuntime        # install a missing Visual C++ runtime without asking
+#   ./install/install.ps1 -NoRuntime               # skip the Visual C++ runtime check
 #
 # Run standalone (piped from the network, no checkout) it installs prebuilt,
 # checksum-verified binaries and needs no Rust toolchain. Run from inside a
@@ -27,7 +29,9 @@ param(
     [string]$Toolchain = '',
     [string]$Target = '',
     [Alias('InstallPowerShellShortcuts')][switch]$PowerShellShortcuts,
-    [switch]$NoSetup
+    [switch]$NoSetup,
+    [switch]$InstallVCRuntime,
+    [switch]$NoRuntime
 )
 $ErrorActionPreference = 'Stop'
 $repo = 'C0deGeek-dev/LocalPilot'
@@ -222,6 +226,171 @@ function Test-LocalXSetup {
     return ($help -match '(?m)^\s+setup\b')
 }
 
+# --- Visual C++ runtime ----------------------------------------------------------
+# llama.cpp's Windows builds (the engine LocalBox runs models with) load the
+# Microsoft Visual C++ Redistributable, which a fresh Windows does not have.
+# The installer offers it at an interactive prompt that defaults to No, or
+# installs it unattended only with -InstallVCRuntime; -NoRuntime skips the
+# check. It downloads from Microsoft and runs the file only after checking its
+# signature, holding it open against changes until the installer has started.
+# These functions are self-contained so install/test-install-path.ps1 can
+# exercise them with injected effects.
+
+# Microsoft's permanent link to the latest supported x64 redistributable.
+function Get-LocalXVCRuntimeUrl { return 'https://aka.ms/vs/17/release/vc_redist.x64.exe' }
+
+# The native system directory. A 32-bit PowerShell on 64-bit Windows sees a
+# redirected System32 (the 32-bit DLLs), so it has to look in Sysnative.
+function Get-LocalXNativeSystemDirectory {
+    param(
+        [bool]$Is64BitOperatingSystem = [Environment]::Is64BitOperatingSystem,
+        [bool]$Is64BitProcess = [Environment]::Is64BitProcess,
+        [string]$WindowsDirectory = $env:windir
+    )
+    if ($Is64BitOperatingSystem -and -not $Is64BitProcess) {
+        return Join-Path $WindowsDirectory 'Sysnative'
+    }
+    return Join-Path $WindowsDirectory 'System32'
+}
+
+# The Visual C++ runtime DLLs llama.cpp loads that are absent from $SystemDirectory.
+function Get-LocalXMissingVCRuntime {
+    param([Parameter(Mandatory)][string]$SystemDirectory)
+    return @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll' |
+        Where-Object { -not (Test-Path -LiteralPath (Join-Path $SystemDirectory $_) -PathType Leaf) })
+}
+
+# Whether a prompt can be answered here: a console that is not redirected, in a
+# PowerShell not started with -NonInteractive.
+function Test-LocalXInteractive {
+    param(
+        [bool]$UserInteractive = [Environment]::UserInteractive,
+        [bool]$InputRedirected = [Console]::IsInputRedirected,
+        [string[]]$CommandLine = [Environment]::GetCommandLineArgs()
+    )
+    if (-not $UserInteractive -or $InputRedirected) { return $false }
+    return -not @($CommandLine | Where-Object { $_ -match '^[-/]noni' })
+}
+
+# True only for a valid Authenticode signature whose signing certificate's
+# common name is exactly Microsoft Corporation.
+function Test-LocalXMicrosoftSignature {
+    param($Signature)
+    if (-not $Signature -or "$($Signature.Status)" -ne 'Valid') { return $false }
+    $certificate = $Signature.SignerCertificate
+    if ($certificate -isnot [System.Security.Cryptography.X509Certificates.X509Certificate2]) { return $false }
+    $name = $certificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+    return ($name -ceq 'Microsoft Corporation')
+}
+
+# The redistributable installer's exit code, as an outcome.
+function Get-LocalXVCRuntimeOutcome {
+    param([int]$ExitCode)
+    switch ($ExitCode) {
+        0 { return 'installed' }
+        3010 { return 'restart' }
+        1641 { return 'restart' }
+        1638 { return 'registered' }
+        default { return 'failed' }
+    }
+}
+
+# What to say when a LocalX program could not start because Windows could not
+# find a DLL it needs (STATUS_DLL_NOT_FOUND); nothing for any other exit code.
+function Get-LocalXMissingDllHint {
+    param([int]$ExitCode, [string]$Program)
+    if ($ExitCode -ne -1073741515) { return $null }
+    return "$Program could not start: Windows could not find a DLL it needs (STATUS_DLL_NOT_FOUND). LocalX releases up to v6.0.0 need the Microsoft Visual C++ Redistributable (x64); install it from $(Get-LocalXVCRuntimeUrl), then run the command again."
+}
+
+# Offer the Visual C++ runtime when it is missing. Returns what happened:
+# present, unsupported, noninteractive, declined, untrusted, installed,
+# restart, registered, failed or error. Nothing is downloaded or run without
+# a yes at the prompt or -InstallVCRuntime ($Consent).
+function Request-LocalXVCRuntime {
+    param(
+        [bool]$Consent = $false,
+        [string]$Architecture = $env:PROCESSOR_ARCHITECTURE,
+        [string]$SystemDirectory = (Get-LocalXNativeSystemDirectory),
+        [bool]$Interactive = (Test-LocalXInteractive),
+        [scriptblock]$Ask = { Read-Host 'Download it from Microsoft and install it now? [y/N]' },
+        [scriptblock]$Download = { param($Url, $File) Invoke-WebRequest -Uri $Url -OutFile $File -UseBasicParsing },
+        # Opens the downloaded file so nothing can change or replace it until
+        # the installer has started from the checked bytes.
+        [scriptblock]$Hold = { param($File) [System.IO.File]::Open($File, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read) },
+        [scriptblock]$GetSignature = { param($File) Get-AuthenticodeSignature -FilePath $File },
+        [scriptblock]$Run = { param($File) (Start-Process -FilePath $File -ArgumentList '/install', '/passive', '/norestart' -Verb RunAs -Wait -PassThru).ExitCode }
+    )
+    if ($Architecture -ne 'AMD64') { return 'unsupported' }
+    $missing = Get-LocalXMissingVCRuntime -SystemDirectory $SystemDirectory
+    if (-not $missing) { return 'present' }
+    $url = Get-LocalXVCRuntimeUrl
+
+    Write-Host ""
+    Write-Host "LocalX runs local models with llama.cpp, whose Windows build needs the"
+    Write-Host "Microsoft Visual C++ Redistributable (x64). This computer does not have it"
+    Write-Host "(missing: $($missing -join ', ')). It is a Microsoft package installed for the"
+    Write-Host "whole computer; Windows asks for permission before it is installed."
+    $later = "install it later from $url; local models cannot start until it is installed."
+    if (-not $Consent) {
+        if (-not $Interactive) {
+            Write-Host "Not installed (no one to ask; -InstallVCRuntime installs it unattended): $later"
+            return 'noninteractive'
+        }
+        try {
+            $answer = & $Ask
+        } catch {
+            Write-Host "Not installed (could not ask: $_): $later"
+            return 'noninteractive'
+        }
+        if ("$answer".Trim() -notmatch '^(?i:y|yes)$') {
+            Write-Host "Not installed: $later"
+            return 'declined'
+        }
+    }
+
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) ("vc_redist-" + [System.Guid]::NewGuid().ToString('N') + '.x64.exe')
+    $held = $null
+    try {
+        & $Download $url $file
+        $held = & $Hold $file
+        $signature = & $GetSignature $file
+        if (-not (Test-LocalXMicrosoftSignature -Signature $signature)) {
+            Write-Warning "the downloaded file is not validly signed by Microsoft Corporation ($($signature.Status)); it was not run. Install the redistributable from $url yourself."
+            return 'untrusted'
+        }
+        $outcome = Get-LocalXVCRuntimeOutcome -ExitCode (& $Run $file)
+        $still = Get-LocalXMissingVCRuntime -SystemDirectory $SystemDirectory
+        switch ($outcome) {
+            'restart' {
+                Write-Host "Visual C++ Redistributable installed; Windows needs a restart to finish it (LocalX does not restart the computer)$(if ($still) { "; until then these are missing: $($still -join ', ')" })."
+                return 'restart'
+            }
+            'failed' {
+                Write-Warning "the Visual C++ Redistributable did not install; $later"
+                return 'failed'
+            }
+        }
+        if ($still) {
+            $what = if ($outcome -eq 'registered') { 'another version of the Visual C++ Redistributable is registered, but' } else { 'the Visual C++ Redistributable reported success, but' }
+            Write-Warning "$what these are still missing: $($still -join ', '); $later"
+            return 'failed'
+        }
+        if ($outcome -eq 'registered') {
+            Write-Host "Another version of the Visual C++ Redistributable is registered, and its DLLs are present."
+        } else {
+            Write-Host "Visual C++ Redistributable installed."
+        }
+        return $outcome
+    } catch {
+        Write-Warning "could not install the Visual C++ Redistributable: $_. $later"
+        return 'error'
+    } finally {
+        if ($held) { $held.Dispose() }
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- binary install ---------------------------------------------------------
 
 if ($mode -eq 'binary') {
@@ -296,6 +465,8 @@ if ($mode -eq 'binary') {
         Copy-Item $binaryFile.FullName (Join-Path $bin "$tool.exe") -Force
         Set-LocalXPath -Directory $bin
 
+        if (-not $NoRuntime) { Request-LocalXVCRuntime -Consent $InstallVCRuntime.IsPresent | Out-Null }
+
         Write-Host ""
         Write-Host "installing the stack ..."
         # The bootstrapped binary owns the install of everything else (and the
@@ -329,6 +500,8 @@ if ($mode -eq 'binary') {
         }
         if ($stackExitCode -ne 0) {
             Write-Host ""
+            $dllHint = Get-LocalXMissingDllHint -ExitCode $stackExitCode -Program "$tool.exe"
+            if ($dllHint) { Write-Host "note: $dllHint" }
             Write-Host "note: the stack install did not complete."
             Write-Host "      $tool is on disk at $bin\$tool.exe; run it again to retry: & '$bin\$tool.exe' $($postcmd -join ' ')"
         }
@@ -425,6 +598,10 @@ $bin = Join-Path $env:LOCALAPPDATA 'localx\bin'
 $staging = Join-Path $root 'target/localx-install'
 Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 
+# Cargo reads .cargo/config.toml from the directory it runs in, and the
+# checkout's config is what links the C runtime statically on Windows.
+Push-Location $root
+try {
 Write-Host "building and installing the localpilot CLI (features: $Features) ..."
 $cargoArgs = @()
 if ($Toolchain) { $cargoArgs += "+$Toolchain" }
@@ -448,6 +625,10 @@ if ($Target) { $localxArgs += @('--target', $Target) }
 cargo @localxArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "cargo install localx failed (exit $LASTEXITCODE). See the build error above."
+}
+}
+finally {
+    Pop-Location
 }
 
 New-Item -ItemType Directory -Path $bin -Force | Out-Null
@@ -516,6 +697,7 @@ Write-Host "developing every LocalX repository side by side? build the stack fro
 Write-Host "    localx dev use <workspace>; localx update"
 
 if (-not $NoSetup -and (Test-LocalXSetup -Localx $destLocalx)) {
+    if (-not $NoRuntime) { Request-LocalXVCRuntime -Consent $InstallVCRuntime.IsPresent | Out-Null }
     Write-Host ""
     & $destLocalx setup
     if ($LASTEXITCODE -ne 0) {

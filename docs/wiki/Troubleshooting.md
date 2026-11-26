@@ -36,6 +36,15 @@ reports a "local knowledge review" and says why.
 Only the fullscreen session can ask for web consent; a piped run has no web
 access.
 
+## Windows: "could not find a DLL it needs"
+
+Llama.cpp's Windows builds load the Microsoft Visual C++ Redistributable
+(x64), which a fresh Windows does not have; LocalX releases up to v6.0.0 need
+it for their own tools too. The installer offers it when it is missing. To
+install it yourself, download
+https://aka.ms/vs/17/release/vc_redist.x64.exe from Microsoft, run it, then
+run the command again (`localx install all` or `localx setup`).
+
 ## `localx setup` stopped at a step
 
 Setup prints the step that failed, the log to read (each run keeps its own

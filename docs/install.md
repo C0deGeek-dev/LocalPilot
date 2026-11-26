@@ -149,6 +149,19 @@ sh install.sh --version 2.6.0   # a specific release instead of the latest
 sh install.sh --from-source     # compile instead (needs a checkout and cargo)
 ```
 
+On Windows, the model engine (llama.cpp) needs the Microsoft Visual C++
+Redistributable (x64), which a fresh Windows does not have. When it is
+missing, the installer says so and asks whether to download it from
+Microsoft and install it (the default is No; Windows asks for permission; it
+runs only when Microsoft's signature checks out, and LocalX never restarts
+the computer). Without a yes, nothing is downloaded and the installer
+prints the link: https://aka.ms/vs/17/release/vc_redist.x64.exe. For an
+unattended install, `-InstallVCRuntime` installs it without asking (with the
+same signature check); `-NoRuntime` skips the check altogether. The LocalX
+tools themselves do not need it. If `localx` from v6.0.0 or earlier stops
+with "could not find a DLL it needs", install that redistributable and run
+it again.
+
 On Windows, the installer also accepts `-PowerShellShortcuts`, and `-NoSetup`
 to install without continuing into the guided first run (`localx setup`) that
 follows a successful install when the installed `localx` has one.

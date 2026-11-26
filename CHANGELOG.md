@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Windows: `localpilot.exe` and `localx.exe` link the C runtime statically,
+  so they start on a Windows without the Visual C++ Redistributable; the
+  release checks every shipped binary for runtime imports, and a source
+  install builds from the checkout so it links the same way. Because
+  llama.cpp's Windows builds still need that redistributable, the installer
+  offers to download it from Microsoft when it is missing (asks first,
+  default No; runs it only when Microsoft's signature checks out; never
+  restarts the computer; `-InstallVCRuntime` installs it unattended and
+  `-NoRuntime` skips the check), and names it when an older `localx` cannot
+  start.
+
 - Docs: the README and the wiki's Getting Started lead with the one-line
   installer and `localx setup` (including `--existing` and safe re-runs);
   the wiki's Troubleshooting explains a stopped setup step and the

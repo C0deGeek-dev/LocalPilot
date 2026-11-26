@@ -97,6 +97,29 @@ jobs:
             Copy-Item LICENSE, README.md, LICENSING.md, CHANGELOG.md "dist/$tool/"
             tar -C dist -czf "$tool-${{ matrix.target }}.tar.gz" "$tool"
           }
+      # A fresh Windows has no Visual C++ runtime, so every shipped binary must
+      # link the C runtime statically (.cargo/config.toml). Checked on the
+      # staged bytes, with dumpbin's own exit status.
+      - name: no Visual C++ runtime imports (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match '\\Hostx64\\x64\\' } | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $files = @(Get-ChildItem dist -Recurse -File -Include *.exe, *.dll)
+          if (-not $files) { throw 'no staged .exe or .dll to check' }
+          $bad = @()
+          foreach ($file in $files) {
+            $out = & $dumpbin.FullName /nologo /dependents $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed on $($file.FullName)" }
+            $hits = @($out | Where-Object { $_ -match '^\s+(vcruntime|msvcp|api-ms-win-crt-)\S*\.dll\s*$' } | ForEach-Object { $_.Trim() })
+            if ($hits) { $bad += "$($file.Name): $($hits -join ', ')" }
+            else { "$($file.Name): no Visual C++ runtime imports" }
+          }
+          if ($bad) { throw "these staged binaries need the Visual C++ runtime, which a fresh Windows does not have: $($bad -join '; ')" }
       # Digest computed where the bytes are produced, so it covers exactly what
       # was archived. It proves a download was not corrupted or truncated; it
       # does not prove origin — only signing does that, and this repo does not
