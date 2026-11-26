@@ -189,9 +189,16 @@ fn setup_command(options: &setup::Options, out: &mut dyn Write) -> ExitCode {
     let log_root = localpilot_dist::Cache::default_root("localx")
         .unwrap_or_else(std::env::temp_dir)
         .join("logs");
+    let log_dir = match setup::claim_log_dir(&log_root, stamp) {
+        Ok(dir) => dir,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut host = setup::System {
         tool_path,
-        log_dir: log_root.join(format!("setup-{stamp}")),
+        log_dir,
         runs: 0,
     };
     match setup::run(options, &mut host, out) {

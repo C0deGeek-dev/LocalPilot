@@ -317,7 +317,8 @@ pub(crate) fn run(
         Stage::Reply,
         &format!("LocalPilot replied: {}", first_line(text)),
     );
-    for item in host.overrides() {
+    let overrides = host.overrides();
+    for item in &overrides {
         let _ = writeln!(
             out,
             "      note: {item} overrides the provider settings for LocalPilot started here"
@@ -330,6 +331,18 @@ pub(crate) fn run(
             out,
             Stage::Chat,
             "Setup is done. Start chatting with `localpilot`.",
+        );
+        return Ok(());
+    }
+    // Chat started here would read those overrides and could talk to another
+    // server than the one just checked, so it is not opened for the user.
+    if !overrides.is_empty() {
+        say(
+            out,
+            Stage::Chat,
+            "Setup is done. Chat is not opened here, because the settings named above \
+             could send it to another provider than the one just checked. Remove them, or \
+             run `localpilot` in another folder.",
         );
         return Ok(());
     }
@@ -822,6 +835,34 @@ fn recorded_model(config: &str) -> Option<String> {
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
+}
+
+/// A log folder of this run's own under `root`: `setup-<stamp>`, or the
+/// first free `setup-<stamp>-<n>` when another run started in the same
+/// second. Creating it is the claim, so two runs never share one.
+///
+/// # Errors
+/// No folder could be created.
+pub(crate) fn claim_log_dir(root: &std::path::Path, stamp: u64) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("could not create {}: {error}", root.display()))?;
+    for n in 1..=100u32 {
+        let name = if n == 1 {
+            format!("setup-{stamp}")
+        } else {
+            format!("setup-{stamp}-{n}")
+        };
+        let dir = root.join(name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("could not create {}: {error}", dir.display())),
+        }
+    }
+    Err(format!(
+        "{} holds too many runs from one second",
+        root.display()
+    ))
 }
 
 /// The real computer: stack tools by path, logs under one folder per run.
@@ -1383,12 +1424,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_is_not_opened_where_overrides_could_redirect_it() {
+        let mut fake = Fake::fresh();
+        fake.tty = true;
+        fake.overrides = vec![".localpilot.toml".into()];
+        let (result, out) = run_fake(&yes(), &mut fake);
+        assert_eq!(result, Ok(()), "{out}");
+        assert!(!fake.chat_opened);
+        assert!(out.contains("Chat is not opened here"), "{out}");
+    }
+
+    #[test]
     fn a_chat_that_exits_with_an_error_is_reported() {
         let mut fake = Fake::fresh();
         fake.tty = true;
         fake.chat_clean = false;
         let (result, _) = run_fake(&yes(), &mut fake);
         assert_eq!(result.unwrap_err().stage, Stage::Chat);
+    }
+
+    #[test]
+    fn each_run_claims_its_own_log_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let first = claim_log_dir(root.path(), 7).unwrap();
+        let second = claim_log_dir(root.path(), 7).unwrap();
+        assert_ne!(first, second);
+        assert!(first.ends_with("setup-7"));
+        assert!(second.ends_with("setup-7-2"));
     }
 
     #[test]

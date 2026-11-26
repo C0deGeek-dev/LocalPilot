@@ -177,14 +177,16 @@ It runs eight steps and says which one it is on:
    config alone (no project config, no `LOCALPILOT_PROVIDER*` variables) so
    the reply comes from the server just checked. Anything that would
    override it in the current folder is named afterwards.
-8. Opens chat (`--no-chat` stops before it).
+8. Opens chat (`--no-chat` stops before it). Chat is not opened when
+   settings in the current folder override the provider, since it would
+   read them and could talk to another server.
 
 Setup is safe to run again: each step looks before it acts. `--yes` never
 replaces a different default provider, or local settings that name another
 server or model; that takes `--replace-provider` (or, for another provider,
 a yes at the terminal). When a step fails, setup prints the step, the log to read
-(each step's output is kept under `localx/logs/setup-<time>/` in the LocalX
-data directory) and the command to run it again.
+(each run keeps its steps' output in a folder of its own under
+`localx/logs/` in the LocalX data directory) and the command to run it again.
 
 Run inside a LocalPilot checkout, the script builds **that working tree** rather
 than downloading a release — a developer running the installer in their own clone
