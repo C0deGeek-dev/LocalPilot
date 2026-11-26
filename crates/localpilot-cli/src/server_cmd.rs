@@ -10616,11 +10616,17 @@ pub(crate) mod tests {
                 let code = code.expose().to_string();
                 async move { exchange_with(&endpoint, &capability, &code).await }
             });
-            send_command(&mut write, ClientCommand::PairCancel { attempt })
-                .await
-                .unwrap();
+            // When the phone wins first, the server may already have closed the
+            // issuer's connection, so the cancel write itself can fail.
+            let cancel = send_command(&mut write, ClientCommand::PairCancel { attempt }).await;
             let outcome = finished(&mut issuer).await;
             let phone = phone.await.unwrap();
+            if let Err(error) = &cancel {
+                assert!(
+                    matches!(outcome, PairingOutcome::Used { .. }),
+                    "the cancel could not be sent ({error}) yet the phone did not win: {outcome:?}"
+                );
+            }
             match outcome {
                 PairingOutcome::Used { .. } => {
                     used += 1;
