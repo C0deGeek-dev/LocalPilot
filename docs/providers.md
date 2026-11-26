@@ -68,6 +68,33 @@ block.
   key env) into `.localpilot.toml` and sets it as the default provider. The
   merge **upserts only `[providers.local]`** — any other providers,
   `[mcp.servers.*]` tables, and comments already in the file are preserved.
+- **Make LocalBox your default everywhere** with `--user`:
+
+  ```sh
+  localpilot localbox adopt --user [--serve <model>] [--endpoint http://127.0.0.1:<port>/v1]
+  ```
+
+  This writes the same `[provider] default` and `[providers.local]` into your
+  user config instead, under its lock, keeping everything else in the file
+  byte for byte. It also records the model's key as `[localbox] model`, so
+  the same model can be served again later. The key comes from LocalBox
+  itself (`localbox models --json` reports which catalog model the proxy at
+  that port serves), never from the server's model file name. When LocalBox
+  cannot tell (an older LocalBox, or an ambiguous answer), no key is recorded
+  and a note says why. `--serve` reuses a server that is already serving that
+  model, and refuses when LocalBox reports a different one. `--endpoint` adopts
+  a LocalBox proxy already running on another port of this computer; it
+  cannot be combined with `--serve`, which starts on LocalBox's own
+  configured port.
+
+  Run again against the same server, it writes nothing. If your user config
+  says something else — a different default provider, a `[providers.local]`
+  with another address or model, or a `[localbox] model` that would change or
+  be removed — `adopt --user` lists what it would replace and stops. It
+  replaces them only when you answer yes at the terminal or pass
+  `--replace-existing`, and copies the old file to
+  `config.toml.bak-<UTC time>` first. `--yes` approves the write but never a
+  replacement.
 - **Inside a running chat session**, `/localbox models` lists LocalBox's actual
   launch catalog—not merely the model currently answering `/v1/models`. Each
   row starts with the exact copy-pasteable model key and includes aliases,

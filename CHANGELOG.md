@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot localbox adopt --user` makes a LocalBox server your default in
+  every folder: it writes `[provider] default` and `[providers.local]` into
+  your user config under its lock, keeping the rest of the file unchanged, and
+  records the model key LocalBox reports for that proxy as `[localbox] model`
+  (a new user-only key). The same server again writes nothing. Replacing a
+  different default provider, `[providers.local]` or recorded key takes a yes
+  at the terminal or `--replace-existing`, never `--yes` alone, and the old
+  file is backed up first. `--endpoint` adopts a LocalBox proxy on another
+  loopback port, and `adopt --serve <model>` now reuses a server LocalBox
+  reports as serving that model instead of trying to start it again.
+
 - Windows installer: `install.ps1` now puts the LocalX `bin` directory on PATH
   itself — appended to the saved user PATH (kept as written, `%VARIABLES%`
   unexpanded, never the machine PATH), announced to running programs so new

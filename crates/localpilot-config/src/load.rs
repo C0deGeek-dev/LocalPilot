@@ -199,7 +199,7 @@ fn separate_project_request(
 /// Keys a project file must never set: they grant the agent more than the
 /// user's own settings do, and a repository must not be able to grant itself
 /// anything. Refused loudly rather than ignored, so the author sees why.
-const USER_ONLY_KEYS: [&str; 7] = [
+const USER_ONLY_KEYS: [&str; 8] = [
     "permissions.action_mode",
     "permissions.allow_commands",
     "permissions.scratch_root",
@@ -208,6 +208,8 @@ const USER_ONLY_KEYS: [&str; 7] = [
     "harness.commit_unverified",
     // The whole table: a repository must not choose where pairing points.
     "remote",
+    // The whole table: a repository must not choose which model loads here.
+    "localbox",
 ];
 
 fn refuse_user_only_keys(project: &Path) -> Result<(), ConfigError> {
@@ -1079,6 +1081,35 @@ enabled = false
                 Err(ConfigError::UserOnly { key: "remote", .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_adopted_localbox_model_is_read_from_the_user_config_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        let paths = ConfigPaths {
+            user: Some(user.clone()),
+            project: Some(project.clone()),
+        };
+        std::fs::write(&user, "[localbox]\nmodel = 'qwen35-2b'\n").unwrap();
+        std::fs::write(&project, "").unwrap();
+        assert_eq!(
+            load(&paths, &CliOverrides::default())
+                .unwrap()
+                .localbox
+                .model
+                .as_deref(),
+            Some("qwen35-2b")
+        );
+        std::fs::write(&project, "[localbox]\nmodel = 'huge-model'\n").unwrap();
+        assert!(matches!(
+            load(&paths, &CliOverrides::default()),
+            Err(ConfigError::UserOnly {
+                key: "localbox",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -36,6 +36,31 @@ use serde::Deserialize;
 /// surface probed here. Mirrored from LocalBox's public defaults — never
 /// imported from it.
 const DEFAULT_PROXY_BASE_URL: &str = "http://127.0.0.1:11435/v1";
+const DEFAULT_PROXY_PORT: u16 = 11435;
+
+/// A LocalBox endpoint given on the command line, as its base URL and port.
+/// Loopback HTTP only (`127.0.0.1`, `localhost` or `[::1]`), with an optional
+/// `/v1`: adoption points LocalPilot at a server on this computer, never
+/// elsewhere.
+fn loopback_endpoint(raw: &str) -> anyhow::Result<(String, u16)> {
+    let refuse = || {
+        anyhow::anyhow!(
+            "--endpoint takes a LocalBox address on this computer, like http://127.0.0.1:11435/v1, not '{raw}'"
+        )
+    };
+    let rest = raw.trim().strip_prefix("http://").ok_or_else(refuse)?;
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix("/v1").unwrap_or(rest);
+    let (host, port) = rest.rsplit_once(':').ok_or_else(refuse)?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return Err(refuse());
+    }
+    let port: u16 = port.parse().map_err(|_| refuse())?;
+    if port == 0 {
+        return Err(refuse());
+    }
+    Ok((format!("http://{host}:{port}/v1"), port))
+}
 const MODELS_CATALOG_SCHEMA: u32 = 1;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 
@@ -43,6 +68,39 @@ const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 struct LocalBoxModelsCatalog {
     schema: u32,
     models: Vec<LocalBoxModelEntry>,
+    /// What the LocalBox proxy on one port serves, from LocalBox's own
+    /// observation. Older LocalBox builds do not report it.
+    #[serde(default)]
+    serving: Option<LocalBoxServing>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBoxServing {
+    proxy_port: u16,
+    model: Option<String>,
+    reason: Option<String>,
+}
+
+/// The catalog key the LocalBox proxy on `proxy_port` serves, as LocalBox
+/// itself established it, or why that is not known.
+fn serving_key(catalog: &LocalBoxModelsCatalog, proxy_port: u16) -> Result<String, String> {
+    let serving = catalog
+        .serving
+        .as_ref()
+        .ok_or_else(|| "this LocalBox does not report which model it serves".to_string())?;
+    if serving.proxy_port != proxy_port {
+        return Err(format!(
+            "LocalBox reported port {} instead of {proxy_port}",
+            serving.proxy_port
+        ));
+    }
+    serving.model.clone().ok_or_else(|| {
+        serving
+            .reason
+            .clone()
+            .unwrap_or_else(|| "LocalBox could not tell which model it serves".to_string())
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,10 +146,20 @@ fn safe_catalog_field(value: &str, max_chars: usize) -> String {
 }
 
 async fn read_models_catalog() -> anyhow::Result<LocalBoxModelsCatalog> {
+    read_models_catalog_with(&[]).await
+}
+
+/// The catalog, plus what the proxy on `proxy_port` serves.
+async fn read_models_catalog_for(proxy_port: u16) -> anyhow::Result<LocalBoxModelsCatalog> {
+    read_models_catalog_with(&["--proxy-port".to_string(), proxy_port.to_string()]).await
+}
+
+async fn read_models_catalog_with(extra: &[String]) -> anyhow::Result<LocalBoxModelsCatalog> {
     let program = localbox_on_path()
         .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
     let output = tokio::process::Command::new(program)
         .args(["models", "--json"])
+        .args(extra)
         .stdin(Stdio::null())
         .output()
         .await
@@ -532,9 +600,19 @@ pub(crate) fn merge_local_provider(
     endpoint: &str,
     model: Option<&str>,
 ) -> anyhow::Result<String> {
-    use toml_edit::{value, DocumentMut, Item, Table};
+    let mut doc: toml_edit::DocumentMut = existing.parse()?;
+    merge_local_provider_into(&mut doc, endpoint, model)?;
+    Ok(doc.to_string())
+}
 
-    let mut doc: DocumentMut = existing.parse()?;
+/// [`merge_local_provider`] on a parsed document, for callers that edit a
+/// config under their own lock.
+fn merge_local_provider_into(
+    doc: &mut toml_edit::DocumentMut,
+    endpoint: &str,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    use toml_edit::{value, Item, Table};
 
     // `[provider] default = "local"`. Insert as a real table (not an inline
     // `provider = { .. }`) so a fresh file reads with section headers and a user
@@ -564,7 +642,259 @@ pub(crate) fn merge_local_provider(
     if let Some(model) = model {
         local["model"] = value(model);
     }
-    Ok(doc.to_string())
+    Ok(())
+}
+
+/// What adopting LocalBox into the user config would replace: a default
+/// provider other than `local`, a `[providers.local]` value that says
+/// something else (the model included), or a recorded `[localbox] model` that
+/// would change, or be removed because the serving model is not known. Keys
+/// that are missing are filled in, not replaced, so they are not listed.
+pub(crate) fn user_adoption_conflicts(
+    doc: &toml_edit::DocumentMut,
+    endpoint: &str,
+    model: Option<&str>,
+    localbox_model: Option<&str>,
+) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    if let Some(default) = doc
+        .get("provider")
+        .and_then(|provider| provider.get("default"))
+    {
+        if default.as_str() != Some("local") {
+            conflicts.push(format!(
+                "[provider] default is {} (LocalBox would make it \"local\")",
+                default.to_string().trim()
+            ));
+        }
+    }
+    if let Some(local) = doc
+        .get("providers")
+        .and_then(|providers| providers.get("local"))
+    {
+        let wanted = [
+            ("kind", Some("anthropic")),
+            ("base_url", Some(endpoint)),
+            ("api_key_env", Some("ANTHROPIC_AUTH_TOKEN")),
+            ("model", model),
+        ];
+        for (key, value) in wanted {
+            let (Some(value), Some(current)) = (value, local.get(key)) else {
+                continue;
+            };
+            if current.as_str() != Some(value) {
+                conflicts.push(format!(
+                    "[providers.local] {key} is {} (LocalBox would make it \"{value}\")",
+                    current.to_string().trim()
+                ));
+            }
+        }
+    }
+    if let Some(current) = doc
+        .get("localbox")
+        .and_then(|localbox| localbox.get("model"))
+    {
+        match localbox_model {
+            Some(key) if current.as_str() == Some(key) => {}
+            Some(key) => conflicts.push(format!(
+                "[localbox] model is {} (LocalBox would make it \"{key}\")",
+                current.to_string().trim()
+            )),
+            None => conflicts.push(format!(
+                "[localbox] model is {} (LocalBox would remove it: the model now serving could not be identified)",
+                current.to_string().trim()
+            )),
+        }
+    }
+    conflicts
+}
+
+/// The LocalBox adoption as an edit of the user config: the provider merge,
+/// plus the LocalBox model key under `[localbox] model` when known, or no
+/// `[localbox] model` at all when it is not.
+fn apply_user_adoption(
+    doc: &mut toml_edit::DocumentMut,
+    endpoint: &str,
+    model: Option<&str>,
+    localbox_model: Option<&str>,
+) -> Result<(), String> {
+    merge_local_provider_into(doc, endpoint, model).map_err(|error| error.to_string())?;
+    // `[localbox]` may be a table or an inline table; edit either in place,
+    // keeping anything else it holds.
+    match (doc.get_mut("localbox"), localbox_model) {
+        (Some(item), key) => {
+            let table = item
+                .as_table_like_mut()
+                .ok_or_else(|| "[localbox] in the config is not a table".to_string())?;
+            match key {
+                Some(key) => {
+                    table.insert("model", toml_edit::value(key));
+                }
+                None => {
+                    // An unidentified model leaves no restart key behind.
+                    table.remove("model");
+                    if table.is_empty() {
+                        doc.remove("localbox");
+                    }
+                }
+            }
+        }
+        (None, Some(key)) => {
+            let table = crate::user_config::table_at(doc, &["localbox"])?;
+            table["model"] = toml_edit::value(key);
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// What `adopt --user` did to the user config.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UserAdoption {
+    /// It already said this; nothing was written.
+    Unchanged,
+    /// Written; `backup` holds the previous file when something was replaced.
+    Written { backup: Option<std::path::PathBuf> },
+}
+
+/// Adopt LocalBox into the user config at `path` under the config lock.
+/// `localbox_model` is the model key LocalBox established for the server
+/// being adopted, or `None` when it could not. Anything listed by
+/// [`user_adoption_conflicts`] needs `approve_replace` to say yes; the
+/// previous file is then copied to `<name>.bak-<utc>` right before it is
+/// replaced.
+///
+/// # Errors
+/// Refused replacement, an unreadable or invalid config, a config that changed
+/// while it was being edited, or a failed write or backup.
+pub(crate) fn adopt_into_user_config(
+    path: &std::path::Path,
+    endpoint: &str,
+    model: Option<&str>,
+    localbox_model: Option<&str>,
+    approve_replace: &dyn Fn(&[String]) -> anyhow::Result<bool>,
+) -> anyhow::Result<UserAdoption> {
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => anyhow::bail!("could not read {}: {error}", path.display()),
+    };
+    let doc: toml_edit::DocumentMut = current
+        .parse()
+        .map_err(|error| anyhow::anyhow!("{} is not valid TOML ({error})", path.display()))?;
+    let conflicts = user_adoption_conflicts(&doc, endpoint, model, localbox_model);
+    if !conflicts.is_empty() && !approve_replace(&conflicts)? {
+        anyhow::bail!(
+            "not replacing your existing provider settings in {}:\n  {}\nre-run with --replace-existing to replace them (a backup is kept)",
+            path.display(),
+            conflicts.join("\n  ")
+        );
+    }
+    let backup = std::cell::RefCell::new(None);
+    let backup_path = path.with_file_name(format!(
+        "{}.bak-{}",
+        path.file_name()
+            .map_or_else(|| "config.toml".into(), |name| name.to_string_lossy()),
+        compact_utc_now()
+    ));
+    let before_replace = || -> Result<(), String> {
+        if conflicts.is_empty() {
+            return Ok(());
+        }
+        // Never overwrite an earlier backup, even one from the same second.
+        let mut target = backup_path.clone();
+        let mut suffix = 2;
+        while target.exists() {
+            if suffix > 99 {
+                return Err(format!(
+                    "{} and its numbered copies already exist",
+                    backup_path.display()
+                ));
+            }
+            let mut name = backup_path.as_os_str().to_os_string();
+            name.push(format!("-{suffix}"));
+            target = std::path::PathBuf::from(name);
+            suffix += 1;
+        }
+        std::fs::copy(path, &target)
+            .map_err(|error| format!("could not back up to {}: {error}", target.display()))?;
+        *backup.borrow_mut() = Some(target);
+        Ok(())
+    };
+    let edit = |doc: &mut toml_edit::DocumentMut| -> Result<(), String> {
+        // Approval covered the conflicts seen above, and only those.
+        if user_adoption_conflicts(doc, endpoint, model, localbox_model) != conflicts {
+            return Err("the config changed while it was being edited".into());
+        }
+        apply_user_adoption(doc, endpoint, model, localbox_model)
+    };
+    match crate::user_config::edit_user_config(Some(path), &before_replace, &|_| {}, &edit) {
+        Ok(crate::user_config::ConfigEdit::Unchanged) => Ok(UserAdoption::Unchanged),
+        Ok(crate::user_config::ConfigEdit::Written) => Ok(UserAdoption::Written {
+            backup: backup.into_inner(),
+        }),
+        Err(crate::user_config::ConfigError::Before(message)) => {
+            anyhow::bail!("{} was not changed: {message}", path.display())
+        }
+        Err(crate::user_config::ConfigError::After(message)) => {
+            anyhow::bail!("{} was written, but {message}", path.display())
+        }
+    }
+}
+
+/// Whether `adopt --user` may replace another provider: an explicit
+/// `--replace-existing`, else an answer at the terminal. `--yes` is not an
+/// input on purpose: approving the write is not approving the replacement.
+fn may_replace(
+    replace_existing: bool,
+    stdin_is_tty: bool,
+    ask: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    if replace_existing {
+        Ok(true)
+    } else if stdin_is_tty {
+        ask()
+    } else {
+        Ok(false)
+    }
+}
+
+/// UTC now as `YYYYMMDDTHHMMSSZ`, for backup names.
+fn compact_utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    compact_utc(secs)
+}
+
+fn compact_utc(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let rem = secs % 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+/// Where `localbox adopt` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdoptTarget {
+    /// The project's `.localpilot.toml`.
+    Project,
+    /// The user config, so every folder uses LocalBox by default.
+    User { replace_existing: bool },
 }
 
 /// Adopt a running LocalBox server into the project's `.localpilot.toml` so
@@ -578,6 +908,8 @@ pub(crate) fn merge_local_provider(
 /// approval non-interactively, or the config file cannot be read/written.
 pub(crate) async fn run_adopt(
     serve: Option<String>,
+    endpoint: Option<String>,
+    target: AdoptTarget,
     assume_yes: bool,
     stdin_is_tty: bool,
 ) -> anyhow::Result<()> {
@@ -593,6 +925,10 @@ pub(crate) async fn run_adopt(
         Interactivity::Interactive
     } else {
         Interactivity::NonInteractive
+    };
+    let (base_url, proxy_port) = match endpoint.as_deref() {
+        Some(raw) => loopback_endpoint(raw)?,
+        None => (DEFAULT_PROXY_BASE_URL.to_string(), DEFAULT_PROXY_PORT),
     };
     let serve_entry = match serve.as_deref() {
         Some(model) => Some(preflight_serve(model).await?),
@@ -640,13 +976,23 @@ pub(crate) async fn run_adopt(
 
     // A direct serve target is authoritative: reuse only the same serving
     // identity; a different running model is replaced, then adopted.
-    let mut state = detect().await;
+    let mut state = detect_at(&base_url, localbox_on_path()).await;
+    // Which catalog model the proxy at this endpoint serves, as LocalBox itself
+    // establishes it from the processes that hold the sockets.
+    let serving = match &state {
+        LocalBoxState::Running { .. } => read_models_catalog_for(proxy_port)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|catalog| serving_key(&catalog, proxy_port)),
+        _ => Err("no LocalBox server is running".to_string()),
+    };
     let target_is_running = serve_entry.as_ref().is_some_and(|entry| {
-        matches!(
-            &state,
-            LocalBoxState::Running { model: Some(active), .. }
-                if active == &entry.name || entry.aliases.iter().any(|alias| alias == active)
-        )
+        serving.as_deref() == Ok(entry.name.as_str())
+            || matches!(
+                &state,
+                LocalBoxState::Running { model: Some(active), .. }
+                    if active == &entry.name || entry.aliases.iter().any(|alias| alias == active)
+            )
     });
     if let Some(entry) = serve_entry.as_ref().filter(|_| !target_is_running) {
         if matches!(state, LocalBoxState::NotInstalled) {
@@ -669,8 +1015,9 @@ pub(crate) async fn run_adopt(
             anyhow::bail!("declined — LocalBox not started");
         }
         let _ = start_localbox_serve(model, allow_untuned, ServeStdio::Inherit, None).await?;
-        state = detect().await;
+        state = detect_at(&base_url, localbox_on_path()).await;
     } else if serve_entry.is_none() && !matches!(state, LocalBoxState::Running { .. }) {
+        let _ = &serving;
         match state {
             LocalBoxState::NotInstalled => {
                 anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
@@ -685,9 +1032,85 @@ pub(crate) async fn run_adopt(
     let (endpoint, model) = match state {
         LocalBoxState::Running { endpoint, model } => (endpoint, model),
         _ => anyhow::bail!(
-            "LocalBox did not come up at {DEFAULT_PROXY_BASE_URL} after starting — check `localbox status`"
+            "LocalBox did not come up at {base_url} after starting — check `localbox status`"
         ),
     };
+
+    if let AdoptTarget::User { replace_existing } = target {
+        let path = localpilot_config::user_config_path()
+            .ok_or_else(|| anyhow::anyhow!("there is no user config location on this system"))?;
+        let request = PermissionRequest {
+            tool: "localbox adopt".to_string(),
+            effect: Effect::WritePath {
+                inside_workspace: false,
+                overwrite: path.exists(),
+                secret_like: false,
+            },
+            interactivity,
+            trusted: true,
+            detail: path.display().to_string(),
+        };
+        if !consent(
+            &request,
+            &format!(
+                "use LocalBox at {endpoint} by default, in {}?",
+                path.display()
+            ),
+        )? {
+            anyhow::bail!("declined — no config written");
+        }
+        // Consent to write is not consent to replace another provider: that
+        // takes --replace-existing or an answer at the terminal, even with --yes.
+        let approve_replace = |conflicts: &[String]| -> anyhow::Result<bool> {
+            may_replace(replace_existing, stdin_is_tty, || {
+                eprintln!("your user config already says:");
+                for conflict in conflicts {
+                    eprintln!("  {conflict}");
+                }
+                crate::models_cmd::confirm("replace these with LocalBox (a backup is kept)?")
+            })
+        };
+        // The restart key is what LocalBox established for this endpoint after
+        // any start above; the server's own model id is a file path, never a key.
+        let serving = read_models_catalog_for(proxy_port)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|catalog| serving_key(&catalog, proxy_port));
+        if let (Some(entry), Ok(key)) = (serve_entry.as_ref(), serving.as_ref()) {
+            if key != &entry.name {
+                anyhow::bail!(
+                    "LocalBox at {endpoint} serves {key}, not {}; nothing written",
+                    entry.name
+                );
+            }
+        }
+        let localbox_model = serving.as_deref().ok();
+        if let Err(reason) = &serving {
+            eprintln!("note: no LocalBox model key is recorded for restarts: {reason}");
+        }
+        match adopt_into_user_config(
+            &path,
+            &endpoint,
+            model.as_deref(),
+            localbox_model,
+            &approve_replace,
+        )? {
+            UserAdoption::Unchanged => println!(
+                "LocalBox at {endpoint} is already your default in {}; nothing changed",
+                path.display()
+            ),
+            UserAdoption::Written { backup } => {
+                println!(
+                    "adopted LocalBox — {} now uses {endpoint} by default",
+                    path.display()
+                );
+                if let Some(backup) = backup {
+                    println!("the previous config is kept at {}", backup.display());
+                }
+            }
+        }
+        return Ok(());
+    }
 
     // Writing `.localpilot.toml` is a workspace file write; gate it too.
     let path = localpilot_config::project_config_path(&cwd);
@@ -1013,6 +1436,290 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const EP: &str = "http://127.0.0.1:11435";
+
+    fn never(_: &[String]) -> anyhow::Result<bool> {
+        panic!("nothing to replace, so nothing to approve")
+    }
+
+    #[test]
+    fn user_adoption_writes_a_fresh_config_with_the_model_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("localpilot").join("config.toml");
+        let outcome =
+            adopt_into_user_config(&path, EP, Some("qwen"), Some("qwen35-2b"), &never).unwrap();
+        assert_eq!(outcome, UserAdoption::Written { backup: None });
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
+        assert_eq!(doc["providers"]["local"]["base_url"].as_str(), Some(EP));
+        assert_eq!(doc["providers"]["local"]["model"].as_str(), Some("qwen"));
+        assert_eq!(doc["localbox"]["model"].as_str(), Some("qwen35-2b"));
+    }
+
+    #[test]
+    fn user_adoption_of_the_same_server_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        adopt_into_user_config(&path, EP, Some("qwen"), Some("qwen35-2b"), &never).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let outcome =
+            adopt_into_user_config(&path, EP, Some("qwen"), Some("qwen35-2b"), &never).unwrap();
+        assert_eq!(outcome, UserAdoption::Unchanged);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn user_adoption_fills_missing_keys_and_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "# mine\n[providers.openai]\nkind = \"openai\"\n\n[providers.local]\nkind = \"anthropic\"\n";
+        std::fs::write(&path, existing).unwrap();
+        let outcome = adopt_into_user_config(&path, EP, None, None, &never).unwrap();
+        assert_eq!(outcome, UserAdoption::Written { backup: None });
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# mine\n[providers.openai]\nkind = \"openai\"\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("base_url = \"http://127.0.0.1:11435\""),
+            "{text}"
+        );
+        assert!(!text.contains("[localbox]"), "no key, no table: {text}");
+    }
+
+    #[test]
+    fn user_adoption_refuses_to_replace_another_provider_without_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "[provider]\ndefault = \"openai\"\n\n[providers.local]\nkind = \"anthropic\"\nbase_url = \"http://10.0.0.5:8080\"\n";
+        std::fs::write(&path, existing).unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let decline = |conflicts: &[String]| -> anyhow::Result<bool> {
+            seen.borrow_mut().extend_from_slice(conflicts);
+            Ok(false)
+        };
+        let error = adopt_into_user_config(&path, EP, None, Some("qwen35-2b"), &decline)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--replace-existing"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        let seen = seen.into_inner();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].contains("default is \"openai\""), "{seen:?}");
+        assert!(
+            seen[1].contains("base_url is \"http://10.0.0.5:8080\""),
+            "{seen:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no backup, no lock residue beyond the config"
+        );
+    }
+
+    #[test]
+    fn a_different_model_or_restart_key_is_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        adopt_into_user_config(&path, EP, Some("small.gguf"), Some("small"), &never).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let decline = |conflicts: &[String]| -> anyhow::Result<bool> {
+            seen.borrow_mut().extend_from_slice(conflicts);
+            Ok(false)
+        };
+        assert!(
+            adopt_into_user_config(&path, EP, Some("big.gguf"), Some("big"), &decline).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let seen = seen.into_inner();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[0].starts_with("[providers.local] model"), "{seen:?}");
+        assert!(seen[1].starts_with("[localbox] model"), "{seen:?}");
+
+        let outcome =
+            adopt_into_user_config(&path, EP, Some("big.gguf"), Some("big"), &|_| Ok(true))
+                .unwrap();
+        let UserAdoption::Written {
+            backup: Some(backup),
+        } = outcome
+        else {
+            panic!("expected a backup, got {outcome:?}");
+        };
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), before);
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["providers"]["local"]["model"].as_str(),
+            Some("big.gguf")
+        );
+        assert_eq!(doc["localbox"]["model"].as_str(), Some("big"));
+    }
+
+    #[test]
+    fn an_inline_localbox_table_is_replaced_and_removed_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "localbox = { model = \"old\", note = \"mine\" }\n").unwrap();
+        let outcome = adopt_into_user_config(&path, EP, None, Some("new"), &|_| Ok(true)).unwrap();
+        let UserAdoption::Written {
+            backup: Some(first),
+        } = outcome
+        else {
+            panic!("expected a backup, got {outcome:?}");
+        };
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["localbox"]["model"].as_str(), Some("new"));
+        assert_eq!(doc["localbox"]["note"].as_str(), Some("mine"));
+        adopt_into_user_config(&path, EP, None, None, &|_| Ok(true)).unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert!(doc["localbox"].get("model").is_none(), "{doc}");
+        assert_eq!(doc["localbox"]["note"].as_str(), Some("mine"));
+        std::fs::write(&path, "localbox = { model = \"old\" }\n").unwrap();
+        adopt_into_user_config(&path, EP, None, None, &|_| Ok(true)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("localbox"), "{text}");
+        // Backups made within one second never overwrite each other.
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "localbox = { model = \"old\", note = \"mine\" }\n"
+        );
+        let backups = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".bak-")
+            })
+            .count();
+        assert_eq!(backups, 3);
+    }
+
+    #[test]
+    fn an_unidentified_model_never_leaves_a_stale_restart_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        adopt_into_user_config(&path, EP, Some("m.gguf"), Some("small"), &never).unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let decline = |conflicts: &[String]| -> anyhow::Result<bool> {
+            seen.borrow_mut().extend_from_slice(conflicts);
+            Ok(false)
+        };
+        // Same server, but LocalBox could not say which model it serves: the old
+        // key would be removed, which is a replacement.
+        assert!(adopt_into_user_config(&path, EP, Some("m.gguf"), None, &decline).is_err());
+        assert!(
+            seen.borrow()[0].contains("would remove it"),
+            "{:?}",
+            seen.borrow()
+        );
+        adopt_into_user_config(&path, EP, Some("m.gguf"), None, &|_| Ok(true)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[localbox]"), "{text}");
+        // Nothing stored and nothing known: adoption goes ahead without a key.
+        let fresh = dir.path().join("fresh.toml");
+        let outcome = adopt_into_user_config(&fresh, EP, Some("m.gguf"), None, &never).unwrap();
+        assert_eq!(outcome, UserAdoption::Written { backup: None });
+    }
+
+    fn catalog_with_serving(serving: serde_json::Value) -> LocalBoxModelsCatalog {
+        let mut value = serde_json::json!({ "schema": 1, "models": [] });
+        if !serving.is_null() {
+            value["serving"] = serving;
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_restart_key_comes_from_what_localbox_says_the_proxy_serves() {
+        let established = catalog_with_serving(serde_json::json!({
+            "proxyPort": 11435, "targetPort": 8080, "modelPath": "G:/gguf/a/a.gguf", "model": "a"
+        }));
+        assert_eq!(serving_key(&established, 11435), Ok("a".to_string()));
+        // Another port's answer never names this endpoint's model.
+        assert!(serving_key(&established, 11436)
+            .unwrap_err()
+            .contains("11436"));
+        let ambiguous = catalog_with_serving(serde_json::json!({
+            "proxyPort": 11435, "model": null, "reason": "more than one catalog model uses this file"
+        }));
+        assert_eq!(
+            serving_key(&ambiguous, 11435),
+            Err("more than one catalog model uses this file".to_string())
+        );
+        let older = catalog_with_serving(serde_json::Value::Null);
+        assert!(serving_key(&older, 11435)
+            .unwrap_err()
+            .contains("does not report"));
+    }
+
+    #[test]
+    fn an_adopt_endpoint_is_loopback_http_only() {
+        assert_eq!(
+            loopback_endpoint("http://127.0.0.1:11436/v1").unwrap(),
+            ("http://127.0.0.1:11436/v1".to_string(), 11436)
+        );
+        assert_eq!(
+            loopback_endpoint("http://localhost:11435/").unwrap(),
+            ("http://localhost:11435/v1".to_string(), 11435)
+        );
+        assert_eq!(loopback_endpoint("http://[::1]:9000").unwrap().1, 9000);
+        for bad in [
+            "https://127.0.0.1:11435/v1",
+            "http://10.0.0.5:11435/v1",
+            "http://127.0.0.1/v1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:11435/other",
+            "127.0.0.1:11435",
+        ] {
+            assert!(loopback_endpoint(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn approved_replacement_backs_up_the_previous_config_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "[provider]\ndefault = \"openai\"\n";
+        std::fs::write(&path, existing).unwrap();
+        let outcome =
+            adopt_into_user_config(&path, EP, None, Some("qwen35-2b"), &|_| Ok(true)).unwrap();
+        let UserAdoption::Written {
+            backup: Some(backup),
+        } = outcome
+        else {
+            panic!("expected a backup, got {outcome:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), existing);
+        let name = backup.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("config.toml.bak-") && name.ends_with('Z'),
+            "{name}"
+        );
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
+    }
+
+    #[test]
+    fn replacing_needs_the_flag_or_a_terminal_answer() {
+        let ask_panics = || -> anyhow::Result<bool> { panic!("must not ask") };
+        assert!(may_replace(true, false, ask_panics).unwrap());
+        assert!(may_replace(true, true, ask_panics).unwrap());
+        assert!(!may_replace(false, false, ask_panics).unwrap());
+        assert!(!may_replace(false, true, || Ok(false)).unwrap());
+        assert!(may_replace(false, true, || Ok(true)).unwrap());
+    }
+
+    #[test]
+    fn backup_names_use_compact_utc() {
+        assert_eq!(compact_utc(0), "19700101T000000Z");
+        assert_eq!(compact_utc(951_782_400), "20000229T000000Z");
+        assert_eq!(compact_utc(1_795_660_245), "20261126T023045Z");
+    }
 
     #[test]
     fn adopt_merge_upserts_only_providers_local_and_preserves_siblings() {

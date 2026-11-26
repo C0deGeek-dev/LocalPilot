@@ -38,6 +38,7 @@ pub struct Config {
     pub mesh: MeshConfig,
     pub lab: LabConfig,
     pub remote: RemoteConfig,
+    pub localbox: LocalBoxConfig,
     /// `[search]`: managed search backends. Read from the user's config file
     /// alone, after every other key (see `load`), so no other layer can set
     /// it, and a malformed value in another layer cannot stop loading.
@@ -79,11 +80,22 @@ impl Default for Config {
             mesh: MeshConfig::default(),
             lab: LabConfig::default(),
             remote: RemoteConfig::default(),
+            localbox: LocalBoxConfig::default(),
             search: crate::search::SearchConfig::default(),
             search_ignored: Vec::new(),
             project_request: None,
         }
     }
+}
+
+/// `[localbox]`: the LocalBox model this user adopted as their default, written
+/// by `localpilot localbox adopt --user --serve <model>`. User config only: a
+/// repository must not choose which model this computer loads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalBoxConfig {
+    /// The model key as `localbox serve` takes it.
+    pub model: Option<String>,
 }
 
 /// `[remote]`: the gateway that lets paired devices reach this user's served

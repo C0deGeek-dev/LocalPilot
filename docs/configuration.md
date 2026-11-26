@@ -925,6 +925,18 @@ replay = true
 uplift = true
 ```
 
+### `[localbox]`
+
+The LocalBox model you adopted as your default, written by
+`localpilot localbox adopt --user` from what LocalBox reports the proxy serves (see
+[providers](providers.md)). User config only: a project's `.localpilot.toml`
+that sets any `[localbox]` key is refused, because a repository must not
+choose which model this computer loads.
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `model` | string | none | The model key as `localbox serve` takes it. Recorded so the LocalX guided setup can serve the same model again; LocalPilot itself connects through `[providers.local]`. Removed, with your consent, when a later adoption cannot identify the model. |
+
 ### `[remote]`
 
 The gateway paired devices use to reach your served sessions

@@ -181,7 +181,8 @@ enum SwarmCommand {
 /// Subcommands for `localpilot localbox`.
 #[derive(Debug, Subcommand)]
 enum LocalBoxCommand {
-    /// Adopt a running LocalBox server into `.localpilot.toml`.
+    /// Adopt a running LocalBox server into `.localpilot.toml` (or, with
+    /// `--user`, your user config).
     Adopt {
         /// Start a LocalBox server for this model first if none is running
         /// (`localbox serve <model>`; see `localbox info` for model ids).
@@ -190,6 +191,21 @@ enum LocalBoxCommand {
         /// Approve the (server start and) config write without prompting.
         #[arg(long)]
         yes: bool,
+        /// Write your user config instead of `.localpilot.toml`, so LocalBox
+        /// is the default in every folder.
+        #[arg(long)]
+        user: bool,
+        /// With `--user`: replace a different default provider or
+        /// `[providers.local]` (the old file is backed up). `--yes` alone
+        /// never replaces them.
+        #[arg(long, requires = "user")]
+        replace_existing: bool,
+        /// The running LocalBox proxy to adopt when it is not on the default
+        /// port (loopback only), for example `http://127.0.0.1:11436/v1`.
+        /// Adopts what already runs there, so it cannot be combined with
+        /// `--serve`, which starts on LocalBox's own configured port.
+        #[arg(long, value_name = "URL", conflicts_with = "serve")]
+        endpoint: Option<String>,
     },
 }
 
@@ -2097,9 +2113,20 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
         }
         Command::LocalBox { command } => match command {
-            LocalBoxCommand::Adopt { serve, yes } => {
+            LocalBoxCommand::Adopt {
+                serve,
+                yes,
+                user,
+                replace_existing,
+                endpoint,
+            } => {
                 let stdin_is_tty = io::stdin().is_terminal();
-                localbox::run_adopt(serve, yes, stdin_is_tty).await?;
+                let target = if user {
+                    localbox::AdoptTarget::User { replace_existing }
+                } else {
+                    localbox::AdoptTarget::Project
+                };
+                localbox::run_adopt(serve, endpoint, target, yes, stdin_is_tty).await?;
             }
         },
         Command::Login {
