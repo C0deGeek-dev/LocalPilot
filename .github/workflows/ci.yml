@@ -489,6 +489,30 @@ jobs:
           done
           kill "$WATCHDOG" 2>/dev/null || true
           exit "$status"
+      # A test that kills an instrumented child process (a timeout, a cancelled
+      # turn, the shell tool's process-group kill) can leave that child's
+      # profile half-written, and one unreadable .profraw makes the merge fail
+      # before the floor is evaluated. Drop such profiles, name each one, and
+      # fail if more than a handful appear — that would mean collection itself
+      # is broken, not that a test killed a child.
+      - name: drop profiles left unreadable by killed processes
+        if: steps.cov-nextest.outcome == 'success'
+        shell: bash
+        run: |
+          profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+          dropped=0
+          while IFS= read -r -d '' profile; do
+            if ! "$profdata" show "$profile" >/dev/null 2>&1; then
+              echo "::warning::dropping unreadable coverage profile $profile"
+              rm -f "$profile"
+              dropped=$((dropped + 1))
+            fi
+          done < <(find target -name '*.profraw' -print0)
+          echo "dropped $dropped unreadable profile(s)"
+          if [ "$dropped" -gt 5 ]; then
+            echo "::error::$dropped unreadable coverage profiles; profile collection is broken"
+            exit 1
+          fi
       - name: coverage floor over the merged report
         if: steps.cov-nextest.outcome == 'success'
         run: cargo llvm-cov report --fail-under-lines 75
