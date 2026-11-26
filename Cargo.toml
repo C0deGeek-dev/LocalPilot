@@ -105,7 +105,7 @@ insta = "=1.47.2"
 # because v4 also requires edition 2024.
 # Shared LocalX eval primitives (scorecard contract, blind judge, ablation,
 # gated check runner, verify detection). Pinned by rev per the exact-pin policy.
-localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "bc4914b3253707fc9c8c10b22acc8c5858f9f1a0" }
+localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "45e993fb9b1f086567bb2a9a7ce3eea61f1137aa" }
 keyring = { version = "=3.6.3", default-features = false, features = [
     "windows-native",
 ] }
@@ -136,7 +136,7 @@ serde_json = "=1.0.150"
 # Figment's TOML/env providers, not its legacy serde_yaml feature.
 yaml_serde = "=0.10.7"
 thiserror = "=2.0.9"
-time = { version = "=0.3.37", features = ["local-offset"] }
+time = { version = "=0.3.55", features = ["local-offset"] }
 toml = "=0.8.23"
 # Reuse the parser and Python grammar already linked by code intelligence.
 tree-sitter = "=0.26.9"

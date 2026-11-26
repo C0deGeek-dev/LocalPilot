@@ -1,7 +1,4 @@
 [advisories]
-ignore = [
-    # time 0.3.37 is pinned by the LocalMind workspace. LocalMind does not
-    # parse untrusted RFC 2822 timestamps. A separate time upgrade can retire
-    # this pre-existing exception now that the source MSRV is Rust 1.89.
-    "RUSTSEC-2026-0009",
-]
+# No exceptions. Unmaintained/unsound advisories accepted for LocalPilot are
+# listed, with their rationale, in deny.toml.
+ignore = []

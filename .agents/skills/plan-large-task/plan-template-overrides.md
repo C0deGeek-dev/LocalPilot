@@ -52,7 +52,7 @@ column. Transient build-sequencing choices stay in the plan's decision log.
   local servers only. See the `clean-room-guard` skill and
   `docs/00-clean-room.md`.
 - **Rust engineering rules hold** (`docs/13-rust-best-practices.md`): MSRV
-  1.82, exact-pinned workspace deps, typed errors per crate,
+  1.89, exact-pinned workspace deps, typed errors per crate,
   `#![forbid(unsafe_code)]`, no `unwrap`/`expect`/`panic!` on library runtime
   paths, cross-platform path/shell discipline.
 - **Tier-1 parity.** Windows, Linux, and macOS are equal tier-1 (ADR-0007). A

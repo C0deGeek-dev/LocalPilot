@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Dependencies: `time` 0.3.55 and `url` 2.5.9 fix RUSTSEC-2026-0009 and
+  RUSTSEC-2026-0592, so `cargo audit` and `cargo deny` no longer waive them.
+  The bundled LocalMind and the shared localx-llama crates move to their
+  matching releases, which build on the same Rust 1.89 floor.
+
 - Chat: the working footer reads `Waiting for model` from sending a request
   until the model's first output, so you can see that the turn is waiting on
   the model server, not on LocalPilot. The label alone cannot show whether the

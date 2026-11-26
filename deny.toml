@@ -37,13 +37,6 @@ ignore = [
     # actually keeps this pair visible, not this ignore entry.
     "RUSTSEC-2026-0002",
     "RUSTSEC-2026-0253",
-    # time 0.3.37 (transitive via the LocalMind submodule, which pins it
-    # exactly): a stack-exhaustion DoS reachable only by parsing maliciously
-    # crafted RFC 2822 input. LocalMind formats/parses its own timestamps and
-    # never parses untrusted RFC 2822, so it is unreachable here. The SQLite
-    # dependency upgrade raises the MSRV to 1.89; a separate time upgrade can
-    # now retire this existing exception.
-    "RUSTSEC-2026-0009",
 ]
 
 [licenses]
