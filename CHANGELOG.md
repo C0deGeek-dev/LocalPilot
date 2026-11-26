@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Windows installer: `install.ps1` now puts the LocalX `bin` directory on PATH
+  itself — appended to the saved user PATH (kept as written, `%VARIABLES%`
+  unexpanded, never the machine PATH), announced to running programs so new
+  terminals see it, and added to the current window — instead of printing a
+  snippet to paste; a rerun moves it to the front of the current window's PATH.
+  It warns, with both paths and the way out, when an older program named like a
+  LocalX tool would run in its place, in this window or in new terminals. After a successful
+  install it continues into `localx setup` when the installed `localx` has
+  one; `-NoSetup` skips that.
+
 - Dependencies: `time` 0.3.55 and `url` 2.5.9 fix RUSTSEC-2026-0009 and
   RUSTSEC-2026-0592, so `cargo audit` and `cargo deny` no longer waive them.
   The bundled LocalMind and the shared localx-llama crates move to their

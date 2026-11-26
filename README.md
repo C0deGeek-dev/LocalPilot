@@ -52,25 +52,13 @@ curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/instal
 
 ### 2. Let your terminal find the commands
 
-`PATH` is the list of folders your terminal searches for applications. Add the
-LocalX folder once so commands such as `localx update` work from any directory.
+`PATH` is the list of folders your terminal searches for applications. The
+LocalX folder needs to be on it so commands such as `localx update` work from
+any directory.
 
-<details>
-<summary><strong>Windows — paste this into the same PowerShell window</strong></summary>
-
-```powershell
-$localxBin = Join-Path $env:LOCALAPPDATA 'localx\bin'
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (($userPath -split ';') -notcontains $localxBin) {
-    [Environment]::SetEnvironmentVariable('Path', "$localxBin;$userPath", 'User')
-}
-$env:Path = "$localxBin;$env:Path"
-```
-
-This enables the commands in this window and saves the setting for future
-terminals. If another open terminal cannot find them, close and reopen it.
-
-</details>
+**Windows:** nothing to do — the installer adds it for this window and for new
+terminals, and warns if an older copy of a LocalX tool would run instead. If a
+terminal that was already open cannot find the commands, close and reopen it.
 
 <details>
 <summary><strong>Linux / macOS — add LocalX to your shell's PATH</strong></summary>

@@ -76,22 +76,23 @@ Everything lands in one directory, and the installer prints it:
 | Linux / macOS | `~/.local/share/localx/bin` (or `$XDG_DATA_HOME/localx/bin`) |
 | Windows | `%LOCALAPPDATA%\localx\bin` |
 
-`PATH` tells your terminal where to find applications. Complete the step for
-your platform once, then verify with `localx status`.
+`PATH` tells your terminal where to find applications. Verify with
+`localx status` once it is set.
 
-**Windows — paste into PowerShell:**
+**Windows:** the installer does this for you. It adds the directory to your
+user PATH (the saved setting, kept as written — `%VARIABLES%` stay
+unexpanded, the machine PATH is never touched), tells running programs the
+setting changed so new terminals see it, and adds it to the PowerShell window
+you ran it in. Running it again changes nothing. If a terminal that was
+already open cannot find the commands, close and reopen it.
 
-```powershell
-$localxBin = Join-Path $env:LOCALAPPDATA 'localx\bin'
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (($userPath -split ';') -notcontains $localxBin) {
-    [Environment]::SetEnvironmentVariable('Path', "$localxBin;$userPath", 'User')
-}
-$env:Path = "$localxBin;$env:Path"
-```
-
-This saves the directory to your user PATH and enables it in the current
-window. Close and reopen other terminals to pick up the saved setting.
+Once the tools are in place, the Windows installer checks both this window and
+the PATH a new terminal will get (the machine PATH comes before the user PATH
+there). When an older program with the same name as a LocalX tool would run
+instead, it names both paths and the way out: remove or rename the older copy
+or its PATH entry, or run the LocalX one by its full path. A copy on the
+machine PATH always wins over the user PATH, so that one has to go. The
+installer itself runs `localx` by its full path.
 
 **Linux / macOS — paste into Terminal:**
 
@@ -148,7 +149,9 @@ sh install.sh --version 2.6.0   # a specific release instead of the latest
 sh install.sh --from-source     # compile instead (needs a checkout and cargo)
 ```
 
-On Windows, the checkout installer also accepts `-PowerShellShortcuts`.
+On Windows, the installer also accepts `-PowerShellShortcuts`, and `-NoSetup`
+to install without continuing into the guided first run (`localx setup`) that
+follows a successful install when the installed `localx` has one.
 
 Run inside a LocalPilot checkout, the script builds **that working tree** rather
 than downloading a release — a developer running the installer in their own clone

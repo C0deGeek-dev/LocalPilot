@@ -615,6 +615,21 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File install/lint-install-script.ps1
 
+  install-script-path:
+    name: windows installer PATH handling
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The installer edits the user PATH in the registry. These checks run its
+      # PATH functions against a scratch key, under both PowerShell editions
+      # the one-liner can run in.
+      - name: PATH functions (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -File install/test-install-path.ps1
+      - name: PATH functions (Windows PowerShell 5)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File install/test-install-path.ps1
+
   doc-drift:
     name: doc drift guards
     runs-on: ubuntu-latest

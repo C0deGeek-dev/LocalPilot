@@ -12,6 +12,7 @@
 #   ./install/install.ps1 -Toolchain stable       # force a toolchain
 #   ./install/install.ps1 -Target x86_64-pc-windows-gnu   # force a target
 #   ./install/install.ps1 -PowerShellShortcuts     # also install the optional llm* shortcuts
+#   ./install/install.ps1 -NoSetup                 # install only; skip the guided first run
 #
 # Run standalone (piped from the network, no checkout) it installs prebuilt,
 # checksum-verified binaries and needs no Rust toolchain. Run from inside a
@@ -25,7 +26,8 @@ param(
     [string]$Features = 'tui',
     [string]$Toolchain = '',
     [string]$Target = '',
-    [Alias('InstallPowerShellShortcuts')][switch]$PowerShellShortcuts
+    [Alias('InstallPowerShellShortcuts')][switch]$PowerShellShortcuts,
+    [switch]$NoSetup
 )
 $ErrorActionPreference = 'Stop'
 $repo = 'C0deGeek-dev/LocalPilot'
@@ -42,6 +44,182 @@ $mode = if ($Binary) { 'binary' } elseif ($FromSource) { 'source' } elseif ($roo
 
 if ($mode -eq 'source' -and -not $root) {
     Write-Error "a source build needs a checkout; clone it first: git clone --recurse-submodules https://github.com/$repo.git"
+}
+
+# --- PATH -------------------------------------------------------------------
+# The installer runs in the user's own PowerShell session, so it is the one
+# step that can make the commands work both in this terminal and in every new
+# one. These functions are self-contained so install/test-install-path.ps1 can
+# exercise them against a scratch registry key.
+
+# One PATH entry in comparable form: variables expanded, quotes and a trailing
+# separator dropped, case folded.
+function ConvertTo-LocalXPathKey {
+    param([string]$Entry)
+    $expanded = [Environment]::ExpandEnvironmentVariables($Entry.Trim().Trim('"'))
+    return $expanded.TrimEnd('\', '/').ToLowerInvariant()
+}
+
+# Append $Directory to the user PATH in the registry when no entry already
+# names it. Reads the raw value (unexpanded, so %VARIABLES% survive), keeps its
+# registry kind, and never touches the machine PATH. Returns 'present' or
+# 'added'.
+function Add-LocalXUserPath {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [string]$SubKey = 'Environment'
+    )
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($SubKey)
+    try {
+        $raw = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($null -ne $raw) {
+            $existingKind = $key.GetValueKind('Path')
+            if ($existingKind -eq [Microsoft.Win32.RegistryValueKind]::String) { $kind = $existingKind }
+        }
+        $wanted = ConvertTo-LocalXPathKey $Directory
+        $entries = @("$raw" -split ';' | Where-Object { $_.Trim() })
+        foreach ($entry in $entries) {
+            if ((ConvertTo-LocalXPathKey $entry) -eq $wanted) { return 'present' }
+        }
+        $updated = (@($entries) + $Directory) -join ';'
+        $key.SetValue('Path', $updated, $kind)
+        return 'added'
+    }
+    finally {
+        $key.Dispose()
+    }
+}
+
+# Tell running programs (Explorer, so new terminals) that the environment
+# changed. Returns $false when the broadcast failed or a window did not answer
+# within its timeout (5 s per window, not overall); the registry change is
+# still there, and every new sign-in picks it up.
+function Send-LocalXEnvironmentChange {
+    try {
+        if (-not ('LocalX.EnvironmentBroadcast' -as [type])) {
+            Add-Type -Namespace LocalX -Name EnvironmentBroadcast -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
+'@
+        }
+        $result = [System.UIntPtr]::Zero
+        # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5000 ms per window.
+        $sent = [LocalX.EnvironmentBroadcast]::SendMessageTimeout([System.IntPtr]0xffff, 0x1A, [System.UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+        return ($sent -ne [System.IntPtr]::Zero)
+    }
+    catch {
+        return $false
+    }
+}
+
+# Put $Directory first on this session's PATH, moving it there when it is
+# already present further down (a rerun then repairs resolution in this window).
+# Returns 'present' when it was already first, else 'added' or 'moved'.
+function Add-LocalXSessionPath {
+    param([Parameter(Mandatory)][string]$Directory)
+    $wanted = ConvertTo-LocalXPathKey $Directory
+    $entries = @($env:PATH -split ';' | Where-Object { $_.Trim() })
+    if ($entries.Count -gt 0 -and (ConvertTo-LocalXPathKey $entries[0]) -eq $wanted) { return 'present' }
+    $rest = @($entries | Where-Object { (ConvertTo-LocalXPathKey $_) -ne $wanted })
+    $outcome = if ($rest.Count -lt $entries.Count) { 'moved' } else { 'added' }
+    $env:PATH = (@($Directory) + $rest) -join ';'
+    return $outcome
+}
+
+# The PATH a terminal opened from now on gets: the machine value, then the
+# user value, each with its variables expanded. Both can be passed in so the
+# ordering is testable without the real registry.
+function Get-LocalXNewShellPath {
+    param([string]$MachinePath, [string]$UserPath)
+    if (-not $PSBoundParameters.ContainsKey('MachinePath')) {
+        $MachinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    }
+    if (-not $PSBoundParameters.ContainsKey('UserPath')) {
+        $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    }
+    return [Environment]::ExpandEnvironmentVariables("$MachinePath;$UserPath")
+}
+
+# A same-named program found ahead of the LocalX copy on $SearchPath runs
+# instead of it. Resolution follows Windows: directories in order, and within
+# one directory the PATHEXT order.
+function Get-LocalXShadowing {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$SearchPath
+    )
+    $wanted = ConvertTo-LocalXPathKey $Directory
+    $extensions = @(("$env:PATHEXT" -split ';' | Where-Object { $_ }))
+    if ($extensions.Count -eq 0) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
+    $found = @()
+    foreach ($tool in 'localx', 'localpilot', 'localbox', 'localmind', 'localbench') {
+        $managed = Join-Path $Directory "$tool.exe"
+        if (-not (Test-Path -LiteralPath $managed)) { continue }
+        $winner = $null
+        foreach ($entry in ($SearchPath -split ';')) {
+            $dir = $entry.Trim().Trim('"')
+            if (-not $dir) { continue }
+            if ((ConvertTo-LocalXPathKey $dir) -eq $wanted) { break }
+            foreach ($ext in $extensions) {
+                # Plain string paths and a non-throwing existence check: a PATH
+                # entry on a retired drive or with illegal characters is just
+                # absent, never a reason to stop the installer.
+                $candidate = $null
+                try { $candidate = [System.IO.Path]::Combine($dir, "$tool$ext") } catch { continue }
+                if ([System.IO.File]::Exists($candidate)) { $winner = $candidate; break }
+            }
+            if ($winner) { break }
+        }
+        if ($winner) {
+            $found += [pscustomobject]@{ Tool = $tool; Shadow = $winner; Managed = $managed }
+        }
+    }
+    return $found
+}
+
+# Name each program that would run instead of the LocalX copy, with the way out.
+function Write-LocalXShadowing {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][string]$SearchPath,
+        [Parameter(Mandatory)][string]$Where
+    )
+    foreach ($shadow in Get-LocalXShadowing -Directory $Directory -SearchPath $SearchPath) {
+        Write-Warning ("in $Where, '$($shadow.Tool)' resolves to $($shadow.Shadow), not the LocalX copy at $($shadow.Managed). " +
+            "Remove or rename that older copy (or its PATH entry), or run the LocalX one by its full path: & '$($shadow.Managed)'")
+    }
+}
+
+# Make the LocalX bin directory reachable now and in new terminals.
+function Set-LocalXPath {
+    param([Parameter(Mandatory)][string]$Directory)
+    $user = Add-LocalXUserPath -Directory $Directory
+    if ($user -eq 'added') {
+        Write-Host "added $Directory to your user PATH."
+        if (-not (Send-LocalXEnvironmentChange)) {
+            Write-Host "note: not every running program confirmed the PATH change; new terminals pick it up after you sign in again."
+        }
+    }
+    [void](Add-LocalXSessionPath -Directory $Directory)
+}
+
+# After the tools are in place: check this window and a new terminal.
+function Test-LocalXPathResolution {
+    param([Parameter(Mandatory)][string]$Directory)
+    Write-LocalXShadowing -Directory $Directory -SearchPath $env:PATH -Where 'this window'
+    Write-LocalXShadowing -Directory $Directory -SearchPath (Get-LocalXNewShellPath) -Where 'new terminals'
+}
+
+# Whether this localx has the guided first run. Older releases do not, and
+# `localx <word>` would otherwise treat 'setup' as a tool name. Only the
+# check lives here: the setup command itself must run as a plain statement in
+# the caller, so it keeps the terminal (prompts, chat) and its output is never
+# captured into a variable.
+function Test-LocalXSetup {
+    param([Parameter(Mandatory)][string]$Localx)
+    $help = (& $Localx --help 2>&1 | Out-String)
+    return ($help -match '(?m)^\s+setup\b')
 }
 
 # --- binary install ---------------------------------------------------------
@@ -116,6 +294,7 @@ if ($mode -eq 'binary') {
         $bin = Join-Path $env:LOCALAPPDATA 'localx\bin'
         New-Item -ItemType Directory -Path $bin -Force | Out-Null
         Copy-Item $binaryFile.FullName (Join-Path $bin "$tool.exe") -Force
+        Set-LocalXPath -Directory $bin
 
         Write-Host ""
         Write-Host "installing the stack ..."
@@ -151,18 +330,10 @@ if ($mode -eq 'binary') {
         if ($stackExitCode -ne 0) {
             Write-Host ""
             Write-Host "note: the stack install did not complete."
-            Write-Host "      $tool is on disk at $bin\$tool.exe; run it directly to retry."
-            if (($env:PATH -split ';') -notcontains $bin) {
-                Write-Host ""
-                # Not `setx PATH "$env:PATH;..."`: `$env:PATH` is the *merged* machine
-                # and user value, so that command copies every machine entry into the
-                # user variable, and `setx` silently truncates what it writes at 1024
-                # characters.
-                Write-Host "add this directory to PATH:"
-                Write-Host "    `$env:PATH += `";$bin`"   (this terminal)"
-                Write-Host "    [Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + `";$bin`", 'User')   (new terminals)"
-            }
+            Write-Host "      $tool is on disk at $bin\$tool.exe; run it again to retry: & '$bin\$tool.exe' $($postcmd -join ' ')"
         }
+        Test-LocalXPathResolution -Directory $bin
+        $runSetup = ($stackExitCode -eq 0 -and $tool -eq 'localx' -and -not $NoSetup)
 
         Write-Host ""
         if ($tool -eq 'localx') {
@@ -174,6 +345,18 @@ if ($mode -eq 'binary') {
         }
         Write-Host "authenticity of the downloaded archives (needs the GitHub CLI):"
         Write-Host "    gh attestation verify $archive --repo $repo"
+        $setupLocalx = Join-Path $bin 'localx.exe'
+        if ($runSetup -and (Test-LocalXSetup -Localx $setupLocalx)) {
+            Write-Host ""
+            & $setupLocalx setup
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host ""
+                Write-Host "note: the guided setup stopped; resume it with: & '$setupLocalx' setup"
+            }
+        }
+        elseif ($runSetup) {
+            Write-Host "this localx has no guided setup yet; run '$setupLocalx status' to check the install."
+        }
     } finally {
         Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -297,6 +480,8 @@ function Publish-StackTool {
 Publish-StackTool -Tool 'localpilot' | Out-Null
 $destLocalx = Publish-StackTool -Tool 'localx'
 Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+Set-LocalXPath -Directory $bin
+Test-LocalXPathResolution -Directory $bin
 
 if ($PowerShellShortcuts) {
     if ([string]::IsNullOrWhiteSpace($destLocalx) -or -not (Test-Path -LiteralPath $destLocalx)) {
@@ -329,3 +514,12 @@ Write-Host "    localx install                 # released binaries"
 Write-Host "    localx install --prerelease    # or build each from its latest main"
 Write-Host "developing every LocalX repository side by side? build the stack from them:"
 Write-Host "    localx dev use <workspace>; localx update"
+
+if (-not $NoSetup -and (Test-LocalXSetup -Localx $destLocalx)) {
+    Write-Host ""
+    & $destLocalx setup
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "note: the guided setup stopped; resume it with: & '$destLocalx' setup"
+    }
+}
