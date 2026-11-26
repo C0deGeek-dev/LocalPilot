@@ -176,6 +176,12 @@ pub async fn run_chat_with(
         }
     };
     let selected_provider_id = provider_id.unwrap_or(&config.provider.default).to_string();
+    // Start the LocalBox model the user adopted when its endpoint is down,
+    // before the terminal is taken over.
+    let reached = crate::localbox_reconnect::reach_for_session(&cwd, &config, provider_id)
+        .await
+        .map_err(|guidance| anyhow::anyhow!("{guidance}"))?;
+    timer.mark("local model reach");
     let setup = InteractiveSessionSetup::resolve_with(cwd, config, profile, incognito).await?;
     timer.mark("provider registry + mcp servers + tools");
     let InteractiveSessionBundle {
@@ -249,6 +255,10 @@ pub async fn run_chat_with(
     // built from the same snapshot, so gate and runtime cannot diverge.
     let trust_required = setup.trust_required();
     let mut fullscreen_config = config.clone();
+    // Armed for the provider the chat opens on; a switch before the first turn
+    // disarms it (see `FirstChatTurn`).
+    let first_reply =
+        crate::localbox_reconnect::FirstChatTurn::new(&reached, runtime.active_provider_id());
     let result = crate::fullscreen::run(
         localpilot_terminal_ui::Header {
             version: env!("LOCALPILOT_VERSION").to_string(),
@@ -277,6 +287,7 @@ pub async fn run_chat_with(
             incognito_entry: &incognito_entry,
             source: &source,
             remote: &remote,
+            first_reply: &first_reply,
         },
     )
     .await;

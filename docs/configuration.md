@@ -935,7 +935,7 @@ choose which model this computer loads.
 
 | Key | Type | Default | Description |
 |---|---|---:|---|
-| `model` | string | none | The model key as `localbox serve` takes it. Recorded so the LocalX guided setup can serve the same model again; LocalPilot itself connects through `[providers.local]`. Removed, with your consent, when a later adoption cannot identify the model. |
+| `model` | string | none | The model key as `localbox serve` takes it. Recorded so the same model can be served again: the LocalX guided setup keeps it while it serves, and a session that finds the adopted `[providers.local]` address down asks LocalBox to start its saved launch for that model. LocalPilot itself connects through `[providers.local]`. Removed, with your consent, when a later adoption cannot identify the model. |
 
 ### `[remote]`
 

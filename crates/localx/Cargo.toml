@@ -22,5 +22,9 @@ localpilot-config = { path = "../localpilot-config" }
 localpilot-dist = { path = "../localpilot-dist" }
 localpilot-stack = { path = "../localpilot-stack" }
 
+[target.'cfg(windows)'.dependencies]
+# Keeps setup's own standard streams from the model server it starts.
+localpilot-winsec = { path = "../localpilot-winsec" }
+
 [dev-dependencies]
 tempfile = { workspace = true }

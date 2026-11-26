@@ -42,7 +42,7 @@ const DEFAULT_PROXY_PORT: u16 = 11435;
 /// Loopback HTTP only (`127.0.0.1`, `localhost` or `[::1]`), with an optional
 /// `/v1`: adoption points LocalPilot at a server on this computer, never
 /// elsewhere.
-fn loopback_endpoint(raw: &str) -> anyhow::Result<(String, u16)> {
+pub(crate) fn loopback_endpoint(raw: &str) -> anyhow::Result<(String, u16)> {
     let refuse = || {
         anyhow::anyhow!(
             "--endpoint takes a LocalBox address on this computer, like http://127.0.0.1:11435/v1, not '{raw}'"
@@ -65,7 +65,7 @@ const MODELS_CATALOG_SCHEMA: u32 = 1;
 const MAX_CATALOG_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
-struct LocalBoxModelsCatalog {
+pub(crate) struct LocalBoxModelsCatalog {
     schema: u32,
     models: Vec<LocalBoxModelEntry>,
     /// What the LocalBox proxy on one port serves, from LocalBox's own
@@ -84,7 +84,10 @@ struct LocalBoxServing {
 
 /// The catalog key the LocalBox proxy on `proxy_port` serves, as LocalBox
 /// itself established it, or why that is not known.
-fn serving_key(catalog: &LocalBoxModelsCatalog, proxy_port: u16) -> Result<String, String> {
+pub(crate) fn serving_key(
+    catalog: &LocalBoxModelsCatalog,
+    proxy_port: u16,
+) -> Result<String, String> {
     let serving = catalog
         .serving
         .as_ref()
@@ -150,7 +153,9 @@ async fn read_models_catalog() -> anyhow::Result<LocalBoxModelsCatalog> {
 }
 
 /// The catalog, plus what the proxy on `proxy_port` serves.
-async fn read_models_catalog_for(proxy_port: u16) -> anyhow::Result<LocalBoxModelsCatalog> {
+pub(crate) async fn read_models_catalog_for(
+    proxy_port: u16,
+) -> anyhow::Result<LocalBoxModelsCatalog> {
     read_models_catalog_with(&["--proxy-port".to_string(), proxy_port.to_string()]).await
 }
 

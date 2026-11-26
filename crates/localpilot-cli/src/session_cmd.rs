@@ -272,12 +272,16 @@ pub async fn print_mode(
     if access.tools_blocked && !answer_only {
         eprintln!("{PRINT_UNTRUSTED_NOTICE}");
     }
-    let mut runtime =
-        build_runtime(&cwd, model, provider_id, access.profile, access.trusted).await?;
     let config = localpilot_config::load(
         &localpilot_config::ConfigPaths::standard(&cwd),
         &localpilot_config::CliOverrides::default(),
     )?;
+    // Start the LocalBox model the user adopted when its endpoint is down.
+    let reached = crate::localbox_reconnect::reach_for_session(&cwd, &config, provider_id)
+        .await
+        .map_err(|guidance| anyhow::anyhow!("{guidance}"))?;
+    let mut runtime =
+        build_runtime(&cwd, model, provider_id, access.profile, access.trusted).await?;
     let turn_timeout = print_turn_timeout(turn_timeout_secs, config.harness.turn_timeout_secs);
     runtime.set_turn_timeout(turn_timeout.map(std::time::Duration::from_secs));
     runtime.set_answer_only(answer_only);
@@ -299,6 +303,14 @@ pub async fn print_mode(
     }
 
     let outcome = run_and_print(runtime, prompt).await?;
+    if outcome.provider_failed {
+        if let Some(guidance) = crate::localbox_reconnect::first_reply_guidance(
+            &reached,
+            "the model did not answer the first request (see the warnings above)",
+        ) {
+            eprintln!("{guidance}");
+        }
+    }
 
     // Opt-in advisory cue: a read-only self-review of the workspace after the run.
     // Reuses the existing scanner, writes to stderr (never stdout), and never fails
@@ -370,6 +382,8 @@ pub struct PrintOutcome {
     /// The output consumer closed stdout before the run finished — a clean stop,
     /// surfaced so the caller can return a distinct exit code rather than crash.
     pub consumer_gone: bool,
+    /// The turn stopped because the provider could not be reached.
+    pub provider_failed: bool,
 }
 
 /// The outcome of one streamed write to the output sink.
@@ -991,7 +1005,10 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
             "warning: the model was marked degraded after repeated bad output\n",
         );
     }
-    Ok(PrintOutcome { consumer_gone })
+    Ok(PrintOutcome {
+        consumer_gone,
+        provider_failed: reason == StopReason::ProviderError,
+    })
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::ptr;
 
+pub(crate) mod handles;
 pub(crate) mod job;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};

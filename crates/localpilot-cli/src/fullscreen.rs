@@ -133,6 +133,9 @@ pub(crate) struct HostContext<'a> {
     pub(crate) source: &'a crate::relay_source::SessionSource,
     /// Sharing this session with paired devices (`/remote`).
     pub(crate) remote: &'a std::sync::Arc<crate::remote_share::RemoteShare>,
+    /// Guidance for the first turn of this chat when it fails to reach the
+    /// LocalBox model the chat started or found.
+    pub(crate) first_reply: &'a crate::localbox_reconnect::FirstChatTurn,
 }
 
 pub(crate) struct PairHostContext<'a> {
@@ -4681,6 +4684,7 @@ async fn run_event_loop(
         incognito_entry,
         source,
         remote,
+        first_reply,
         // The launch gate uses this in the startup screen; inside the loop the live
         // authority is `runtime.trusted()` (built from the same launch snapshot),
         // updated on accept — so no separate loop-local trust shadow is kept.
@@ -4766,6 +4770,7 @@ async fn run_event_loop(
                     config,
                     approval_tx,
                     deferred_selfimprove_reload,
+                    first_reply,
                 },
             )
             .await?
@@ -4943,6 +4948,7 @@ async fn run_event_loop(
                                         config,
                                         approval_tx,
                                         deferred_selfimprove_reload,
+                                        first_reply,
                                     },
                                 )
                                 .await?
@@ -4997,6 +5003,7 @@ async fn run_event_loop(
                                 config,
                                 approval_tx,
                                 deferred_selfimprove_reload,
+                                first_reply,
                             },
                         )
                         .await?
@@ -5031,6 +5038,7 @@ async fn run_event_loop(
                                 config,
                                 approval_tx,
                                 deferred_selfimprove_reload,
+                                first_reply,
                             },
                         )
                         .await?
@@ -5062,6 +5070,7 @@ async fn run_event_loop(
                                 config,
                                 approval_tx,
                                 deferred_selfimprove_reload,
+                                first_reply,
                             },
                         )
                         .await?
@@ -5093,6 +5102,7 @@ async fn run_event_loop(
                                 config,
                                 approval_tx,
                                 deferred_selfimprove_reload,
+                                first_reply,
                             },
                         )
                         .await?
@@ -5336,6 +5346,7 @@ async fn drive_operation_chain(
                             &prompt.text,
                             &prompt.attachments,
                             queue,
+                            authority.first_reply,
                         )
                         .await?;
                         // A search in this turn found no backend. Read (and so
@@ -7193,6 +7204,8 @@ struct PumpedAuthority<'a> {
     config: &'a mut localpilot_config::Config,
     approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
     deferred_selfimprove_reload: &'a Cell<bool>,
+    /// First-reply guidance for this chat's first turn (see `HostContext`).
+    first_reply: &'a crate::localbox_reconnect::FirstChatTurn,
 }
 
 /// Which resume the pump runs — a typed kind (not a bare `wait` bool) so the two
@@ -10188,6 +10201,7 @@ fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> Tru
     }
 }
 
+#[allow(clippy::too_many_arguments)] // each state owner is threaded explicitly
 async fn drive_turn(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -10196,6 +10210,7 @@ async fn drive_turn(
     prompt: &str,
     attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedOperation>,
+    first_reply: &crate::localbox_reconnect::FirstChatTurn,
 ) -> Result<bool> {
     // The turn publishes on the session's own sender, so the session's feed
     // sees every turn from the start whether or not it is ever shared.
@@ -10257,7 +10272,15 @@ async fn drive_turn(
         ProgressLane::None,
         operation,
         |app: &mut AppModel, reason| {
+            // The turn's provider is the one snapshotted before it started.
+            let guidance = first_reply.turn_ended(
+                &image_capability.provider_id,
+                reason == StopReason::ProviderError,
+            );
             app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
+            if let Some(guidance) = guidance {
+                app.apply_runtime(RuntimeUpdate::Notice(guidance));
+            }
         },
     )
     .await

@@ -2242,6 +2242,7 @@ dependencies = [
  "localpilot-config",
  "localpilot-dist",
  "localpilot-stack",
+ "localpilot-winsec",
  "serde_json",
  "tempfile",
  "tokio",

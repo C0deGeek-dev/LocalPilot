@@ -95,6 +95,19 @@ block.
   `--replace-existing`, and copies the old file to
   `config.toml.bak-<UTC time>` first. `--yes` approves the write but never a
   replacement.
+
+  **After a restart.** When a chat, `print` or `ask` uses that adopted
+  `local` provider and its address does not answer, LocalPilot asks LocalBox
+  to start the launch it saved for that port (`localbox serve --again`: the
+  same quant, context and profile the model was served with) and waits for it,
+  writing LocalBox's output to a log of its own. It does this only when the
+  provider's kind and address are the ones `adopt --user` wrote, on this
+  computer; a project or environment override, another provider, or a port
+  that serves another model is left alone. When the start, the readiness check
+  or the first request fails, the message names the stage, the log and the
+  commands to retry (`localbox serve --again --proxy-port <port>
+  --expect-model <model>`), check (`localbox status`) or set up again
+  (`localx setup`).
 - **Inside a running chat session**, `/localbox models` lists LocalBox's actual
   launch catalog—not merely the model currently answering `/v1/models`. Each
   row starts with the exact copy-pasteable model key and includes aliases,

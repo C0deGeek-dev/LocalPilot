@@ -40,6 +40,7 @@ mod key_input;
 mod lab_cmd;
 mod learning_cmd;
 mod localbox;
+mod localbox_reconnect;
 mod logging;
 mod login_cmd;
 mod mcp;
@@ -3473,6 +3474,17 @@ const fn chat_exit_status(succeeded: bool) -> u8 {
 async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    // Start the LocalBox model the user adopted when its endpoint is down.
+    let reached = localbox_reconnect::reach_for_session(&cwd, &config, provider_id)
+        .await
+        .map_err(|guidance| anyhow::anyhow!("{guidance}"))?;
+    let first_reply = |error: anyhow::Error| match localbox_reconnect::first_reply_guidance(
+        &reached,
+        &error.to_string(),
+    ) {
+        Some(guidance) => anyhow::anyhow!("{guidance}"),
+        None => error,
+    };
     let registry = ProviderRegistry::from_config(&config)?;
     let provider = match provider_id {
         Some(id) => registry
@@ -3484,12 +3496,22 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
     };
 
     let request = ModelRequest::new(model, vec![Message::text(Role::User, prompt)]);
-    let mut stream = provider.stream(request).await?;
+    let mut stream = provider
+        .stream(request)
+        .await
+        .map_err(|error| first_reply(error.into()))?;
 
     let mut stdout = io::stdout().lock();
+    let mut answered = false;
     while let Some(event) = stream.next().await {
-        match event? {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) if !answered => return Err(first_reply(error.into())),
+            Err(error) => return Err(error.into()),
+        };
+        match event {
             ModelEvent::TextDelta(text) => {
+                answered = true;
                 write!(stdout, "{text}")?;
                 stdout.flush()?;
             }

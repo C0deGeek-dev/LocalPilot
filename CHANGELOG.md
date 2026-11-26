@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A chat, `print` or `ask` on the LocalBox model you adopted with
+  `localpilot localbox adopt --user` starts it again when its address does not answer,
+  for example after a restart: LocalPilot asks LocalBox to start the launch
+  it saved for that port (`localbox serve --again`) and waits for it. Only
+  that adoption, on this computer, is started; an override, another provider
+  or another model on the port is left alone. A failed start, a model that
+  never answers and a failed first request name the stage, the log and the
+  commands to retry, check or set up again. On Windows, `localpilot` and
+  `localx setup` keep their own standard streams from the model server they
+  start, so a pipe reading their output ends when they do.
+
 - `localpilot localbox` commands find LocalBox in the LocalX bin directory
   before searching PATH, so they work from a shell whose PATH does not list
   it yet, such as the first run right after an install. `localx setup` goes

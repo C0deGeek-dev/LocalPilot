@@ -189,6 +189,10 @@ It runs eight steps and says which one it is on:
    settings in the current folder override the provider, since it would
    read them and could talk to another server.
 
+After a restart, nothing needs to be run again: the next `localpilot` finds
+the model's address down and asks LocalBox to start the same launch (see
+[providers](providers.md#using-a-localbox-local-model)).
+
 Setup is safe to run again: each step looks before it acts. `--yes` never
 replaces a different default provider, or local settings that name another
 server or model; that takes `--replace-provider` (or, for another provider,

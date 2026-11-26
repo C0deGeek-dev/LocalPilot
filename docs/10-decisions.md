@@ -2,6 +2,69 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0295: A Session Starts The Adopted LocalBox Model When Its Endpoint Is Down
+
+**Status:** accepted · **Date:** 2026-11-26. Amends ADR-0130 (LocalPilot
+adopts a running or startable LocalBox server) and builds on ADR-0150
+(LocalBox owns catalog and run-profile resolution).
+
+**Context.** After a first run, the user's `local` provider points at a
+LocalBox proxy on this computer and `[localbox] model` records the adopted
+model. After a reboot nothing serves there, and a bare `localpilot` (chat,
+`print`, `ask`) retried the request three times and stopped with a network
+error and no way forward. Serving the key again is not enough: the first run
+chose a quant, context and profile (or CPU placement) that `localbox serve
+<model>` alone would not repeat, and an unattended serve without a saved tune
+is refused.
+
+**Decision.**
+1. **LocalBox owns the replay.** Every successful `localbox serve` saves how
+   it was asked to start, per proxy port: the model, context, mode, quant,
+   profile preference, untuned approval, vision, draft and a typed CPU-only
+   placement. A serve that used any other option (raw server arguments,
+   network exposure, a proxy bypass, a repeated option, an unknown flag) saves
+   nothing and removes the older record for its port. Every serve holds a
+   per-port lock from launch to saved record. `localbox serve --again
+   --proxy-port <p> --expect-model <key>` starts that request again under the
+   lock, does nothing when the model already serves there, refuses before
+   loading anything when the port is in use by anything else or the saved
+   model differs, and starts its proxy start-only, so a listener that appears
+   while the model loads is reported, never repointed.
+2. **Only the adoption the user made is started.** LocalPilot reads
+   `[localbox] model` and `[providers.local]` from the user config file
+   itself. It starts the model only when the session's provider is `local`
+   and its effective kind and address equal that adoption on a loopback
+   address. A project or environment override, another provider, or no
+   adoption leaves today's behaviour unchanged. The recorded key, written only
+   by an explicit `adopt --user`, is the standing consent to start that model
+   on this computer; LocalBox still owns the server and its teardown.
+3. **An answering port is checked, never touched.** When the endpoint answers,
+   LocalPilot asks LocalBox which model it serves there; another model or an
+   unknown listener gets a note and is left alone. After a start, the model
+   counts as ready only when the address answers and LocalBox reports the
+   adopted model there.
+4. **Failures say what to do.** A failed start, a model that never answers,
+   and a failed first request on the reached model each name the stage, the
+   start log (one file per start under LocalPilot's data directory) and the
+   exact retry (`localbox serve --again` with the same port and key), check
+   and fallback commands. In chat the first-reply guidance is shown after the
+   first turn only, and only when that turn ran on the provider the chat
+   reached (a `/model` switch before it disarms the guidance); later provider errors keep their usual message, and
+   `print`'s exit status is unchanged.
+5. **The caller's streams stay its own.** On Windows a child inherits every
+   inheritable handle, so a caller's pipe passed down to the model server kept
+   `localpilot print | ...` and `localx setup | ...` from ending. Before
+   starting LocalBox, both clear the inherit flag on their own standard handles
+   (`localpilot-winsec`); a child given inherited streams still gets an
+   explicit copy. A caller that pipes `localbox serve` directly is not covered.
+
+**Consequences.** A reboot no longer breaks the first run: the next session
+starts the same launch the first run chose. Running `localbox stop` is not
+sticky — the next session starts the model again; pointing the default at
+another provider (or removing `[localbox] model`) stops that. A LocalBox
+without `serve --again`, or a first run from before it, reports the start
+stage with `localx setup` as the fix.
+
 ## ADR-0294: The Work Chrome Says When It Is Waiting For The Model
 
 **Status:** accepted · **Date:** 2026-11-25. Builds on ADR-0148 (honest

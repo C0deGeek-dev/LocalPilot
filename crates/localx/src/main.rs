@@ -183,6 +183,18 @@ async fn main() -> ExitCode {
 
 /// Run the guided first run and report where it stopped, if it did.
 fn setup_command(options: &setup::Options, out: &mut dyn Write) -> ExitCode {
+    // Windows hands every inheritable handle to a child, so this process's own
+    // standard streams (a caller's pipe) would reach the model server LocalBox
+    // leaves running and keep that caller waiting until it stops. Steps that
+    // show their output still get it: each is given the streams explicitly.
+    #[cfg(windows)]
+    if let Err(error) = localpilot_winsec::keep_std_handles_from_children() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "error: could not keep this terminal's streams from the model server: {error}"
+        );
+        return ExitCode::FAILURE;
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());

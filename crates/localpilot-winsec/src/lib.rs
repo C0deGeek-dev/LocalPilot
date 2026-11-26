@@ -1,5 +1,5 @@
-//! Owner-only Windows named pipes and files, and contained command trees
-//! (ADR-0189).
+//! Owner-only Windows named pipes and files, contained command trees
+//! (ADR-0189), and standard streams kept from blanket handle inheritance.
 //!
 //! Tokio creates a named pipe with the default security descriptor, whose
 //! DACL grants read access to Everyone and to the anonymous account. This
@@ -27,6 +27,9 @@ pub use pipes::{
 
 #[cfg(windows)]
 pub use ffi::job::{spawn_in_job, ProcessJob};
+
+#[cfg(windows)]
+pub use ffi::handles::keep_std_handles_from_children;
 
 /// The SDDL of a protected DACL whose only entry grants `sid` full access: no
 /// inherited entries, no Everyone, no anonymous, no SYSTEM. Plain text, so it
