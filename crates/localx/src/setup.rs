@@ -133,6 +133,8 @@ pub(crate) struct Output {
     pub success: bool,
     /// Its standard output, read from the step's log file after it exited.
     pub stdout: String,
+    /// Its standard error, when it was kept in a log rather than shown.
+    pub stderr: String,
     pub log: Option<PathBuf>,
 }
 
@@ -373,103 +375,58 @@ fn local_model(
     };
 
     // 3. The engine: `localbox update` installs it or confirms it is current.
+    // Its output goes to the step's log, where the reason for a failure can
+    // be read back.
     say(
         out,
         Stage::Engine,
-        "Checking the model engine (llama.cpp)...",
+        "Checking the model engine (llama.cpp); the first install downloads it and can take a few minutes...",
     );
     let engine = host
-        .run(Stage::Engine, "localbox", &["update".to_string()], true)
+        .run(Stage::Engine, "localbox", &["update".to_string()], false)
         .map_err(|error| Failure::new(Stage::Engine, error))?;
     if !engine.success {
-        return Err(
-            Failure::new(Stage::Engine, "the engine could not be installed").with_log(engine.log),
-        );
+        let diagnostic = last_line(&engine.stderr)
+            .or_else(|| last_line(&engine.stdout))
+            .unwrap_or("the engine could not be installed")
+            .to_string();
+        let failed = |why: String| Failure::new(Stage::Engine, why).with_log(engine.log.clone());
+        // Only the files of a running engine being in use is a reason to go
+        // on, and only when LocalBox confirms a model is being served by it.
+        if !engine_files_in_use(&engine) {
+            return Err(failed(diagnostic));
+        }
+        match serving_model(host, None) {
+            Ok((Some(model), _)) => {
+                let _ = writeln!(
+                    out,
+                    "      note: the engine could not be updated while {model} is running \
+                     ({diagnostic}); using the installed one"
+                );
+            }
+            Ok((None, _)) | Err(_) => return Err(failed(diagnostic)),
+        }
     }
 
-    // 4. The starter model, sized for this computer.
-    let starter_args = vec!["starter".to_string(), "--json".to_string()];
-    let offer = host
-        .run(Stage::Starter, "localbox", &starter_args, false)
-        .map_err(|error| Failure::new(Stage::Starter, error))?;
-    let offer_json = parse_json(&offer.stdout).ok_or_else(|| {
-        Failure::new(Stage::Starter, "LocalBox did not describe a starter model")
-            .with_log(offer.log.clone())
-    })?;
-    if !offer.success || offer_json["status"] == "error" {
-        let why = offer_json["error"]
-            .as_str()
-            .unwrap_or("no starter model fits this computer");
-        return Err(Failure::new(Stage::Starter, why).with_log(offer.log));
-    }
-    let size = offer_json["size_gb"].as_f64().map_or_else(
-        || "size unknown".to_string(),
-        |gb| format!("{gb:.1} GB download"),
-    );
-    say(
-        out,
-        Stage::Starter,
-        &format!(
-            "Starter model: {} {} ({size}), runs on {} at {} context.",
-            offer_json["model"].as_str().unwrap_or("?"),
-            offer_json["quant"].as_str().unwrap_or("?"),
-            offer_json["mode"].as_str().unwrap_or("?").to_uppercase(),
-            offer_json["context"].as_str().unwrap_or("?"),
-        ),
-    );
-    if let Some(reason) = offer_json["reason"].as_str() {
-        let _ = writeln!(out, "      {reason}");
-    }
-    if !options.yes {
-        if !host.is_tty() {
-            return Err(Failure::new(
+    // 4. The model: the one an earlier setup recorded when LocalBox still
+    // serves it (a rerun keeps what works rather than sizing again with that
+    // model's own memory in use), else the starter sized for this computer.
+    let recorded = host
+        .user_config()
+        .map_err(|error| Failure::new(Stage::Starter, error))?
+        .as_deref()
+        .and_then(recorded_model);
+    let (key, serve_args) = match (recorded, serving_model(host, None)?) {
+        (Some(recorded), (Some(serving), Some(_))) if recorded == serving => {
+            say(
+                out,
                 Stage::Starter,
-                "add --yes to download it without asking",
-            ));
+                &format!("{recorded} is already set up and running; keeping it."),
+            );
+            (recorded, Vec::new())
         }
-        let yes = host
-            .confirm("Download it now? (files already downloaded are checked, not fetched again)")
-            .map_err(|error| Failure::new(Stage::Starter, error))?;
-        if !yes {
-            return Err(Failure::new(Stage::Starter, "the download was declined"));
-        }
-    }
-    let mut download_args = starter_args.clone();
-    download_args.push("--download".to_string());
-    let fetched = host
-        .run(Stage::Starter, "localbox", &download_args, true)
-        .map_err(|error| Failure::new(Stage::Starter, error))?;
-    let fetched_json = parse_json(&fetched.stdout).unwrap_or_default();
-    if !fetched.success || fetched_json["status"] == "error" {
-        let why = fetched_json["error"]
-            .as_str()
-            .unwrap_or("the download did not complete");
-        return Err(Failure::new(Stage::Starter, why).with_log(fetched.log));
-    }
-    let key = fetched_json["catalog_key"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Failure::new(Stage::Starter, "LocalBox did not name the installed model")
-                .with_log(fetched.log.clone())
-        })?;
-    let serve_args: Vec<String> = match fetched_json["serve_args"].as_array() {
-        Some(args) => args
-            .iter()
-            .filter_map(|arg| arg.as_str().map(str::to_string))
-            .collect(),
-        None => {
-            let why = fetched_json["limitation"]
-                .as_str()
-                .unwrap_or("LocalBox gave no start command for it");
-            return Err(Failure::new(Stage::Starter, why).with_log(fetched.log));
-        }
+        _ => offer_starter(options, host, out)?,
     };
-    say(
-        out,
-        Stage::Starter,
-        &format!("{key} is downloaded and checked."),
-    );
 
     // 5. A verified server on LocalBox's own proxy port, the one a restart
     // uses: reuse one already serving this model, or probe the model (CUDA,
@@ -523,14 +480,16 @@ fn local_model(
             say(
                 out,
                 Stage::Server,
-                &format!("{key} answers on the {probed} build. Starting it..."),
+                &format!("{key} answers on the {probed} build. Starting it (this can take a few minutes)..."),
             );
             let served = host
                 .run(
                     Stage::Server,
                     "localbox",
                     &launch_args("serve", &serve_args, &[]),
-                    true,
+                    // Hidden: the server it leaves running must not hold this
+                    // process's standard error open.
+                    false,
                 )
                 .map_err(|error| Failure::new(Stage::Server, error))?;
             let receipt = parse_json(&served.stdout).unwrap_or_default();
@@ -641,19 +600,17 @@ fn local_model(
         adopt.push("--replace-existing".to_string());
     }
     let adopted = host
-        .run(Stage::Adopt, "localpilot", &adopt, true)
+        .run(Stage::Adopt, "localpilot", &adopt, false)
         .map_err(|error| Failure::new(Stage::Adopt, error))?;
     if !adopted.success {
-        return Err(Failure::new(
-            Stage::Adopt,
-            if replace {
-                "LocalPilot could not be pointed at the model"
-            } else {
-                "LocalPilot could not be pointed at the model; if its log lists settings it \
-                     would replace, run again with --replace-provider to replace them"
-            },
-        )
-        .with_log(adopted.log));
+        let why =
+            last_line(&adopted.stderr).unwrap_or("LocalPilot could not be pointed at the model");
+        let message = if replace {
+            why.to_string()
+        } else {
+            format!("{why} (to replace settings it lists, run again with --replace-provider)")
+        };
+        return Err(Failure::new(Stage::Adopt, message).with_log(adopted.log));
     }
     // Read back what was written: the default, the address and the key must
     // all name this server, or a later restart would bring back another one.
@@ -690,6 +647,115 @@ fn local_model(
         &format!("LocalPilot now uses {key} at {endpoint} by default."),
     );
     Ok(model)
+}
+
+/// Offer the starter LocalBox sizes for this computer and download it after a
+/// yes. Returns its catalog key and the start command LocalBox gave for it.
+fn offer_starter(
+    options: &Options,
+    host: &mut dyn Host,
+    out: &mut dyn Write,
+) -> Result<(String, Vec<String>), Failure> {
+    let say = |out: &mut dyn Write, stage: Stage, text: &str| {
+        let _ = writeln!(out, "[{}/{}] {}", stage.number(), Stage::COUNT, text);
+    };
+    let starter_args = vec!["starter".to_string(), "--json".to_string()];
+    let offer = host
+        .run(Stage::Starter, "localbox", &starter_args, false)
+        .map_err(|error| Failure::new(Stage::Starter, error))?;
+    let offer_json = parse_json(&offer.stdout).ok_or_else(|| {
+        Failure::new(Stage::Starter, "LocalBox did not describe a starter model")
+            .with_log(offer.log.clone())
+    })?;
+    if !offer.success || offer_json["status"] == "error" {
+        let why = offer_json["error"]
+            .as_str()
+            .unwrap_or("no starter model fits this computer");
+        return Err(Failure::new(Stage::Starter, why).with_log(offer.log));
+    }
+    let size = offer_json["size_gb"].as_f64().map_or_else(
+        || "size unknown".to_string(),
+        |gb| format!("{gb:.1} GB download"),
+    );
+    say(
+        out,
+        Stage::Starter,
+        &format!(
+            "Starter model: {} {} ({size}), runs on {} at {} context.",
+            offer_json["model"].as_str().unwrap_or("?"),
+            offer_json["quant"].as_str().unwrap_or("?"),
+            offer_json["mode"].as_str().unwrap_or("?").to_uppercase(),
+            offer_json["context"].as_str().unwrap_or("?"),
+        ),
+    );
+    if let Some(reason) = offer_json["reason"].as_str() {
+        let _ = writeln!(out, "      {reason}");
+    }
+    if !options.yes {
+        if !host.is_tty() {
+            return Err(Failure::new(
+                Stage::Starter,
+                "add --yes to download it without asking",
+            ));
+        }
+        let yes = host
+            .confirm("Download it now? (files already downloaded are checked, not fetched again)")
+            .map_err(|error| Failure::new(Stage::Starter, error))?;
+        if !yes {
+            return Err(Failure::new(Stage::Starter, "the download was declined"));
+        }
+    }
+    let mut download_args = starter_args.clone();
+    download_args.push("--download".to_string());
+    // Fetch exactly what was offered: LocalBox stops before downloading when
+    // its recommendation has changed since (memory freed or taken meanwhile).
+    // An older LocalBox names no offer and cannot make that check, so
+    // nothing is downloaded through it.
+    let Some(offer_id) = offer_json["offer"].as_str().filter(|id| !id.is_empty()) else {
+        return Err(Failure::new(
+            Stage::Starter,
+            "this LocalBox cannot confirm the offer before downloading; update it with \
+             `localx install localbox`, then run setup again",
+        )
+        .with_log(offer.log));
+    };
+    download_args.push("--expect".to_string());
+    download_args.push(offer_id.to_string());
+    let fetched = host
+        .run(Stage::Starter, "localbox", &download_args, true)
+        .map_err(|error| Failure::new(Stage::Starter, error))?;
+    let fetched_json = parse_json(&fetched.stdout).unwrap_or_default();
+    if !fetched.success || fetched_json["status"] == "error" {
+        let why = fetched_json["error"]
+            .as_str()
+            .unwrap_or("the download did not complete");
+        return Err(Failure::new(Stage::Starter, why).with_log(fetched.log));
+    }
+    let key = fetched_json["catalog_key"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Failure::new(Stage::Starter, "LocalBox did not name the installed model")
+                .with_log(fetched.log.clone())
+        })?;
+    let serve_args: Vec<String> = match fetched_json["serve_args"].as_array() {
+        Some(args) => args
+            .iter()
+            .filter_map(|arg| arg.as_str().map(str::to_string))
+            .collect(),
+        None => {
+            let why = fetched_json["limitation"]
+                .as_str()
+                .unwrap_or("LocalBox gave no start command for it");
+            return Err(Failure::new(Stage::Starter, why).with_log(fetched.log));
+        }
+    };
+    say(
+        out,
+        Stage::Starter,
+        &format!("{key} is downloaded and checked."),
+    );
+    Ok((key, serve_args))
 }
 
 /// The model LocalBox says the proxy serves (on `port`, or its configured
@@ -833,6 +899,19 @@ fn recorded_model(config: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether an engine update failed only because the installed engine's
+/// files are in use (a model is running from them).
+fn engine_files_in_use(engine: &Output) -> bool {
+    let text = format!("{}\n{}", engine.stdout, engine.stderr).to_ascii_lowercase();
+    text.contains("os error 32")
+        || text.contains("being used by another process")
+        || text.contains("text file busy")
+}
+
+fn last_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).rfind(|line| !line.is_empty())
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
 }
@@ -916,9 +995,15 @@ impl System {
             .status()
             .map_err(|error| format!("could not run {tool}: {error}"))?;
         let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+        let stderr = if visible {
+            String::new()
+        } else {
+            std::fs::read_to_string(&stderr_path).unwrap_or_default()
+        };
         Ok(Output {
             success: status.success(),
             stdout,
+            stderr,
             log: Some(if visible { stdout_path } else { stderr_path }),
         })
     }
@@ -1041,6 +1126,7 @@ mod tests {
         Output {
             success: true,
             stdout: stdout.to_string(),
+            stderr: String::new(),
             log: Some(PathBuf::from("step.log")),
         }
     }
@@ -1052,7 +1138,7 @@ mod tests {
         }
     }
 
-    const STARTER: &str = r#"{"model":"Qwen3.5 9B","quant":"Q4_K_M","mode":"gpu","context":"64k","size_gb":5.3,"status":"recommended","reason":"fits"}"#;
+    const STARTER: &str = r#"{"model":"Qwen3.5 9B","quant":"Q4_K_M","mode":"gpu","context":"64k","size_gb":5.3,"status":"recommended","reason":"fits","offer":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M:gpu:64k"}"#;
     const DOWNLOADED: &str = r#"{"status":"recommended","catalog_key":"qwen3-5-9b","serve_args":["serve","qwen3-5-9b","--quant","Q4_K_M","--context","64k","--no-auto-best"]}"#;
     const PROBED: &str = r#"{"ok":true,"model":"qwen3-5-9b","backend":{"tag":"b1","variant":"vulkan"},"fallbacks":[{"variant":"cuda-13","reason":"the model did not answer"}],"serving":false,"endpoint":null}"#;
     const SERVE_RECEIPT: &str = "{\n  \"ok\": true,\n  \"model\": \"qwen3-5-9b\",\n  \"endpoint\": \"http://127.0.0.1:11435\",\n  \"proxyPort\": 11435,\n  \"backend\": {\"tag\": \"b1\", \"variant\": \"vulkan\"},\n  \"profile\": {\"source\": \"tuned\", \"profile\": \"balanced\"},\n  \"launchArguments\": [\"-m\", \"model.gguf\", \"-c\", \"65536\"]\n}\n";
@@ -1188,6 +1274,9 @@ mod tests {
              --allow-untuned --json"
         ));
         assert!(fake.ran("localbox models --json --proxy-port 11435"));
+        assert!(fake.ran(
+            "localbox starter --json --download --expect unsloth/Qwen3.5-9B-GGUF:Q4_K_M:gpu:64k"
+        ));
         let adopt = fake
             .calls
             .iter()
@@ -1421,6 +1510,131 @@ mod tests {
             failure.message
         );
         assert!(!out.contains("Setup is done"), "{out}");
+    }
+
+    #[test]
+    fn an_engine_in_use_is_kept_and_a_missing_one_stops_setup() {
+        let in_use = Output {
+            success: false,
+            stderr: "Error: could not move the existing install aside: The process cannot \
+                     access the file because it is being used by another process. (os error 32)\n"
+                .into(),
+            ..ok("")
+        };
+        let mut fake = Fake::fresh()
+            .answer("localbox update", in_use.clone())
+            .answer("localbox models --json", ok(SERVED));
+        let (result, out) = run_fake(&yes(), &mut fake);
+        assert_eq!(result, Ok(()), "{out}");
+        assert!(
+            out.contains("the engine could not be updated while qwen3-5-9b is running"),
+            "{out}"
+        );
+
+        // In use, but LocalBox serves nothing (or cannot say): the update's own
+        // reason stops setup at the engine step.
+        let mut fake = Fake::fresh().answer("localbox update", in_use.clone());
+        let (result, _) = run_fake(&yes(), &mut fake);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.stage, Stage::Engine);
+        assert!(
+            failure.message.contains("os error 32"),
+            "{}",
+            failure.message
+        );
+        assert!(!fake.ran("localbox starter"));
+        let mut fake = Fake::fresh()
+            .answer("localbox update", in_use)
+            .answer("localbox models --json", failed(""));
+        let (result, _) = run_fake(&yes(), &mut fake);
+        assert_eq!(result.unwrap_err().stage, Stage::Engine);
+
+        // Any other failure stops, even with a model serving.
+        let offline = Output {
+            success: false,
+            stderr: "Error: could not reach github.com\n".into(),
+            ..ok("")
+        };
+        let mut fake = Fake::fresh()
+            .answer("localbox update", offline)
+            .answer("localbox models --json", ok(SERVED));
+        let (result, _) = run_fake(&yes(), &mut fake);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.stage, Stage::Engine);
+        assert_eq!(failure.message, "Error: could not reach github.com");
+        assert!(!fake.ran("localbox models"));
+    }
+
+    #[test]
+    fn a_failed_adopt_reports_what_localpilot_said() {
+        let refused = Output {
+            success: false,
+            stderr: "note\nError: LocalBox is not installed\n".into(),
+            ..ok("")
+        };
+        let mut fake = Fake::fresh().answer("localpilot localbox adopt", refused);
+        let (result, _) = run_fake(&yes(), &mut fake);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.stage, Stage::Adopt);
+        assert_eq!(
+            failure.message,
+            "Error: LocalBox is not installed (to replace settings it lists, run again with \
+             --replace-provider)"
+        );
+    }
+
+    #[test]
+    fn a_rerun_keeps_the_recorded_model_while_localbox_serves_it() {
+        let mut fake = Fake::fresh().answer("localbox models --json", ok(SERVED));
+        fake.config = Some(ADOPTED.to_string());
+        let (result, out) = run_fake(&yes(), &mut fake);
+        assert_eq!(result, Ok(()), "{out}");
+        assert!(
+            out.contains("qwen3-5-9b is already set up and running; keeping it."),
+            "{out}"
+        );
+        assert!(!fake.ran("localbox starter"), "{:?}", fake.calls);
+        assert!(!fake.ran("localbox probe"));
+        // Recorded but no longer served: the starter is offered again.
+        let mut fake = Fake::fresh();
+        fake.config = Some(ADOPTED.to_string());
+        let (result, out) = run_fake(&yes(), &mut fake);
+        assert_eq!(result, Ok(()), "{out}");
+        assert!(fake.ran("localbox starter --json --download"));
+    }
+
+    #[test]
+    fn an_offer_without_an_id_downloads_nothing() {
+        let old = STARTER.replace(r#","offer":"unsloth/Qwen3.5-9B-GGUF:Q4_K_M:gpu:64k""#, "");
+        assert!(!old.contains("offer"));
+        let mut fake = Fake::fresh().answer("localbox starter --json", ok(&old));
+        fake.rules.swap(0, 1);
+        let (result, _) = run_fake(&yes(), &mut fake);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.stage, Stage::Starter);
+        assert!(
+            failure.message.contains("localx install localbox"),
+            "{}",
+            failure.message
+        );
+        assert!(!fake.ran("localbox starter --json --download"));
+    }
+
+    #[test]
+    fn a_changed_offer_stops_before_anything_is_downloaded() {
+        let changed = failed(
+            r#"{"status":"error","stage":"offer","error":"the starter offer changed from a to b since it was shown"}"#,
+        );
+        let mut fake = Fake::fresh().answer("localbox starter --json --download", changed);
+        let (result, _) = run_fake(&yes(), &mut fake);
+        let failure = result.unwrap_err();
+        assert_eq!(failure.stage, Stage::Starter);
+        assert!(
+            failure.message.starts_with("the starter offer changed"),
+            "{}",
+            failure.message
+        );
+        assert!(!fake.ran("localbox probe"));
     }
 
     #[test]

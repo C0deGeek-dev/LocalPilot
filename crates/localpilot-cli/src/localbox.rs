@@ -155,8 +155,11 @@ async fn read_models_catalog_for(proxy_port: u16) -> anyhow::Result<LocalBoxMode
 }
 
 async fn read_models_catalog_with(extra: &[String]) -> anyhow::Result<LocalBoxModelsCatalog> {
-    let program = localbox_on_path()
-        .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
+    let program = localbox_on_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)"
+        )
+    })?;
     let output = tokio::process::Command::new(program)
         .args(["models", "--json"])
         .args(extra)
@@ -495,11 +498,17 @@ pub(crate) enum LocalBoxState {
     },
 }
 
-/// Resolve `localbox` on `PATH` without a `which` dependency. Returns the first
-/// `PATH` entry holding an executable named `localbox` (with the platform's
-/// executable suffix), or `None` when none exists.
+/// Resolve the installed `localbox` without a `which` dependency: the copy in
+/// the LocalX bin directory when there is one, else the first `PATH` entry
+/// holding an executable named `localbox` (with the platform's executable
+/// suffix), or `None` when neither exists.
 pub(crate) fn localbox_on_path() -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path_var| localbox_in_paths(&path_var))
+    // The LocalX bin directory first: the stack installs LocalBox there, and a
+    // shell with only the system PATH (a first run) still finds it.
+    let shared = localpilot_stack::shared_bin_dir()
+        .map(|dir| dir.join(format!("localbox{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|candidate| candidate.is_file());
+    shared.or_else(|| std::env::var_os("PATH").and_then(|path_var| localbox_in_paths(&path_var)))
 }
 
 /// The `PATH`-splitting core of [`localbox_on_path`], taking the `PATH` value so
@@ -996,7 +1005,9 @@ pub(crate) async fn run_adopt(
     });
     if let Some(entry) = serve_entry.as_ref().filter(|_| !target_is_running) {
         if matches!(state, LocalBoxState::NotInstalled) {
-            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)");
+            anyhow::bail!(
+                "LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)"
+            );
         }
         let model = &entry.name;
         // Starting a server loads a model and binds a port — a real side
@@ -1020,7 +1031,7 @@ pub(crate) async fn run_adopt(
         let _ = &serving;
         match state {
             LocalBoxState::NotInstalled => {
-                anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
+                anyhow::bail!("LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)")
             }
             LocalBoxState::InstalledNotRunning => anyhow::bail!(
                 "no running LocalBox server found — run `/localbox serve <model>` or `localbox serve <model>` first"
@@ -1168,8 +1179,11 @@ async fn start_localbox_serve(
     stdio: ServeStdio,
     cancel: Option<&CancellationToken>,
 ) -> anyhow::Result<ServeWait> {
-    let program = localbox_on_path()
-        .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
+    let program = localbox_on_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)"
+        )
+    })?;
     let mut command = tokio::process::Command::new(program);
     command
         .args(localbox_serve_args(model, allow_untuned))
@@ -1334,7 +1348,9 @@ where
     });
     if let Some(model) = request.serve.filter(|_| !target_is_running) {
         if matches!(state, LocalBoxState::NotInstalled) {
-            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)");
+            anyhow::bail!(
+                "LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)"
+            );
         }
         let permission = PermissionRequest {
             tool: "localbox serve".to_string(),
@@ -1356,7 +1372,7 @@ where
     } else if request.serve.is_none() && !matches!(state, LocalBoxState::Running { .. }) {
         match state {
             LocalBoxState::NotInstalled => {
-                anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
+                anyhow::bail!("LocalBox is not installed (no `localbox` in the LocalX bin directory or on PATH)")
             }
             LocalBoxState::InstalledNotRunning => anyhow::bail!(
                 "no running LocalBox server found — use `/localbox serve <model>` or run `localbox serve <model>` first"

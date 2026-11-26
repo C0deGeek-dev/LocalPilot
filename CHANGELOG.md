@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot localbox` commands find LocalBox in the LocalX bin directory
+  before searching PATH, so they work from a shell whose PATH does not list
+  it yet, such as the first run right after an install. `localx setup` goes
+  on with the installed engine when an update cannot replace it because a
+  model is running, and reports the error LocalPilot gave when adopting the
+  server fails.
+
 - `localx setup` is the guided first run: it checks the tools, keeps an
   existing provider or sets up a local one, installs the engine, offers the
   starter model LocalBox sizes for this computer (with its download size),

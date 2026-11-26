@@ -161,9 +161,17 @@ It runs eight steps and says which one it is on:
 1. Checks that LocalPilot and LocalBox are installed.
 2. Keeps a provider you already use (`--existing`) or sets up a local model
    (`--local`); at a terminal it asks.
-3. Installs or confirms the llama.cpp engine (`localbox update`).
-4. Shows the starter model LocalBox sizes for this computer's memory, with its
-   download size, and downloads it after you agree (`--yes` agrees). Files
+3. Installs or confirms the llama.cpp engine (`localbox update`). When the
+   update fails only because a model LocalBox serves is running from the
+   engine's files, setup says so and uses the installed engine; any other
+   failure stops here with the update's own reason.
+4. Keeps the model an earlier setup recorded when LocalBox still serves it
+   (a rerun does not size again while that model fills the GPU). Otherwise it
+   shows the starter model LocalBox sizes for this computer's memory, with its
+   download size, and downloads it after you agree (`--yes` agrees). Only the
+   model you agreed to is downloaded: if memory use changed in between and
+   LocalBox would now offer another, setup stops before fetching (a LocalBox
+   too old to make that check is not used for the download). Files
    already downloaded are checked, not fetched again.
 5. Finds the engine build that runs it — CUDA, then Vulkan, then CPU — with
    `localbox probe --fallback`, then serves it on LocalBox's own proxy port
