@@ -11,6 +11,34 @@ tools. Windows, Linux, and macOS are all tier-1.
 
 ## Install
 
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+Linux / macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+```
+
+No Rust toolchain is needed. On Windows the installer puts LocalX on `PATH`
+and, when the installed release includes it, continues into the guided first
+run; elsewhere, add the printed directory to `PATH` and run it yourself:
+
+```sh
+localx setup              # local model sized to this computer, LocalPilot pointed at it, chat
+localx setup --existing   # keep a provider you already use
+```
+
+`localx setup` arrives in the first release after v6.0.0; until then it needs a
+current source build.
+Setup is safe to run again. After a restart, `localpilot` starts the model
+setup made its default through LocalBox by itself.
+
+### Build from source
+
 Clone with submodules (the LocalMind learning engine is vendored as one), then
 build:
 

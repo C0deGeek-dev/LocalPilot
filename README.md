@@ -43,6 +43,12 @@ and open it. Paste this command, then press **Enter**:
 irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
 ```
 
+When the install finishes and the installed release includes the guided first
+run, `localx setup`, the Windows installer continues into it (see
+[Your first coding session](#your-first-coding-session)). With an older
+release, run `localx update` once a release with setup is published, then
+`localx setup`.
+
 **Linux (x86-64 or ARM64) / macOS (Apple Silicon):** open **Terminal**, paste
 this command, then press **Enter**:
 
@@ -81,15 +87,39 @@ installer if it differs.
 localx status
 ```
 
-You should see the installed tools and engine. **Installing the tools does not
-download an AI model**; choose one when you start using LocalBox.
+You should see the installed tools and engine. **Installing the tools alone does
+not download an AI model**; the guided first run below offers one sized to this
+computer and asks before downloading it.
 
 Want to read the installer before running it, check platform support, or install
 a specific version? See the [installation guide](docs/install.md).
 
 ## Your first coding session
 
-**For local models:** Open a terminal in the project folder you want to
+**For a local model:** run the guided first run (on Windows the installer
+starts it when the release includes it; run it again at any time):
+
+```sh
+localx setup
+```
+
+It installs or confirms the model engine, shows the starter model LocalBox
+sizes for this computer's memory with its download size, downloads it after
+you agree, finds the engine build that runs it (CUDA, then Vulkan, then CPU),
+makes it LocalPilot's default in every folder, checks a reply and opens chat.
+(It arrives in the first release after v6.0.0; until then it needs a current
+source build.) Already using another provider? `localx setup --existing` keeps it. Running
+setup again is safe: each step looks before it acts, and a failed step names
+its log and the command to run it again. See the
+[installation guide](docs/install.md#first-run-localx-setup) for every step.
+
+After a restart there is nothing to run again: when setup made the model
+LocalPilot's default, `localpilot` finds its address down and asks LocalBox to
+start the same model (a model set up another way: run `localx setup` once, or
+start it as before; see [providers](docs/providers.md#using-a-localbox-local-model)). If that fails, the
+message names the step that failed, its log and the exact retry command.
+
+**To pick a model yourself,** open a terminal in the project folder you want to
 work on, then launch the guided model picker:
 
 ```sh
@@ -131,9 +161,13 @@ may require its own account and API key.
 | Diagnose installation problems | `localx doctor` |
 | Retry an incomplete installation | `localx install` |
 | Run or finish the guided first run (local model, then chat) | `localx setup` |
+| Start the local model again after it stopped | `localbox serve --again` (LocalPilot does this for you) |
 
 Ordinary installs use published releases; updates do not require Rust or Git.
 If a command is “not recognized” or “not found”, complete the PATH step above.
+If LocalPilot says the local model is not usable, it names the stage, the log
+and the command to retry; see
+[troubleshooting](docs/wiki/Troubleshooting.md#the-local-model-is-not-usable).
 If an older installation is taking precedence, `localx doctor` identifies it;
 review its findings before using `localx doctor --fix` to remove old copies.
 

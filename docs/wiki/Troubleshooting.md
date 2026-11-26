@@ -36,6 +36,36 @@ reports a "local knowledge review" and says why.
 Only the fullscreen session can ask for web consent; a piped run has no web
 access.
 
+## `localx setup` stopped at a step
+
+Setup prints the step that failed, the log to read (each run keeps its own
+folder under `localx/logs/` in the LocalX data directory) and the command to
+run it again. Steps look before they act, so running `localx setup` again is
+safe. `--yes` never replaces a different default provider; that takes
+`--replace-provider`.
+
+## The local model is not usable
+
+When the LocalBox model LocalPilot uses is down, a session asks LocalBox to
+start the same model again. If that fails, the error names the stage:
+
+- **start** — LocalBox could not start it. Common reasons: no saved launch
+  for that port (a model adopted before LocalBox saved serves, or served with
+  options a replay cannot repeat: run `localx setup` once, or
+  `localbox serve <model>` once), or the
+  port is already in use. LocalPilot and `serve --again` leave a program on
+  the port alone: close or reconfigure it, then retry. When the message says
+  LocalBox already serves another model there, `localbox stop` frees it (it
+  stops every LocalBox model server, not only that one).
+- **readiness** — the model was started but its address did not answer with
+  that model in time. Read the start log it names, and `localbox log`.
+- **first reply** — the model was reachable but the first request failed.
+
+Each message ends with the exact retry (`localbox serve --again --proxy-port
+<port> --expect-model <model>`), `localbox status` to check, and the fallback
+(`localx setup`, or `--provider <name>` for another provider). Detail:
+[providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md#using-a-localbox-local-model).
+
 ## `chat` says the feature isn't available
 
 The interactive REPL needs the `tui` build feature:

@@ -155,6 +155,10 @@ follows a successful install when the installed `localx` has one.
 
 ### First run: `localx setup`
 
+`localx setup`, and the restart behaviour below, arrive in the first release
+after v6.0.0; until `localx update` installs that release, they need a
+current source build.
+
 `localx setup` takes a fresh install to a working local model and opens chat.
 It runs eight steps and says which one it is on:
 
@@ -189,9 +193,13 @@ It runs eight steps and says which one it is on:
    settings in the current folder override the provider, since it would
    read them and could talk to another server.
 
-After a restart, nothing needs to be run again: the next `localpilot` finds
-the model's address down and asks LocalBox to start the same launch (see
-[providers](providers.md#using-a-localbox-local-model)).
+After a restart, nothing needs to be run again for the model setup made
+LocalPilot's default: the next `localpilot` finds its address down and asks
+LocalBox to start the same saved launch (see
+[providers](providers.md#using-a-localbox-local-model)). When that start, the
+wait for the model or its first reply fails, the message names the stage, the
+log and the exact retry and fallback commands (see
+[troubleshooting](wiki/Troubleshooting.md#the-local-model-is-not-usable)).
 
 Setup is safe to run again: each step looks before it acts. `--yes` never
 replaces a different default provider, or local settings that name another

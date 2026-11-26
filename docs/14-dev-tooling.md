@@ -270,7 +270,7 @@ cargo check -p localpilot-llm-openai
 
 The provider layer is split into `localpilot-llm-core` (shared contract) plus one
 crate per adapter (`-openai`, `-anthropic`) under the `localpilot-llm` umbrella
-(see [02-architecture.md](02-architecture.md#localpilot-llm--core--openai--anthropic)).
+(see [02-architecture.md](02-architecture.md#localpilot-llm---core--openai--anthropic)).
 Check a single adapter with `cargo check -p localpilot-llm-<adapter>` — its
 compilation unit is the one adapter, not the old 5.9k-line monolith, and the other
 adapter and the core contract are not re-checked. A full `cargo build --workspace`

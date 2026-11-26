@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Docs: the README and the wiki's Getting Started lead with the one-line
+  installer and `localx setup` (including `--existing` and safe re-runs);
+  the wiki's Troubleshooting explains a stopped setup step and the
+  start/readiness/first-reply stages of an unusable local model. The docs say
+  that the installer hands over only from a release that includes setup, and
+  that restarting the model needs a setup-made default with a saved launch.
+
 - A chat, `print` or `ask` on the LocalBox model you adopted with
   `localpilot localbox adopt --user` starts it again when its address does not answer,
   for example after a restart: LocalPilot asks LocalBox to start the launch

@@ -107,7 +107,9 @@ block.
   or the first request fails, the message names the stage, the log and the
   commands to retry (`localbox serve --again --proxy-port <port>
   --expect-model <model>`), check (`localbox status`) or set up again
-  (`localx setup`).
+  (`localx setup`). A model adopted before LocalBox saved serves, or last
+  served with options a replay cannot repeat, has no saved launch: run
+  `localx setup` once, or start it the way you did before.
 - **Inside a running chat session**, `/localbox models` lists LocalBox's actual
   launch catalog—not merely the model currently answering `/v1/models`. Each
   row starts with the exact copy-pasteable model key and includes aliases,
