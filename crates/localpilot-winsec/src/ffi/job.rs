@@ -215,12 +215,32 @@ mod tests {
         .unwrap();
     }
 
+    /// The marker's text once it can be read and is not empty. A writer that
+    /// creates the file in place can still hold it open (a sharing violation)
+    /// or not have flushed it yet when it first exists.
+    async fn read_marker(path: &std::path::Path) -> String {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    if !text.trim().is_empty() {
+                        return text.trim().to_string();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn closing_one_job_kills_an_exited_parents_descendant_and_leaves_other_jobs_alive() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("descendant.ps1"),
-            "Set-Content started $PID; while (!(Test-Path released)) { Start-Sleep -Milliseconds 20 }; Set-Content leaked bad",
+            // Publish the marker whole: write it under another name, then rename,
+            // so the test never opens it while this process still has it open.
+            "Set-Content started.tmp $PID; Rename-Item started.tmp started; while (!(Test-Path released)) { Start-Sleep -Milliseconds 20 }; Set-Content leaked bad",
         )
         .unwrap();
         let script = "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -File ./descendant.ps1' -RedirectStandardOutput out.txt -RedirectStandardError err.txt";
@@ -237,9 +257,8 @@ mod tests {
         .unwrap();
         marker(&dir.path().join("started")).await;
         marker(&other.path().join("started")).await;
-        let descendant_pid: u32 = std::fs::read_to_string(dir.path().join("started"))
-            .unwrap()
-            .trim()
+        let descendant_pid: u32 = read_marker(&dir.path().join("started"))
+            .await
             .parse()
             .unwrap();
         // SAFETY: OpenProcess returns a new owned handle with only wait rights.
