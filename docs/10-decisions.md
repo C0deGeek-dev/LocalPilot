@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0296: Windows Binaries Link The C Runtime Statically; The Installer Offers Microsoft's Runtime For llama.cpp
+
+**Status:** accepted · **Date:** 2026-11-26. Applies to LocalPilot, LocalBox,
+LocalMind and LocalBench.
+
+**Context.** A fresh Windows has no Microsoft Visual C++ Redistributable. Every
+LocalX Windows binary up to v6.0.0 imported `vcruntime140.dll`, so on such a
+machine `localx.exe` exited with STATUS_DLL_NOT_FOUND (0xC0000135) before it
+could print anything, and the installer could only say the stack install did
+not complete. llama.cpp's official Windows builds, which LocalBox installs as
+the model engine, import `vcruntime140.dll`, `vcruntime140_1.dll` and
+`msvcp140.dll` too; LocalX does not build them.
+
+**Decision.**
+1. **Static C runtime.** Each repository's `.cargo/config.toml` sets
+   `-C target-feature=+crt-static` for `x86_64-pc-windows-msvc` and
+   `aarch64-pc-windows-msvc`, so dev, CI and release builds link the same way.
+   `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` replace config rustflags, so a build
+   that sets them must carry the flag itself. A source install builds from the
+   checkout so the config applies.
+2. **Release guard.** Each release workflow runs `dumpbin /dependents` over every
+   staged `.exe`/`.dll` on Windows and fails on `vcruntime*`, `msvcp*` or
+   `api-ms-win-crt-*` imports.
+3. **The installer offers the redistributable, never silently.** When the three
+   DLLs are missing from the native system directory (Sysnative for a 32-bit
+   shell), `install.ps1` explains why and asks `[y/N]` (default No) only when a
+   console can answer; `-InstallVCRuntime` is the explicit unattended consent
+   and `-NoRuntime` skips the check. With consent it downloads Microsoft's
+   permanent x64 link to a unique temporary file, holds the file open against
+   writes and deletes, runs it only when its Authenticode signature is valid and
+   the signing certificate's common name is exactly "Microsoft Corporation",
+   runs `/install /passive /norestart` elevated, re-checks the DLLs and never
+   restarts the computer (3010/1641 are reported as restart required). x64
+   only; other architectures get guidance.
+4. **Errors name the cause.** The installer turns a STATUS_DLL_NOT_FOUND exit
+   into a plain message naming the redistributable, and LocalBox's load probe
+   says Windows could not find a DLL, naming the runtime DLLs and Microsoft's
+   link only when they are absent.
+
+**Alternatives rejected.** Bundling the runtime DLLs beside `llama-server.exe`
+(app-local deployment) would ship Microsoft binaries inside archives LocalX
+does not build and leave them unserviced by Windows Update. Building llama.cpp
+statically would make LocalX the engine's builder. Installing the
+redistributable without asking changes the whole computer behind the user's
+back.
+
+**Consequences.** The LocalX tools start on a fresh Windows without the
+runtime; local models still need it, and the user decides whether to install
+it. The release fails rather than ship a binary that needs it.
+
 ## ADR-0295: A Session Starts The Adopted LocalBox Model When Its Endpoint Is Down
 
 **Status:** accepted · **Date:** 2026-11-26. Amends ADR-0130 (LocalPilot
