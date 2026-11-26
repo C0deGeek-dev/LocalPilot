@@ -22,6 +22,7 @@ use localpilot_dist::Version;
 use localpilot_stack::{dev, doctor, installed, Channel, Running, Selection};
 
 mod powershell;
+mod setup;
 
 /// This binary's version, embedded at build time.
 const VERSION: &str = env!("LOCALX_VERSION");
@@ -84,6 +85,26 @@ enum Command {
     },
     /// Show the installed version of every stack tool and the engine.
     Status,
+    /// Guided first run: a starter model sized for this computer, a verified
+    /// local server, LocalPilot pointed at it, a first reply, then chat.
+    /// Safe to run again; it picks up where it stopped.
+    Setup {
+        /// Set up a local model even when another provider is configured.
+        #[arg(long)]
+        local: bool,
+        /// Keep the provider already configured and skip the local model.
+        #[arg(long, conflicts_with = "local")]
+        existing: bool,
+        /// Download and start without asking. Never replaces another provider.
+        #[arg(long)]
+        yes: bool,
+        /// Make the local model the default even though another provider is.
+        #[arg(long)]
+        replace_provider: bool,
+        /// Stop after the first reply instead of opening chat.
+        #[arg(long)]
+        no_chat: bool,
+    },
     /// Run a stack tool: `localx <tool> [args…]`.
     #[command(external_subcommand)]
     Tool(Vec<String>),
@@ -132,6 +153,22 @@ async fn main() -> ExitCode {
         Command::Dev { action } => development(&action, &mut out),
         Command::Doctor { fix } => doctor_command(fix, &mut out),
         Command::Status => status(&mut out),
+        Command::Setup {
+            local,
+            existing,
+            yes,
+            replace_provider,
+            no_chat,
+        } => {
+            let options = setup::Options {
+                local,
+                existing,
+                yes,
+                replace_provider,
+                no_chat,
+            };
+            return setup_command(&options, &mut out);
+        }
         Command::Tool(_) => unreachable!("handled above"),
     };
 
@@ -139,6 +176,28 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(std::io::stderr(), "error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run the guided first run and report where it stopped, if it did.
+fn setup_command(options: &setup::Options, out: &mut dyn Write) -> ExitCode {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let log_root = localpilot_dist::Cache::default_root("localx")
+        .unwrap_or_else(std::env::temp_dir)
+        .join("logs");
+    let mut host = setup::System {
+        tool_path,
+        log_dir: log_root.join(format!("setup-{stamp}")),
+        runs: 0,
+    };
+    match setup::run(options, &mut host, out) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            let _ = write!(std::io::stderr(), "{}", failure.report(options));
             ExitCode::FAILURE
         }
     }

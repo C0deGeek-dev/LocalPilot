@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localx setup` is the guided first run: it checks the tools, keeps an
+  existing provider or sets up a local one, installs the engine, offers the
+  starter model LocalBox sizes for this computer (with its download size),
+  finds the engine build that runs it (CUDA, then Vulkan, then CPU), serves it
+  on LocalBox's proxy port with the same settings, makes it LocalPilot's
+  default with `adopt --user` and reads the config back, asks for a first
+  reply, and opens chat. Each step looks before it acts, so it is safe to run
+  again; a failure names the step, its log and the command to retry. `--yes`
+  never replaces a different default provider; `--replace-provider` does.
+
 - `localpilot localbox adopt --user` makes a LocalBox server your default in
   every folder: it writes `[provider] default` and `[providers.local]` into
   your user config under its lock, keeping the rest of the file unchanged, and

@@ -2239,10 +2239,13 @@ version = "6.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "localpilot-config",
  "localpilot-dist",
  "localpilot-stack",
+ "serde_json",
  "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]

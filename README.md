@@ -130,6 +130,7 @@ may require its own account and API key.
 | See installed versions | `localx status` |
 | Diagnose installation problems | `localx doctor` |
 | Retry an incomplete installation | `localx install` |
+| Run or finish the guided first run (local model, then chat) | `localx setup` |
 
 Ordinary installs use published releases; updates do not require Rust or Git.
 If a command is “not recognized” or “not found”, complete the PATH step above.

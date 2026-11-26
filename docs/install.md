@@ -153,6 +153,39 @@ On Windows, the installer also accepts `-PowerShellShortcuts`, and `-NoSetup`
 to install without continuing into the guided first run (`localx setup`) that
 follows a successful install when the installed `localx` has one.
 
+### First run: `localx setup`
+
+`localx setup` takes a fresh install to a working local model and opens chat.
+It runs eight steps and says which one it is on:
+
+1. Checks that LocalPilot and LocalBox are installed.
+2. Keeps a provider you already use (`--existing`) or sets up a local model
+   (`--local`); at a terminal it asks.
+3. Installs or confirms the llama.cpp engine (`localbox update`).
+4. Shows the starter model LocalBox sizes for this computer's memory, with its
+   download size, and downloads it after you agree (`--yes` agrees). Files
+   already downloaded are checked, not fetched again.
+5. Finds the engine build that runs it — CUDA, then Vulkan, then CPU — with
+   `localbox probe --fallback`, then serves it on LocalBox's own proxy port
+   with the same settings and checks that the server runs the verified build
+   (its release tag and variant both).
+   A model already served there is used as it is.
+6. Makes it LocalPilot's default in every folder (`localpilot localbox adopt
+   --user`) and reads the user config back to check the default, the address
+   and the recorded model key.
+7. Asks the model for a one-word reply through LocalPilot, using the user
+   config alone (no project config, no `LOCALPILOT_PROVIDER*` variables) so
+   the reply comes from the server just checked. Anything that would
+   override it in the current folder is named afterwards.
+8. Opens chat (`--no-chat` stops before it).
+
+Setup is safe to run again: each step looks before it acts. `--yes` never
+replaces a different default provider, or local settings that name another
+server or model; that takes `--replace-provider` (or, for another provider,
+a yes at the terminal). When a step fails, setup prints the step, the log to read
+(each step's output is kept under `localx/logs/setup-<time>/` in the LocalX
+data directory) and the command to run it again.
+
 Run inside a LocalPilot checkout, the script builds **that working tree** rather
 than downloading a release — a developer running the installer in their own clone
 means their code. Pass `--binary` to override that.
@@ -245,6 +278,7 @@ localx update --release      # released binaries, even while development mode is
 localx install               # provision the stack + engine (idempotent)
 localx install localbox      # just one tool; `localx install engine` for the engine
 localx install powershell-shortcuts # optional PowerShell llm* compatibility commands
+localx setup                 # guided first run: a local model, LocalPilot pointed at it, chat
 localx status                # installed version of every tool, the engine, the channel
 localx doctor                # what is wrong with the install; `--fix` removes it
 localx localbox serve …      # run any stack tool: localx <tool> [args…]
